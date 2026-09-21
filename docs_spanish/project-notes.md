@@ -140,6 +140,34 @@ imita a un navegador, en lugar de usar `urlretrieve` directamente (ver el
 script para la solución y [download_gharchive.py](download_gharchive.py),
 la copia anotada, para la explicación completa).
 
+## Flujo de Control de Versiones (git add → commit → push)
+
+Con los scripts de descarga/inspección (download/peek) y la documentación ya
+en su lugar, el siguiente paso rutinario fue confirmar (commit) y enviar
+(push) este trabajo a GitHub. Los comandos usados, en orden:
+
+```bash
+git add .
+git commit -m "Exploration stage set up"
+git push
+```
+
+Este primer push falló con un HTTP 403, porque el inicio de sesión de GitHub
+guardado en Windows pertenecía a una cuenta diferente (una cuenta de
+trabajo) de la que es dueña de este repositorio. Se solucionó redirigiendo
+el remoto a la cuenta correcta sin tocar la credencial de trabajo guardada:
+
+```bash
+git remote -v
+git remote set-url origin https://i-was-poisoned@github.com/i-was-poisoned/graph-vs-relational-traversal.git
+git push -u origin main
+```
+
+Consulta [git-commands-guide.md](git-commands-guide.md) para una explicación
+completa de qué hace realmente cada uno de estos comandos, el concepto de
+área de preparación detrás de `add`/`commit`, y por qué ocurrió la confusión
+de cuentas.
+
 ## Etapa de Exploración (download_gharchive.py --> peek_data.py)
 
 Ahora que tenemos un conjunto de datos descargado y descomprimido en

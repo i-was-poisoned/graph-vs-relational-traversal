@@ -115,6 +115,32 @@ browser-like `User-Agent` header instead of using `urlretrieve` directly (see
 the script for the fix and [download_gharchive.py](download_gharchive.py),
 the annotated copy, for the full explanation).
 
+## Version Control Workflow (git add → commit → push)
+
+With the download/peek scripts and docs in place, the next routine step was
+committing and pushing this work to GitHub. The commands used, in order:
+
+```bash
+git add .
+git commit -m "Exploration stage set up"
+git push
+```
+
+This first push failed with an HTTP 403, because Windows' cached GitHub
+login belonged to a different account (a work account) than the one that
+owns this repo. Fixed by repointing the remote at the correct account
+without touching the cached work credential:
+
+```bash
+git remote -v
+git remote set-url origin https://i-was-poisoned@github.com/i-was-poisoned/graph-vs-relational-traversal.git
+git push -u origin main
+```
+
+See [git-commands-guide.md](git-commands-guide.md) for a full explanation of
+what each of these commands actually does, the staging-area concept behind
+`add`/`commit`, and why the account mix-up happened.
+
 ## Exploration Stage (download_gharchive.py --> peek_data.py)
 
 Now that we have a dataset downloaded and decompressed into JSON Lines format

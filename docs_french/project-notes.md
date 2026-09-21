@@ -138,6 +138,35 @@ directement `urlretrieve` (voir le script pour le correctif, et
 [download_gharchive.py](download_gharchive.py), la copie annotée, pour
 l'explication complète).
 
+## Gestion de version (git add → commit → push)
+
+Une fois les scripts de téléchargement/exploration et la documentation en
+place, l'étape courante suivante consistait à commiter et pousser ce travail
+vers GitHub. Les commandes utilisées, dans l'ordre :
+
+```bash
+git add .
+git commit -m "Exploration stage set up"
+git push
+```
+
+Ce premier push a échoué avec une erreur HTTP 403, car la connexion GitHub
+mise en cache par Windows appartenait à un compte différent (un compte
+professionnel) de celui qui possède ce dépôt. Corrigé en repointant le
+remote vers le bon compte, sans toucher à l'identifiant professionnel mis en
+cache :
+
+```bash
+git remote -v
+git remote set-url origin https://i-was-poisoned@github.com/i-was-poisoned/graph-vs-relational-traversal.git
+git push -u origin main
+```
+
+Voir [git-commands-guide.md](git-commands-guide.md) pour une explication
+complète de ce que fait réellement chacune de ces commandes, du concept de
+zone de staging derrière `add`/`commit`, et de la raison de cette confusion
+de compte.
+
 ## Étape d'exploration (download_gharchive.py --> peek_data.py)
 
 Maintenant que nous disposons d'un jeu de données téléchargé et décompressé
