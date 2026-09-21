@@ -182,6 +182,112 @@ aristas `(user)-[ACTION]->(repo)`. El `payload` normalmente solo hace
 falta si tu análisis se preocupa por el contenido de la acción, no solo
 por el hecho de que ocurrió.
 
+### Actores, repos y eventos
+
+Estas tres palabras se usan constantemente en este proyecto, así que vale
+la pena ser precisos sobre qué significa cada una:
+
+- Un **evento** (*event*) es una acción registrada individual — una línea
+  del archivo, etiquetada con un `type`, una marca de tiempo, y exactamente
+  un actor y un repo. Es lo que se cuenta; el número "Total events" de
+  `summarize_data.py` es un conteo de líneas.
+- Un **actor** es la cuenta de GitHub (humana o bot) que realizó la acción,
+  identificada por `actor.login`.
+- Un **repo** es el repositorio de GitHub sobre el que ocurrió la acción,
+  identificado por `repo.name`.
+
+Un evento siempre conecta exactamente un actor con exactamente un repo en
+un momento dado — es la *arista*, mientras que los actores y los repos son
+los dos tipos de *nodo* que conecta. Ejecutar `scripts/summarize_data.py`
+sobre la hora fija de este proyecto muestra 69.429 eventos pero solo
+14.728 actores únicos y 16.497 repos únicos: la mayoría de los actores y
+repos aparecen en más de un evento (el actor más activo,
+`github-actions[bot]`, representa él solo 994 de ellos). Esa es
+precisamente la forma `(user)-[ACTION]->(repo)` mencionada arriba, pero a
+escala — una red de aristas muchos-a-muchos entre un conjunto más pequeño
+de nodos-actor y nodos-repo.
+
+### Glosario de tipos de evento
+
+`scripts/summarize_data.py` imprime un desglose por `type`. Esto es lo que
+representa realmente cada tipo que aparece durante la hora fija de este
+proyecto:
+
+- **`PushEvent`** — se enviaron uno o más commits a una rama.
+- **`CreateEvent`** — se creó una nueva rama, etiqueta (tag) o repositorio.
+- **`DeleteEvent`** — se eliminó una rama o etiqueta.
+- **`PullRequestEvent`** — un pull request fue abierto, cerrado, fusionado
+  (merged), reabierto, o editado.
+- **`IssueCommentEvent`** — se publicó un comentario en un issue *o* en el
+  hilo de conversación principal de un pull request (internamente, GitHub
+  trata la conversación de un PR como un issue, así que los comentarios de
+  PR también aparecen bajo este tipo, no bajo
+  `PullRequestReviewCommentEvent`).
+- **`IssuesEvent`** — un issue fue abierto, cerrado, reabierto, asignado, o
+  etiquetado (label).
+- **`PullRequestReviewCommentEvent`** — se dejó un comentario en una línea
+  específica del diff de un pull request (un comentario de revisión a
+  nivel de línea, distinto de un comentario de conversación general).
+- **`PullRequestReviewEvent`** — se envió una revisión completa de un pull
+  request (aprobar / solicitar cambios / comentar).
+- **`WatchEvent`** — se le dio estrella a un repo. (Es el nombre interno
+  que usa GitHub para dar estrella, no "vigilar" — ver la viñeta `type` de
+  arriba.)
+- **`ReleaseEvent`** — se publicó una nueva release (versión etiquetada).
+- **`ForkEvent`** — se hizo un fork de un repositorio.
+- **`CommitCommentEvent`** — se dejó un comentario directamente en un
+  commit, fuera de cualquier pull request.
+- **`MemberEvent`** — se añadió un usuario como colaborador de un repo.
+
+El esquema de eventos de GitHub tiene algunos tipos más (p. ej.
+`PublicEvent` para un repo privado que se vuelve público, `GollumEvent`
+para ediciones de la wiki) que simplemente no ocurrieron durante la hora
+fija de este proyecto, así que no se listan aquí.
+
+### Dónde aparece un segundo actor (referencias anidadas)
+
+El `actor` de nivel superior de cada evento es *un solo* usuario de
+GitHub — el que disparó el evento. Pero varios tipos de evento también
+referencian a un *segundo* usuario en algún lugar dentro de `payload`, lo
+cual importa mucho para este proyecto: un recorrido actor-repo-actor-repo
+necesita más de un actor por evento para tener a dónde "saltar".
+
+`scripts/profile_schema.py` busca dentro del `payload` de cada evento
+objetos anidados con la forma `{"id": ..., "login": "..."}` — la misma
+forma que el `actor` de nivel superior — y reporta dónde los encuentra.
+Ejecutarlo sobre la hora fija de este proyecto muestra:
+
+- **`PushEvent` (95,3 % de todos los eventos) no tiene ningún segundo
+  actor en ninguna parte de su payload.** Solo lleva `ref`, `before`/`head`
+  (SHA de commits), y `repository_id` — sin autor, sin objeto committer.
+  Este es el hallazgo más importante para el diseño del esquema: la
+  inmensa mayoría de los eventos de este conjunto de datos no puede
+  aportar ninguna arista actor-a-actor, solo una arista actor-a-repo.
+- **El `payload.pull_request` de `PullRequestEvent` es una referencia
+  *recortada*** (solo `id`, `number`, `url`, `head`, `base`) — **no**
+  incluye al autor del PR como sí lo haría la respuesta completa de la API
+  REST de GitHub. Las únicas referencias a un segundo actor en este tipo
+  de evento son los campos opcionales `assignee`/`assignees`, presentes en
+  solo ~2 % de los eventos de PR.
+- **Los eventos más ricos, del tipo comentario/revisión, llevan de forma
+  fiable un segundo actor:** `IssueCommentEvent` (`payload.comment.user`,
+  `payload.issue.user`), `IssuesEvent` (`payload.issue.user`),
+  `PullRequestReviewCommentEvent` (`payload.comment.user`),
+  `PullRequestReviewEvent` (`payload.review.user`), `CommitCommentEvent`
+  (`payload.comment.user`), `ReleaseEvent` (`payload.release.author`),
+  `ForkEvent` (`payload.forkee.owner`), y `MemberEvent`
+  (`payload.member` mismo) — todos presentes en el 100 % de los eventos de
+  su tipo respectivo.
+
+Conclusión práctica: si el recorrido que se va a medir necesita aristas
+actor-a-actor reales (no solo actor-a-repo, con "repo compartido" como
+única conexión entre actores), esas aristas provienen casi por completo
+del ~4,7 % de eventos que no son `PushEvent` — principalmente
+comentarios, revisiones, issues, releases, forks, y cambios de membresía.
+Ejecuta tú mismo `python scripts/profile_schema.py` (opcionalmente con
+`--type <EventType>`) para ver el desglose completo y actualizado antes
+de finalizar el esquema.
+
 ## 7. Cómo llevar los datos a tu máquina
 
 Como es un archivo HTTPS plano, cualquiera de estas opciones funciona

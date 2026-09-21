@@ -62,6 +62,12 @@ pretende medir de forma empírica.
   [gh-archive-guide.md](gh-archive-guide.md) para una explicación
   completa de qué es GH Archive y cómo funciona.
 
+Para una explicación exhaustiva y desde los primeros principios de qué
+son realmente la IA/Claude/un "agente", qué son un IDE/VS Code/una
+"extensión", qué es Python y cómo se compara con otros lenguajes, y el
+JSON pretty-printed vs. JSON Lines, ver
+[tools-and-concepts-guide.md](tools-and-concepts-guide.md).
+
 ## Por Qué Importan `.gitignore` y `README.md`
 
 - **`README.md`** es el punto de entrada al proyecto para cualquiera
@@ -197,8 +203,140 @@ python scripts/peek_data.py --lines 20
 python scripts/peek_data.py --file data/2026-08-27-15.json --lines 10
 ```
 
+## Etapa de resumen (summarize_data.py)
+
+Con la forma de un solo evento ya confirmada por `peek_data.py`, el
+siguiente paso es hacerse una idea del *volumen y la conectividad* en toda
+la hora descargada, antes de elegir un esquema: cuántos eventos, cómo se
+reparten por tipo, y cuántos actores/repos distintos están involucrados.
+
+`scripts/summarize_data.py` lee el archivo JSON Lines completo una sola vez
+y reporta:
+
+- el número total de eventos
+- el desglose por tipo de evento (conteo y porcentaje, del más frecuente al
+  menos frecuente)
+- el número de actores y repos únicos
+- los N actores y repos más activos por número de eventos
+
+Ejecútalo con:
+
+```bash
+python scripts/summarize_data.py
+
+# Mostrar más actores/repos más activos
+python scripts/summarize_data.py --top 10
+```
+
+Para la hora fija del 2026-08-27 15:00 UTC, esto mostró 69.429 eventos
+repartidos entre 14.728 actores únicos y 16.497 repos únicos, con
+`PushEvent` representando por sí solo el 95,3 % de todos los eventos. Los
+actores más activos son todos bots (`github-actions[bot]`,
+`dependabot[bot]`, `pull[bot]`, `renovate[bot]`, `cursor[bot]`) — vale la
+pena decidir una política de filtrado de bots antes de usar estos datos
+para construir los modelos relacional/de grafo, ya que los `PushEvent`
+generados por bots dominarían la conectividad medida si no se filtran.
+
+## Qué significa "benchmark" para este proyecto
+
+Antes de seguir, vale la pena ser precisos sobre una palabra que este
+proyecto usa constantemente. Un **benchmark** es una prueba justa,
+repetible y *cronometrada*, usada para comparar dos o más cosas bajo las
+mismas condiciones — no solo "ejecutarlo una vez y ver", sino controlar
+deliberadamente todo excepto la única cosa que se mide, para que el
+resultado sea una comparación real y no una casualidad causada, por
+ejemplo, porque el portátil estaba haciendo otra cosa en segundo plano
+durante una de las dos ejecuciones.
+
+Para este proyecto en concreto: un run de benchmark significa tomar la
+*misma* consulta multi-salto (p. ej. "empezando desde el actor X,
+encontrar todos los repos alcanzables en 3 saltos") y ejecutarla contra la
+base de datos relacional y contra la base de datos de grafo, sobre los
+*mismos* datos subyacentes, cronometrando cuánto tarda cada una. Eso se
+repite en distintas profundidades de salto y volúmenes de datos para
+encontrar el punto de cruce que plantea el README.
+
+## Principio de diseño del esquema: la consulta primero, no los campos
+
+Un atajo tentador sería mirar cada campo que provee GH Archive y construir
+una tabla o un tipo de nodo para cada uno. Ese es el orden equivocado. El
+diseño del esquema para un benchmark debe estar guiado por la *consulta*
+que se está probando, no por "los campos que resultan existir":
+
+- **Campos primero** significa recorrer los datos, ver campos como
+  mensajes de commit, texto de revisiones de PR, y etiquetas de issues, y
+  modelizarlo todo. Esto produce un esquema grande y detallado — la mayor
+  parte del cual el benchmark de recorrido nunca llega a tocar realmente.
+- **Consulta primero** significa decidir *primero* exactamente qué se está
+  midiendo (para este proyecto: un recorrido `actor → repo → actor →
+  repo` — ver más abajo por qué tiene que tener esa forma, y no una arista
+  directa actor-a-actor), y luego construir solo la estructura mínima que
+  ese recorrido necesita: una cosa Actor, una cosa Repo, y una conexión
+  entre ambas.
+
+Por qué importa esto más allá de la prolijidad: tablas/columnas (o tipos
+de nodo/arista) adicionales y sin usar no hacen que ninguno de los dos
+lados de la comparación sea "más correcto" — solo añaden complejidad que
+no forma parte de la medición. Peor aún, si ese detalle adicional se
+construye de forma desigual (más del lado relacional que del lado de
+grafo, o viceversa), la comparación deja de ser equivalente, que es
+precisamente el objetivo de la pregunta de investigación de este proyecto.
+
+## Etapa de diseño del esquema (profile_schema.py)
+
+Los datos son intrínsecamente **bipartitos**: cada evento conecta un
+`actor` con un `repo` (ver
+[gh-archive-guide.md](gh-archive-guide.md#actores-repos-y-eventos) para la
+distinción completa actor/repo/evento). Eso significa que un "recorrido
+multi-salto" aquí no puede ser el ejemplo clásico de amigos-de-amigos de
+la pregunta de investigación inicial de este proyecto — no hay una arista
+directa actor-a-actor en los datos crudos por defecto. Un recorrido tiene
+que alternar `actor → repo → actor → repo`, saltando a través de *repos
+compartidos* (o, cuando esté disponible, a través de un segundo actor
+nombrado dentro del `payload` de un evento).
+
+Para diseñar bien ese esquema — siguiendo el principio de "consulta
+primero" de arriba — el siguiente paso fue averiguar *dónde en los datos
+aparece realmente un segundo actor*, porque sin eso, no hay a dónde saltar
+más allá de "otro repo que ese mismo actor tocó". `scripts/profile_schema.py`
+lee el archivo completo y reporta, por tipo de evento:
+
+- qué campos de `payload` existen, con qué frecuencia, y de qué tipo son
+- cualquier objeto anidado con la forma de una referencia a un usuario de
+  GitHub (`{"id": ..., "login": "..."}`) encontrado en cualquier parte
+  dentro de `payload`, y la ruta para llegar a él (p. ej.
+  `payload.pull_request.user`)
+
+Ejecútalo con:
+
+```bash
+python scripts/profile_schema.py
+
+# Centrarse en un solo tipo de evento
+python scripts/profile_schema.py --type PushEvent
+```
+
+**Hallazgo clave:** `PushEvent` — el 95,3 % de todos los eventos de la
+hora fija de este proyecto — no lleva ningún segundo actor en ninguna
+parte de su payload; solo tiene `ref`, `before`/`head` (SHA de commits), y
+`repository_id`. El `payload.pull_request` de `PullRequestEvent` también
+es una referencia recortada que omite al autor del PR (a diferencia de la
+respuesta completa de la API REST de GitHub). Las referencias reales a un
+segundo actor viven casi por completo en el ~4,7 % de eventos restante —
+comentarios, revisiones, issues, releases, forks, y cambios de membresía
+(desglose completo en
+[gh-archive-guide.md](gh-archive-guide.md#dónde-aparece-un-segundo-actor-referencias-anidadas)).
+Esto moldea directamente la decisión de esquema: una arista actor-a-actor,
+si se modela, será escasa y proveniente de una pequeña porción de los
+tipos de evento — la mayor parte de la conectividad del grafo vendrá de
+las propias aristas actor→repo (muchos actores compartiendo un repo), no
+de enlaces directos actor→actor.
+
 El pipeline general hasta ahora es: **download_gharchive.py →
-peek_data.py** — primero obtener y descomprimir la hora fija del conjunto
-de datos, luego inspeccionarla, antes de pasar a extraer y cargar
+peek_data.py → summarize_data.py → profile_schema.py** — primero obtener
+y descomprimir la hora fija del conjunto de datos, luego inspeccionar un
+puñado de eventos en bruto, después obtener una lectura agregada del
+volumen y la conectividad, luego perfilar la forma del payload y localizar
+referencias a un segundo actor, antes de pasar a extraer y cargar
 realmente los registros en los modelos relacional y de grafo que se están
 comparando.

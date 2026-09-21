@@ -61,6 +61,12 @@ vise à mesurer empiriquement.
   [gh-archive-guide.md](gh-archive-guide.md) pour une explication complète de
   ce qu'est GH Archive et de son fonctionnement.
 
+Pour une explication approfondie et partant des principes de base de ce
+que sont réellement l'IA/Claude/un « agent », ce que sont un IDE/VS
+Code/une « extension », ce qu'est Python et comment il se compare aux
+autres langages, et le JSON pretty-printed vs. JSON Lines, voir
+[tools-and-concepts-guide.md](tools-and-concepts-guide.md).
+
 ## Pourquoi `.gitignore` et `README.md` sont importants
 
 - **`README.md`** est le point d'entrée du projet pour quiconque (y compris
@@ -196,8 +202,145 @@ python scripts/peek_data.py --lines 20
 python scripts/peek_data.py --file data/2026-08-27-15.json --lines 10
 ```
 
+## Étape de synthèse (summarize_data.py)
+
+Une fois la forme d'un seul événement confirmée par `peek_data.py`, l'étape
+suivante consiste à se faire une idée du *volume et de la connectivité* sur
+l'ensemble de l'heure téléchargée, avant de choisir un schéma : combien
+d'événements, comment ils se répartissent par type, et combien d'acteurs/dépôts
+distincts sont impliqués.
+
+`scripts/summarize_data.py` lit le fichier JSON Lines entier une seule fois
+et rapporte :
+
+- le nombre total d'événements
+- la répartition par type d'événement (décompte et pourcentage, du plus
+  fréquent au moins fréquent)
+- le nombre d'acteurs et de dépôts uniques
+- les N acteurs et dépôts les plus actifs par nombre d'événements
+
+Exécutez-le avec :
+
+```bash
+python scripts/summarize_data.py
+
+# Afficher plus d'acteurs/dépôts les plus actifs
+python scripts/summarize_data.py --top 10
+```
+
+Pour l'heure fixe du 2026-08-27 15h00 UTC, cela a montré 69 429 événements
+répartis entre 14 728 acteurs uniques et 16 497 dépôts uniques, avec
+`PushEvent` représentant à lui seul 95,3 % de tous les événements. Les
+acteurs les plus actifs sont tous des bots (`github-actions[bot]`,
+`dependabot[bot]`, `pull[bot]`, `renovate[bot]`, `cursor[bot]`) — il vaut la
+peine de décider d'une politique de filtrage des bots avant d'utiliser ces
+données pour construire les modèles relationnel/graphe, car les
+`PushEvent` générés par des bots domineraient sinon la connectivité mesurée.
+
+## Ce que signifie « benchmark » pour ce projet
+
+Avant d'aller plus loin, il vaut la peine d'être précis sur un mot que ce
+projet utilise constamment. Un **benchmark** est un test équitable,
+reproductible, et *chronométré*, utilisé pour comparer deux choses ou plus
+dans les mêmes conditions — pas seulement « on l'exécute une fois et on
+regarde », mais un contrôle délibéré de tout sauf de la seule chose
+mesurée, afin que le résultat soit une comparaison véritable et non un
+hasard causé, par exemple, par le fait que l'ordinateur portable faisait
+autre chose en arrière-plan pendant l'une des deux exécutions.
+
+Pour ce projet en particulier : un run de benchmark consiste à prendre la
+*même* requête à plusieurs sauts (par ex. « en partant de l'acteur X,
+trouver tous les dépôts atteignables en 3 sauts ») et à l'exécuter contre
+la base de données relationnelle et contre la base de données graphe, sur
+les *mêmes* données sous-jacentes, en chronométrant la durée de chacune.
+Cela se répète pour différentes profondeurs de saut et différents volumes
+de données afin de trouver le point de bascule évoqué dans le README.
+
+## Principe de conception du schéma : la requête d'abord, pas les champs
+
+Un raccourci tentant serait de regarder chaque champ fourni par GH Archive
+et de construire une table ou un type de nœud pour chacun d'eux. C'est le
+mauvais ordre. La conception du schéma pour un benchmark doit être guidée
+par la *requête* testée, pas par « les champs qui se trouvent exister » :
+
+- **Champs d'abord** signifie parcourir les données, voir des champs comme
+  les messages de commit, le texte des revues de PR, et les labels
+  d'issue, et tout modéliser. Cela produit un schéma vaste et détaillé —
+  dont la majeure partie n'est en réalité jamais touchée par le benchmark
+  de parcours.
+- **Requête d'abord** signifie décider *d'abord* exactement ce qui est
+  mesuré (pour ce projet : un parcours `acteur → dépôt → acteur → dépôt` —
+  voir ci-dessous pourquoi cette forme est nécessaire, plutôt qu'une
+  arête acteur-à-acteur directe), puis ne construire que la structure
+  minimale dont ce parcours a besoin : une chose Acteur, une chose Dépôt,
+  et une connexion entre les deux.
+
+Pourquoi cela compte au-delà de la simple propreté : des tables/colonnes
+(ou types de nœud/arête) supplémentaires et inutilisées ne rendent aucun
+des deux côtés de la comparaison « plus correct » — elles ajoutent
+seulement de la complexité qui ne fait pas partie de la mesure. Pire, si
+ce détail supplémentaire est construit de façon inégale (plus côté
+relationnel que côté graphe, ou l'inverse), la comparaison cesse d'être
+équitable, ce qui est pourtant tout l'enjeu de la question de recherche de
+ce projet.
+
+## Étape de conception du schéma (profile_schema.py)
+
+Les données sont intrinsèquement **bipartites** : chaque événement relie
+un `actor` à un `repo` (voir
+[gh-archive-guide.md](gh-archive-guide.md#acteurs-dépôts-et-événements)
+pour la distinction complète acteur/dépôt/événement). Cela signifie qu'un
+« parcours à plusieurs sauts » ici ne peut pas être l'exemple classique
+des amis-des-amis de la question de recherche initiale de ce projet — il
+n'y a pas d'arête directe acteur-à-acteur dans les données brutes par
+défaut. Un parcours doit alterner `acteur → dépôt → acteur → dépôt`, en
+sautant via des *dépôts partagés* (ou, quand c'est disponible, via un
+second acteur nommé à l'intérieur du `payload` d'un événement).
+
+Pour bien concevoir ce schéma — en suivant le principe « requête d'abord »
+ci-dessus — l'étape suivante consistait à découvrir *où dans les données
+un second acteur apparaît réellement*, car sans cela, il n'y a nulle part
+où sauter au-delà de « un autre dépôt touché par ce même acteur ».
+`scripts/profile_schema.py` lit le fichier entier et rapporte, par type
+d'événement :
+
+- quels champs de `payload` existent, à quelle fréquence, et de quel type
+  ils sont
+- tout objet imbriqué ayant la forme d'une référence à un utilisateur
+  GitHub (`{"id": ..., "login": "..."}`) trouvé n'importe où à l'intérieur
+  de `payload`, et le chemin pour y accéder (par ex.
+  `payload.pull_request.user`)
+
+Exécutez-le avec :
+
+```bash
+python scripts/profile_schema.py
+
+# Se concentrer sur un seul type d'événement
+python scripts/profile_schema.py --type PushEvent
+```
+
+**Découverte clé :** `PushEvent` — 95,3 % de tous les événements de
+l'heure fixe de ce projet — ne porte aucun second acteur nulle part dans
+son payload ; il n'a que `ref`, `before`/`head` (des SHA de commit), et
+`repository_id`. Le `payload.pull_request` de `PullRequestEvent` est
+également une référence tronquée qui omet l'auteur de la PR (contrairement
+à la réponse complète de l'API REST de GitHub). Les véritables références
+à un second acteur vivent presque entièrement dans les ~4,7 % d'événements
+restants — commentaires, revues, issues, releases, forks, et changements
+d'adhésion (répartition complète dans
+[gh-archive-guide.md](gh-archive-guide.md#où-apparaît-un-second-acteur-références-imbriquées)).
+Cela façonne directement la décision de schéma : une arête acteur-à-acteur,
+si elle est modélisée, sera éparse et provenant d'une petite tranche des
+types d'événements — l'essentiel de la connectivité du graphe viendra des
+arêtes acteur→dépôt elles-mêmes (de nombreux acteurs partageant un dépôt),
+pas de liens directs acteur→acteur.
+
 Le pipeline global jusqu'à présent est : **download_gharchive.py →
-peek_data.py** — d'abord récupérer et décompresser l'heure fixe du jeu de
-données, puis l'inspecter, avant de passer à l'extraction et au chargement
-effectifs des enregistrements dans les modèles relationnel et graphe
-comparés.
+peek_data.py → summarize_data.py → profile_schema.py** — d'abord récupérer
+et décompresser l'heure fixe du jeu de données, puis inspecter une poignée
+d'événements bruts, puis obtenir une lecture agrégée du volume et de la
+connectivité, puis profiler la forme du payload et localiser les
+références à un second acteur, avant de passer à l'extraction et au
+chargement effectifs des enregistrements dans les modèles relationnel et
+graphe comparés.

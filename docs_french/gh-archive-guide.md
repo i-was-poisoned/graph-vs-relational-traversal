@@ -183,6 +183,117 @@ construire des arêtes `(user)-[ACTION]->(repo)`. Le `payload` n'est
 généralement nécessaire que si l'analyse s'intéresse au contenu de
 l'action, et pas seulement au fait qu'elle ait eu lieu.
 
+### Acteurs, dépôts et événements
+
+Ces trois mots reviennent constamment dans ce projet, il vaut donc la peine
+d'être précis sur ce que chacun désigne :
+
+- Un **événement** (*event*) est une action enregistrée unique — une ligne
+  du fichier d'archive, associée à un `type`, un horodatage, et exactement
+  un acteur et un dépôt. C'est ce qu'on compte ; le nombre « Total events »
+  de `summarize_data.py` est un décompte de lignes.
+- Un **acteur** (*actor*) est le compte GitHub (humain ou bot) qui a
+  effectué l'action, identifié par `actor.login`.
+- Un **dépôt** (*repo*) est le dépôt GitHub sur lequel ou vers lequel
+  l'action a eu lieu, identifié par `repo.name`.
+
+Un événement relie toujours exactement un acteur à exactement un dépôt à un
+instant donné — c'est l'*arête*, tandis que les acteurs et les dépôts sont
+les deux types de *nœuds* qu'il relie. Exécuter `scripts/summarize_data.py`
+sur l'heure fixe de ce projet montre 69 429 événements mais seulement
+14 728 acteurs uniques et 16 497 dépôts uniques : la plupart des acteurs et
+des dépôts apparaissent dans plus d'un événement (l'acteur le plus actif,
+`github-actions[bot]`, en représente à lui seul 994). C'est exactement la
+forme `(user)-[ACTION]->(repo)` évoquée plus haut, mais à grande échelle —
+un réseau d'arêtes en relation plusieurs-à-plusieurs entre un ensemble plus
+restreint de nœuds-acteurs et de nœuds-dépôts.
+
+### Glossaire des types d'événements
+
+`scripts/summarize_data.py` affiche une répartition par `type`. Voici ce que
+représente réellement chaque type apparu durant l'heure fixe de ce projet :
+
+- **`PushEvent`** — un ou plusieurs commits ont été poussés sur une branche.
+- **`CreateEvent`** — une nouvelle branche, étiquette (tag) ou un nouveau
+  dépôt a été créé.
+- **`DeleteEvent`** — une branche ou une étiquette a été supprimée.
+- **`PullRequestEvent`** — une pull request a été ouverte, fermée, fusionnée
+  (merged), rouverte, ou modifiée.
+- **`IssueCommentEvent`** — un commentaire a été posté sur une issue *ou*
+  sur le fil de conversation principal d'une pull request (en interne,
+  GitHub traite la conversation d'une PR comme une issue, donc les
+  commentaires de PR apparaissent aussi sous ce type, et non sous
+  `PullRequestReviewCommentEvent`).
+- **`IssuesEvent`** — une issue a été ouverte, fermée, rouverte, assignée,
+  ou étiquetée (label).
+- **`PullRequestReviewCommentEvent`** — un commentaire a été laissé sur une
+  ligne précise du diff d'une pull request (un commentaire de revue au
+  niveau d'une ligne, distinct d'un commentaire de conversation général).
+- **`PullRequestReviewEvent`** — une revue complète de pull request a été
+  soumise (approuver / demander des modifications / commenter).
+- **`WatchEvent`** — un dépôt a été mis en favori (« starred »). (C'est le
+  nom interne de GitHub pour mettre une étoile, pas « surveiller » — voir la
+  puce `type` ci-dessus.)
+- **`ReleaseEvent`** — une nouvelle release (version étiquetée) a été
+  publiée.
+- **`ForkEvent`** — un dépôt a été forké.
+- **`CommitCommentEvent`** — un commentaire a été laissé directement sur un
+  commit, en dehors de toute pull request.
+- **`MemberEvent`** — un utilisateur a été ajouté comme collaborateur sur un
+  dépôt.
+
+Le schéma d'événements de GitHub compte quelques types supplémentaires (par
+ex. `PublicEvent` pour un dépôt privé devenu public, `GollumEvent` pour les
+modifications de wiki) qui ne sont tout simplement pas apparus durant
+l'heure fixe de ce projet, donc ils ne sont pas listés ici.
+
+### Où apparaît un second acteur (références imbriquées)
+
+Le `actor` de premier niveau de chaque événement est *un seul* utilisateur
+GitHub — celui qui a déclenché l'événement. Mais plusieurs types
+d'événements référencent aussi un *second* utilisateur quelque part à
+l'intérieur de `payload`, ce qui compte beaucoup pour ce projet : un
+parcours acteur-dépôt-acteur-dépôt a besoin de plus d'un acteur par
+événement pour avoir un endroit où « sauter ».
+
+`scripts/profile_schema.py` recherche dans le `payload` de chaque
+événement des objets imbriqués de la forme `{"id": ..., "login": "..."}` —
+la même forme que le `actor` de premier niveau — et rapporte où il les
+trouve. L'exécuter sur l'heure fixe de ce projet montre :
+
+- **`PushEvent` (95,3 % de tous les événements) n'a aucun second acteur
+  nulle part dans son payload.** Il ne porte que `ref`, `before`/`head`
+  (des SHA de commit), et `repository_id` — pas d'auteur, pas d'objet
+  committer. C'est la découverte la plus importante pour la conception du
+  schéma : l'immense majorité des événements de ce jeu de données ne peut
+  contribuer à aucune arête acteur-à-acteur, seulement une arête
+  acteur-à-dépôt.
+- **Le `payload.pull_request` de `PullRequestEvent` est une référence
+  *tronquée*** (juste `id`, `number`, `url`, `head`, `base`) — il n'inclut
+  **pas** l'auteur de la PR comme le ferait la réponse complète de l'API
+  REST de GitHub. Les seules références à un second acteur sur ce type
+  d'événement sont les champs optionnels `assignee`/`assignees`, présents
+  sur seulement ~2 % des événements de PR.
+- **Les événements plus riches, de type commentaire/revue, portent de
+  façon fiable un second acteur :** `IssueCommentEvent`
+  (`payload.comment.user`, `payload.issue.user`), `IssuesEvent`
+  (`payload.issue.user`), `PullRequestReviewCommentEvent`
+  (`payload.comment.user`), `PullRequestReviewEvent`
+  (`payload.review.user`), `CommitCommentEvent` (`payload.comment.user`),
+  `ReleaseEvent` (`payload.release.author`), `ForkEvent`
+  (`payload.forkee.owner`), et `MemberEvent` (`payload.member` lui-même) —
+  tous présents sur 100 % des événements de leur type respectif.
+
+À retenir en pratique : si le parcours mesuré a besoin de vraies arêtes
+acteur-à-acteur (pas seulement acteur-à-dépôt, avec « dépôt partagé »
+comme seule connexion entre acteurs), ces arêtes proviennent presque
+entièrement des ~4,7 % d'événements qui ne sont pas des `PushEvent` —
+principalement les commentaires, revues, issues, releases, forks, et
+changements d'adhésion. Exécutez vous-même
+`python scripts/profile_schema.py` (éventuellement avec
+`--type <EventType>`) pour voir la répartition complète et à jour avant de
+finaliser le schéma.
+
 ## 7. Récupérer les données sur votre machine
 
 Puisqu'il s'agit d'un simple fichier HTTPS, n'importe laquelle de ces

@@ -161,6 +161,103 @@ For building a graph, the fields you almost always care about are `type`,
 `(user)-[ACTION]->(repo)` edges. The `payload` is usually only needed if your
 analysis cares about the content of the action, not just that it happened.
 
+### Actors, repos, and events
+
+These three words get used constantly in this project, so it's worth being
+precise about what each one means:
+
+- An **event** is a single recorded action — one line in the archive file,
+  tagged with a `type`, a timestamp, and exactly one actor and one repo. It's
+  the thing you count; `summarize_data.py`'s "Total events" number is a count
+  of lines.
+- An **actor** is the GitHub account (human or bot) that performed the
+  action, identified by `actor.login`.
+- A **repo** is the GitHub repository the action happened on or to,
+  identified by `repo.name`.
+
+An event always connects exactly one actor to exactly one repo at one point
+in time — it's the *edge*, while actors and repos are the two *node* types it
+connects. Running `scripts/summarize_data.py` against this project's fixed
+hour shows 69,429 events but only 14,728 unique actors and 16,497 unique
+repos: most actors and repos appear in more than one event (the busiest
+actor, `github-actions[bot]`, alone accounts for 994 of them). That's the
+`(user)-[ACTION]->(repo)` shape from above, at scale — a many-to-many web of
+edges between a smaller set of actor-nodes and repo-nodes.
+
+### Event type glossary
+
+`scripts/summarize_data.py` prints a breakdown by `type`. Here's what each
+type appearing in this project's fixed hour actually represents:
+
+- **`PushEvent`** — one or more commits were pushed to a branch.
+- **`CreateEvent`** — a new branch, tag, or repository was created.
+- **`DeleteEvent`** — a branch or tag was deleted.
+- **`PullRequestEvent`** — a pull request was opened, closed, merged,
+  reopened, or edited.
+- **`IssueCommentEvent`** — a comment was posted on an issue *or* a pull
+  request's main conversation thread (GitHub treats a PR's conversation as an
+  issue internally, so PR comments show up as this type too, not as
+  `PullRequestReviewCommentEvent`).
+- **`IssuesEvent`** — an issue was opened, closed, reopened, assigned, or
+  labeled.
+- **`PullRequestReviewCommentEvent`** — a comment was left on a specific
+  line of a pull request's diff (a line-level review comment, distinct from a
+  general conversation comment).
+- **`PullRequestReviewEvent`** — a full pull request review was submitted
+  (approve / request changes / comment).
+- **`WatchEvent`** — a repo was starred. (GitHub's internal name for
+  starring, not "watching" — see the `type` bullet above.)
+- **`ReleaseEvent`** — a new release (tagged version) was published.
+- **`ForkEvent`** — a repository was forked.
+- **`CommitCommentEvent`** — a comment was left directly on a commit,
+  outside of any pull request.
+- **`MemberEvent`** — a user was added as a collaborator on a repo.
+
+GitHub's event schema has a few more types (e.g. `PublicEvent` for a private
+repo turning public, `GollumEvent` for wiki edits) that simply didn't occur
+during this project's fixed hour, so they're omitted here.
+
+### Where a second actor appears (nested references)
+
+Every event's top-level `actor` is *one* GitHub user — the one who triggered
+the event. But several event types also reference a *second* user somewhere
+inside `payload`, which matters a lot for this project: an
+actor-repo-actor-repo traversal needs more than one actor per event to have
+anywhere to "hop" to.
+
+`scripts/profile_schema.py` searches each event's `payload` for nested
+objects shaped like `{"id": ..., "login": "..."}` — the same shape as the
+top-level `actor` — and reports where it finds them. Running it against
+this project's fixed hour shows:
+
+- **`PushEvent` (95.3% of all events) has no second actor anywhere in its
+  payload.** It only carries `ref`, `before`/`head` (commit SHAs), and
+  `repository_id` — no author, no committer object. This is the single
+  most important finding for schema design: the overwhelming majority of
+  events in this dataset cannot contribute an actor-to-actor edge, only an
+  actor-to-repo one.
+- **`PullRequestEvent`'s `payload.pull_request` is a *trimmed* reference**
+  (just `id`, `number`, `url`, `head`, `base`) — it does **not** include the
+  PR's author the way GitHub's full REST API response would. The only
+  second-actor references on this event type are the optional `assignee`/
+  `assignees` fields, present on just ~2% of PR events.
+- **Richer, comment/review-style events reliably carry a second actor:**
+  `IssueCommentEvent` (`payload.comment.user`, `payload.issue.user`),
+  `IssuesEvent` (`payload.issue.user`), `PullRequestReviewCommentEvent`
+  (`payload.comment.user`), `PullRequestReviewEvent` (`payload.review.user`),
+  `CommitCommentEvent` (`payload.comment.user`), `ReleaseEvent`
+  (`payload.release.author`), `ForkEvent` (`payload.forkee.owner`), and
+  `MemberEvent` (`payload.member` itself) — all present on 100% of their
+  respective event type's events.
+
+Practical takeaway: if the benchmarked traversal needs real actor-to-actor
+edges (not just actor-to-repo, with "shared repo" as the only connection
+between actors), those edges come almost entirely from the ~4.7% of events
+that aren't `PushEvent` — mainly comments, reviews, issues, releases, forks,
+and membership changes. Run `python scripts/profile_schema.py` yourself
+(optionally with `--type <EventType>`) to see the full, current breakdown
+before finalizing the schema.
+
 ## 7. Getting the data onto your machine
 
 Since it's a plain HTTPS file, any of these work (substitute the actual
