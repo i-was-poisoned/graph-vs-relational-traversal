@@ -58,17 +58,176 @@ JSON Lines, see
 
 ## Why `.gitignore` and `README.md` Matter
 
-- **`README.md`** is the entry point to the project for anyone (including future
-  you) who opens the repository. It should explain what the project is, why it
-  exists, and what question it's answering — this project's `README.md` currently
-  states its core research question up front. A clear README turns a folder of
-  files into a legible project.
-- **`.gitignore`** tells git which files and folders to *never* track — build
-  artifacts, caches, virtual environments, logs, credentials, and other files that
-  are either regenerable or environment-specific. Without it, these files clutter
-  commit history, bloat the repository size, and risk accidentally leaking
-  machine-specific paths or secrets. It also prevents noisy diffs where
-  irrelevant generated files show up as "changes" on every commit.
+### `README.md`: the project's front door
+
+A `README.md` file is, at its core, just a plain-text document with
+formatting — and the `.md` is the key to understanding what that actually
+means. `.md` stands for **Markdown**: a lightweight markup language (not a
+programming language) that lets you write formatted text — headings,
+**bold**, *italics*, lists, links, code blocks — using nothing but plain
+keyboard symbols (`#` for a heading, `**...**` for bold, `` `...` `` for
+inline code) instead of needing a visual, Word-style editor. You write
+plain text with those symbols scattered through it, and any program that
+"understands" Markdown (GitHub, VS Code, this very document) renders it as
+nicely formatted text. Every `.md` file in this project (this
+`project-notes.md`, `README.md`, `gh-archive-guide.md`) is written in
+Markdown for exactly that reason: it's readable even as raw, unrendered
+text, and it renders cleanly anywhere that understands it.
+
+`README` (capitalized, with no extension, or as `.md`/`.txt`) is also a
+very old **convention** in software: by tradition, it's the first file
+anyone new to a project is expected to read. GitHub (and GitLab,
+Bitbucket, and virtually every other repository host) builds on that
+convention automatically: if a repository has a file literally named
+`README.md` (or `README`, `README.txt`, etc.) at its root, the platform
+detects it and displays it already rendered, right below the file
+listing, on the repository's main page. This isn't some special behavior
+built into git itself — git gives no special treatment whatsoever to any
+file named `README`; it's purely a behavior GitHub (and similar
+platforms) layer on top of git, based on that conventional filename.
+That's exactly why a well-written `README.md` is so valuable: it's
+literally the first thing anyone (including your own future self, six
+months from now with no fresh memory of the project) sees on visiting the
+repository, so it should immediately answer "what is this, why does it
+exist, and what question is it trying to answer?" — which is precisely
+what this project's `README.md` does by leading with its research
+question.
+
+### `.gitignore`: what "tracking" even means in git, and why you have to tell it what to skip
+
+Understanding `.gitignore` requires first understanding that git doesn't
+automatically treat every file in your folder as "part of the project."
+While you work in a repository, every file sits in one of these states:
+
+- **Untracked** — git sees the file exists in the folder, but has never
+  been told to watch it; it isn't part of the project's history, and
+  `git status` flags it as "new."
+- **Staged** — running `git add` tells git "I want this file, in its
+  current state, to be part of the next commit."
+- **Committed** — running `git commit` locks that staged state
+  permanently into the repository's history.
+
+Without a `.gitignore`, every new file that shows up in the folder —
+including ones Python generates on its own, like `__pycache__/` caches,
+or downloaded data in `data/` — would show up as "untracked" in `git
+status`, and a careless `git add .` would sweep it into the next commit
+without you noticing. `.gitignore` is, literally, a list of file/folder
+name patterns that tells git "don't even show me these as 'untracked';
+ignore them entirely." It uses wildcard-style patterns — for example, in
+this project's own `.gitignore`:
+
+- `/data/` — ignores the entire `data/` folder (the leading slash pins it
+  to the project root, not any `data/` folder at any nesting level).
+- `__pycache__/` — ignores any folder with that exact name, anywhere in
+  the project (no leading slash, so it applies at every level).
+- `*.py[codz]` — `*` is a wildcard meaning "any text here"; this ignores
+  files like `something.pyc`, `something.pyo`, and so on.
+- Lines starting with `#` are comments, for humans only — git skips them
+  entirely when reading the file.
+
+Why bother excluding these rather than just never running `git add` on
+them by hand each time? Because without `.gitignore`, these
+**regenerable** or **machine-specific** files (build caches, virtual
+environments, credentials, OS- or editor-specific configuration) would
+clutter commit history, bloat the repository's size with content that's
+useless to anyone else, and — the more serious risk — could accidentally
+leak your own machine's file paths or, worse, secrets like passwords or
+API keys if one ever ends up in a file that gets committed by mistake.
+`.gitignore` automates that discipline once, instead of relying on a
+human never forgetting to make that mistake.
+
+### Compilation: from source code to machine code
+
+Understanding why so many lines in this project's `.gitignore` are about
+"build artifacts" first requires understanding what **compiling** actually
+is.
+
+A computer's processor (the CPU) doesn't understand Python, or C, or any
+other programming language the way a human writes it — it only
+understands a very narrow, very specific set of binary instructions
+(sequences of ones and zeros) called **machine code**, specific to each
+processor architecture. The human-readable **source code** we write
+(with meaningful variable names, comments, structure) exists purely so
+humans can read and reason about it; the computer, as-is, can't run it
+directly.
+
+A **compiler** is a program whose sole job is translating source code,
+written in a high-level language, into machine code (or some other
+intermediate representation) before the program ever runs. That
+translation process is called **compiling** (or "building"), and the
+result — the already-translated file or files — is what's generally
+called a **build artifact** (see the next section). In compiled languages
+like C or Rust, this step happens explicitly, once, before the program
+is ever run; the result is a standalone executable file.
+
+Python, as covered in more depth in
+[tools-and-concepts-guide.md](tools-and-concepts-guide.md#33-compiled-vs-interpreted-languages),
+is an **interpreted** language — you don't manually compile this
+project's scripts before running them; they run directly via `python
+scripts/peek_data.py`. But behind the scenes, Python's own interpreter
+still compiles each `.py` file into an intermediate form called
+**bytecode** (simpler instructions than the original Python code, though
+still not raw machine code) the first time it's imported or run, and
+caches that bytecode in `.pyc` files inside a `__pycache__/` folder, so
+it doesn't have to redo that translation work on every future run if the
+source file hasn't changed. Those `.pyc` files are exactly a build
+artifact — just one Python generates automatically, in the background,
+rather than through a manual build step.
+
+### What is a "build artifact"?
+
+A **build artifact** (or just "artifact," or "build output") is any file
+that's **generated** from source code by some automated process —
+compiling, packaging, minifying, rendering — rather than being written by
+hand by a person. The key distinction for this project:
+
+- **Source code** (the `.py` files in `scripts/`, the `.md` files in
+  `docs_*/`) is the **single source of truth** — what a person actually
+  wrote, and the only thing that genuinely needs to live in the project's
+  history.
+- An **artifact** is *derived* from that source code — it can always be
+  regenerated by running the same process against the same source code
+  again, which makes committing it to git redundant at best, and actively
+  harmful at worst.
+
+Examples of build artifacts beyond Python's `.pyc` files already
+mentioned (to make the concept fully general, not tied only to this
+project): a `.exe` or `.dll` compiled from C/C++ source; a `.jar`
+compiled from Java source; the final, minified, "bundled" HTML/CSS/
+JavaScript a modern web app's build tool produces from its source code; a
+`.whl` (wheel) file packaging a ready-to-install Python library; even
+HTML documentation auto-generated from comments in source code.
+
+Why build artifacts are almost never committed to a git repository (and
+why this project's own `.gitignore` excludes so many of them —
+`__pycache__/`, `*.py[codz]`, `build/`, `dist/`, `*.egg-info/`, among
+others):
+
+1. **They're regenerable.** If the source code is in the repository,
+   anyone can regenerate the exact same artifact at any time — storing it
+   too would just be duplicating information for no benefit.
+2. **They're often environment-specific.** A `.pyc` compiled against the
+   Python version installed on this machine (Python 3.14, per the
+   `__pycache__/` paths seen in this project) might not work the same
+   way, or might not even load at all, on someone else's machine running
+   a different Python version.
+3. **They clutter history and diffs.** Artifacts are usually binary files
+   (not line-by-line-readable text), so git can't show a useful
+   line-by-line diff for them the way it can for source code — every
+   change just shows up as "the whole file changed," with no information
+   about what actually changed.
+4. **They bloat repository size** with content that adds nothing to
+   understanding the project — nobody needs to read a `.pyc` to
+   understand what `peek_data.py` does; the `.py` file already tells
+   them.
+
+(One caveat worth knowing, for completeness: there are deliberate
+exceptions to this general rule — for instance, when a project
+*publishes* a finished artifact, like attaching a compiled executable to
+a GitHub "Release" so people can download it directly without compiling
+the source themselves. That's different from committing the artifact
+into the repository's *commit history*, which is what `.gitignore` is
+preventing here.)
 
 ## Repository Workflow So Far
 
