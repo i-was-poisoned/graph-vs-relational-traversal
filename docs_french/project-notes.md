@@ -358,7 +358,7 @@ au format JSON Lines (`data/2026-08-27-15.json`), l'étape suivante consiste
 à examiner réellement son contenu, avant d'essayer de le modéliser sous
 forme relationnelle ou de graphe.
 
-`scripts/peek_data.py` lit les premiers événements du fichier et affiche
+`scripts/peek_data.py` ([copie annotée](peek_data.py)) lit les premiers événements du fichier et affiche
 leurs champs clés (`type`, `actor`, `repo`, `created_at`) — une vérification
 rapide de cohérence pour s'assurer que les données correspondent à ce que
 décrit [gh-archive-guide.md](gh-archive-guide.md), avant d'écrire une
@@ -388,7 +388,7 @@ l'ensemble de l'heure téléchargée, avant de choisir un schéma : combien
 d'événements, comment ils se répartissent par type, et combien d'acteurs/dépôts
 distincts sont impliqués.
 
-`scripts/summarize_data.py` lit le fichier JSON Lines entier une seule fois
+`scripts/summarize_data.py` ([copie annotée](summarize_data.py)) lit le fichier JSON Lines entier une seule fois
 et rapporte :
 
 - le nombre total d'événements
@@ -479,7 +479,7 @@ Pour bien concevoir ce schéma — en suivant le principe « requête d'abord »
 ci-dessus — l'étape suivante consistait à découvrir *où dans les données
 un second acteur apparaît réellement*, car sans cela, il n'y a nulle part
 où sauter au-delà de « un autre dépôt touché par ce même acteur ».
-`scripts/profile_schema.py` lit le fichier entier et rapporte, par type
+`scripts/profile_schema.py` ([copie annotée](profile_schema.py)) lit le fichier entier et rapporte, par type
 d'événement :
 
 - quels champs de `payload` existent, à quelle fréquence, et de quel type

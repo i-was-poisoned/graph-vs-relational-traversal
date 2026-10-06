@@ -312,7 +312,7 @@ Now that we have a dataset downloaded and decompressed into JSON Lines format
 (`data/2026-08-27-15.json`), the next step is to actually look at what's in
 it, before trying to model it relationally or as a graph.
 
-`scripts/peek_data.py` reads the first few events from the file and prints
+`scripts/peek_data.py` ([annotated copy](peek_data.py)) reads the first few events from the file and prints
 their key fields (`type`, `actor`, `repo`, `created_at`) — a quick sanity
 check that the data looks like what [gh-archive-guide.md](gh-archive-guide.md)
 described, before writing any real parsing/loading logic against it.
@@ -340,7 +340,7 @@ is to get a sense of *volume and connectivity* across the whole downloaded
 hour, before picking a schema: how many events, how they break down by
 type, and how many distinct actors/repos are involved.
 
-`scripts/summarize_data.py` reads the full JSON Lines file once and reports:
+`scripts/summarize_data.py` ([annotated copy](summarize_data.py)) reads the full JSON Lines file once and reports:
 
 - total event count
 - event type breakdown (count and percentage, most common first)
@@ -419,7 +419,7 @@ available, through a second actor named inside an event's `payload`).
 To design that schema well — following the query-first principle above —
 the next step was finding out *where in the data a second actor actually
 appears*, since without one, there's nothing to hop to beyond "another repo
-this same actor touched." `scripts/profile_schema.py` reads the full file
+this same actor touched." `scripts/profile_schema.py` ([annotated copy](profile_schema.py)) reads the full file
 and reports, per event type:
 
 - which `payload` fields exist, how often, and what type they hold
