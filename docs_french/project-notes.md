@@ -741,7 +741,214 @@ La récursivité est l'outil naturel dès que les données ressemblent à des
 *boîtes dans des boîtes* : des dossiers dans des dossiers, du JSON dans du
 JSON et, plus tard dans ce projet, l'exploration d'un graphe saut par
 saut. La [copie annotée](profile_schema.py) détaille `find_actor_refs()`
-ligne par ligne, avec un déroulé pas à pas de chaque appel.
+ligne par ligne, et la partie suivante suit un exemple complet appel
+par appel.
+
+### Exemple complet : le déroulé de `find_actor_refs()` pas à pas
+
+Cet exemple passe par **toutes** les branches de la fonction : un
+dictionnaire sans `login`, un dictionnaire avec `login`, une liste, des
+valeurs simples et la limite de profondeur. Vous pouvez le lire avec le
+code de la fonction à côté :
+
+```python
+def find_actor_refs(value: object, path: str, depth: int) -> list[str]:
+    if depth < 0:
+        return []
+
+    if isinstance(value, dict):
+        if isinstance(value.get("login"), str):
+            return [path]
+        refs = []
+        for key, sub_value in value.items():
+            refs.extend(find_actor_refs(sub_value, f"{path}.{key}", depth - 1))
+        return refs
+
+    if isinstance(value, list):
+        refs = []
+        for item in value:
+            refs.extend(find_actor_refs(item, path, depth - 1))
+        return refs
+
+    return []
+```
+
+#### 1. Les données d'exemple
+
+Un `payload` semblable à celui d'un `IssuesEvent` :
+
+```python
+payload = {
+    "action": "opened",
+    "issue": {
+        "number": 7,
+        "user": {"login": "luis", "id": 1},
+        "assignees": [{"login": "ana"}, {"login": "marta"}],
+        "milestone": {"creator": {"login": "pedro"}}
+    }
+}
+```
+
+`profile()` lance tout avec un seul appel :
+`find_actor_refs(payload, "payload", 3)`.
+
+#### 2. La règle qui crée les appels suivants
+
+Chaque nouvel appel **naît de la boucle d'un appel précédent**. Quand la
+fonction reçoit un dictionnaire, sa boucle est :
+
+```python
+for key, sub_value in value.items():
+    refs.extend(find_actor_refs(sub_value, f"{path}.{key}", depth - 1))
+```
+
+`value.items()` donne une paire *(clé, valeur)* à chaque tour, et chaque
+tour lance **un appel**. Par exemple, dans l'appel 1 (`path = "payload"`,
+`depth = 3`), le premier tour donne `key = "action"` et
+`sub_value = "opened"`, et en remplaçant :
+
+| Argument | Calcul | Résultat |
+|---|---|---|
+| `sub_value` | la valeur de la clé `"action"` | `"opened"` |
+| `f"{path}.{key}"` | `"payload"` + `"."` + `"action"` | `"payload.action"` |
+| `depth - 1` | `3 - 1` | `2` |
+
+C'est ainsi que naît l'**appel 2** :
+`find_actor_refs("opened", "payload.action", 2)`.
+
+**Règle générale :**
+
+- **Dictionnaire →** un appel par clé. La **valeur** devient le nouveau
+  `value`, la **clé** est ajoutée au `path`, et `depth` baisse de 1.
+- **Liste →** un appel par élément. L'élément devient le nouveau `value` ;
+  comme il n'y a pas de clé, le `path` **ne change pas**, et `depth`
+  baisse de 1.
+- **Utilisateur** (dictionnaire avec `login`) **ou valeur simple →** plus
+  aucun appel : la fonction répond directement. Ce sont les **cas de
+  base**.
+
+C'est pour cela qu'il y a autant d'appels : **chaque conteneur génère un
+appel pour chaque chose qu'il contient**.
+
+#### 3. L'arbre des appels
+
+```
+APPEL 1   payload (dict à 2 clés)
+├── APPEL 2   action    → "opened", un texte          → []
+└── APPEL 3   issue     → dict à 4 clés
+    ├── APPEL 4   number    → 7, un nombre            → []
+    ├── APPEL 5   user      → utilisateur luis !      → ["payload.issue.user"]
+    ├── APPEL 6   assignees → liste à 2 éléments
+    │   ├── APPEL 7   ana    → utilisateur !          → ["payload.issue.assignees"]
+    │   └── APPEL 8   marta  → utilisateur !          → ["payload.issue.assignees"]
+    └── APPEL 9   milestone → dict à 1 clé
+        └── APPEL 10  creator → utilisateur pedro !   → ["payload.issue.milestone.creator"]
+```
+
+Chaque branche se termine quand elle atteint un **utilisateur** ou une
+**valeur simple**.
+
+#### 4. Tous les appels, un par un
+
+| Appel | Vient de | `value` | `path` | `depth` | Ce qu'il fait | Renvoie |
+|---|---|---|---|---|---|---|
+| 1 | `profile()` | tout le `payload` | `"payload"` | 3 | dict sans `login` → regarde ses 2 clés | 4 chemins |
+| 2 | appel 1, tour 1 (`action`) | `"opened"` | `"payload.action"` | 2 | texte, rien dedans | `[]` |
+| 3 | appel 1, tour 2 (`issue`) | l'`issue` | `"payload.issue"` | 2 | dict sans `login` → regarde ses 4 clés | 4 chemins |
+| 4 | appel 3, tour 1 (`number`) | `7` | `"payload.issue.number"` | 1 | nombre, rien dedans | `[]` |
+| 5 | appel 3, tour 2 (`user`) | `{"login": "luis", "id": 1}` | `"payload.issue.user"` | 1 | utilisateur ! | `["payload.issue.user"]` |
+| 6 | appel 3, tour 3 (`assignees`) | la liste `[ana, marta]` | `"payload.issue.assignees"` | 1 | liste → regarde ses 2 éléments | 2 chemins |
+| 7 | appel 6, élément 1 | `{"login": "ana"}` | `"payload.issue.assignees"` (le même) | 0 | utilisateur ! | `["payload.issue.assignees"]` |
+| 8 | appel 6, élément 2 | `{"login": "marta"}` | `"payload.issue.assignees"` (le même) | 0 | utilisateur ! | `["payload.issue.assignees"]` |
+| 9 | appel 3, tour 4 (`milestone`) | `{"creator": {...}}` | `"payload.issue.milestone"` | 1 | dict sans `login` → regarde son unique clé | 1 chemin |
+| 10 | appel 9, tour 1 (`creator`) | `{"login": "pedro"}` | `"payload.issue.milestone.creator"` | 0 | utilisateur ! | `["payload.issue.milestone.creator"]` |
+
+Regardez la colonne `depth` : elle baisse de 1 à chaque niveau
+(3 → 2 → 1 → 0). Les appels 7, 8 et 10 arrivent avec `depth = 0`, ce qui
+est encore permis car la vérification est `depth < 0`, et zéro n'est pas
+inférieur à zéro.
+
+#### 5. L'ordre dans le temps : pourquoi 6, 7, 8 puis 9
+
+Les appels sont numérotés dans l'ordre où ils **se produisent**, et Python
+**termine complètement un appel, avec tous ses « enfants », avant de
+revenir au précédent**. L'appel extérieur reste en pause pendant ce temps :
+
+1. L'appel 1 lance l'**appel 2** (clé `action`). L'appel 2 renvoie `[]`
+   tout de suite.
+2. L'appel 1 lance l'**appel 3** (clé `issue`) et se met en pause.
+3. L'appel 3 lance l'**appel 4** (`number`), qui renvoie `[]`, puis
+   l'**appel 5** (`user`), qui trouve luis.
+4. L'appel 3 lance l'**appel 6** (`assignees`) et se met en pause.
+5. L'appel 6 lance l'**appel 7** (ana) puis l'**appel 8** (marta). Quand
+   l'appel 8 se termine, l'appel 6 a parcouru toute sa liste et **renvoie**
+   son résultat à l'appel 3.
+6. **Seulement alors** l'appel 3 reprend et fait son dernier tour : il
+   lance l'**appel 9** (`milestone`), qui lance à son tour l'**appel 10**
+   (`creator`).
+7. L'appel 10 répond à l'appel 9, le 9 au 3, et le 3, qui a fini sa
+   boucle, répond au 1.
+
+C'est comme ouvrir des poupées russes : avant de passer à la poupée
+suivante du même niveau, on ouvre complètement celle qu'on a en main et
+toutes celles qu'elle contient.
+
+#### 6. Comment la liste `refs` se remplit
+
+Chaque appel a **sa propre** liste `refs`, et la remplit avec ce que lui
+renvoient ses appels enfants, grâce à `refs.extend(...)`. Voici comment
+grandit la `refs` de l'**appel 3** :
+
+| Après la réponse de... | Ce qu'il renvoie | `refs` de l'appel 3 |
+|---|---|---|
+| (au départ) | — | `[]` |
+| l'appel 4 | `[]` | `[]` (inchangée) |
+| l'appel 5 | `["payload.issue.user"]` | `["payload.issue.user"]` |
+| l'appel 6 | `["payload.issue.assignees", "payload.issue.assignees"]` | `["payload.issue.user", "payload.issue.assignees", "payload.issue.assignees"]` |
+| l'appel 9 | `["payload.issue.milestone.creator"]` | `["payload.issue.user", "payload.issue.assignees", "payload.issue.assignees", "payload.issue.milestone.creator"]` |
+
+**Quand un appel ne trouve rien,** il renvoie une liste vide (`[]`).
+`.extend([])` ajoute à `refs` tous les éléments de cette liste, c'est-à-dire
+aucun, donc **il n'y a rien à ajouter et la liste reste comme avant**. C'est
+le cas des appels 2 et 4. Seuls les appels qui trouvent *vraiment* un
+utilisateur (5, 7, 8 et 10) font grandir les listes.
+
+La `refs` de l'**appel 1** reçoit `[]` de l'appel 2 et les 4 chemins de
+l'appel 3 ; le résultat final est donc :
+
+```python
+['payload.issue.user',
+ 'payload.issue.assignees',
+ 'payload.issue.assignees',
+ 'payload.issue.milestone.creator']
+```
+
+#### 7. Deux détails de plus
+
+**La limite de profondeur en action.** Si un utilisateur se trouvait un
+niveau plus bas que ce que permet `MAX_SEARCH_DEPTH = 3` :
+
+```python
+deep = {"a": {"b": {"c": {"d": {"login": "x"}}}}}
+find_actor_refs(deep, "payload", 3)   # -> []
+```
+
+en arrivant à `{"login": "x"}`, `depth` vaudrait déjà **-1**, et la
+première vérification (`if depth < 0: return []`) s'arrêterait là : il **ne
+le trouve pas**. C'est le prix du filet de sécurité ; comme les payloads de
+GH Archive sont peu profonds, on ne perd rien en pratique.
+
+**Pourquoi `profile()` utilise `set(...)` ensuite.** Le résultat contient
+`payload.issue.assignees` **deux fois**, une pour ana et une pour marta.
+`profile()` fait `set(...)`, qui ne garde chaque chemin qu'une fois :
+
+```python
+{'payload.issue.user', 'payload.issue.assignees', 'payload.issue.milestone.creator'}
+```
+
+Ainsi cet événement compte comme **un** événement qui a des personnes
+assignées, pas deux : ce qu'on compte, c'est *dans combien d'événements*
+apparaît chaque chemin, pas combien d'utilisateurs il y a.
 
 ### À quoi sert le résultat
 
