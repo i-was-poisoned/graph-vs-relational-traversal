@@ -287,36 +287,80 @@ def find_actor_refs(value: object, path: str, depth: int) -> list[str]:
 #     issue).
 #   - Prepara refs = [] y recorre sus claves una a una:
 #
+#   DE DÓNDE SALEN LOS ARGUMENTOS DE LAS LLAMADAS SIGUIENTES
+#
+#   Cada llamada nueva nace del BUCLE de la llamada anterior. En la rama
+#   del dict, el bucle es:
+#
+#       for key, sub_value in value.items():
+#           refs.extend(find_actor_refs(sub_value, f"{path}.{key}", depth - 1))
+#
+#   En la llamada 1: value = payload, path = "payload", depth = 3.
+#   value.items() da un par (key, sub_value) en cada vuelta:
+#
+#       1ª vuelta: key = "action", sub_value = "opened"
+#       2ª vuelta: key = "issue",  sub_value = {...issue...}
+#
+#   Sustituyendo en la 1ª vuelta:
+#
+#       sub_value          -> "opened"
+#       f"{path}.{key}"    -> "payload" + "." + "action" = "payload.action"
+#       depth - 1          -> 3 - 1 = 2
+#
+#   y sale exactamente la LLAMADA 2. La 2ª vuelta da la LLAMADA 3.
+#
+#   Regla general:
+#     - el VALOR del par pasa a ser el nuevo `value` (lo que se examina);
+#     - la CLAVE se añade al `path` (el rastro de por dónde vamos);
+#     - `depth` baja 1, porque hemos bajado un nivel.
+#   En el bucle de LISTA no hay clave: cada elemento pasa a ser el nuevo
+#   `value`, el `path` se queda IGUAL, y `depth` baja 1.
+#
+#   Debajo de cada llamada, "Viene de" indica de qué vuelta de qué bucle
+#   nace.
+#
 #   LLAMADA 2: find_actor_refs("opened", "payload.action", 2)
+#     Viene de: 1ª vuelta del bucle de la llamada 1 (key = "action").
 #     - Es un texto: ni dict ni lista -> llega al `return []` final.
 #     - Devuelve [].  La llamada 1 hace refs.extend([]) -> refs = [].
 #
 #   LLAMADA 3: find_actor_refs({...issue...}, "payload.issue", 2)
+#     Viene de: 2ª vuelta del bucle de la llamada 1 (key = "issue";
+#     path "payload" + ".issue"; depth 3 - 1 = 2).
 #     - ¿Es un dict? SÍ. ¿Tiene "login"? No.
 #     - Prepara su PROPIA refs = [] (distinta de la de la llamada 1) y
 #       recorre sus claves:
 #
 #     LLAMADA 4: find_actor_refs(7, "payload.issue.number", 1)
+#       Viene de: 1ª vuelta del bucle de la llamada 3 (key = "number";
+#       path "payload.issue" + ".number"; depth 2 - 1 = 1).
 #       - Es un número: ni dict ni lista -> devuelve [].
 #
 #     LLAMADA 5: find_actor_refs({"login": "luis", "id": 1},
 #                                "payload.issue.user", 1)
+#       Viene de: 2ª vuelta del bucle de la llamada 3 (key = "user").
 #       - Dict con "login" de tipo texto ("luis") -> ¡ENCONTRADO!
 #       - Devuelve ["payload.issue.user"] y no mira más dentro.
 #       La llamada 3 ahora tiene refs = ["payload.issue.user"].
 #
 #     LLAMADA 6: find_actor_refs([{ana}, {marta}],
 #                                "payload.issue.assignees", 1)
+#       Viene de: 3ª vuelta del bucle de la llamada 3 (key = "assignees").
 #       - ¿Es un dict? No. ¿Es una lista? SÍ.
 #       - Recorre cada elemento. La ruta NO cambia (no se añade .0, .1).
 #
 #       LLAMADA 7: find_actor_refs({"login": "ana"},
 #                                  "payload.issue.assignees", 0)
+#         Viene de: 1ª vuelta del bucle de LISTA de la llamada 6
+#         (elemento {"login": "ana"}; sin clave, el path no cambia;
+#         depth 1 - 1 = 0).
 #         - depth = 0: cero no es menor que cero -> sigue.
 #         - Dict con "login" -> devuelve ["payload.issue.assignees"].
 #
 #       LLAMADA 8: find_actor_refs({"login": "marta"},
 #                                  "payload.issue.assignees", 0)
+#         Viene de: 2ª vuelta del bucle de LISTA de la llamada 6
+#         (elemento {"login": "marta"}).
 #         - Igual -> devuelve ["payload.issue.assignees"].
 #
 #       - La llamada 6 devuelve
@@ -324,10 +368,13 @@ def find_actor_refs(value: object, path: str, depth: int) -> list[str]:
 #
 #     LLAMADA 9: find_actor_refs({"creator": {...}},
 #                                "payload.issue.milestone", 1)
+#       Viene de: 4ª vuelta del bucle de la llamada 3 (key = "milestone").
 #       - Dict sin "login" -> recorre su única clave:
 #
 #       LLAMADA 10: find_actor_refs({"login": "pedro"},
 #                                   "payload.issue.milestone.creator", 0)
+#         Viene de: única vuelta del bucle de la llamada 9
+#         (key = "creator"; depth 1 - 1 = 0).
 #         - depth = 0 -> sigue. Dict con "login" ->
 #           devuelve ["payload.issue.milestone.creator"].
 #

@@ -265,37 +265,81 @@ def find_actor_refs(value: object, path: str, depth: int) -> list[str]:
 #     and issue).
 #   - Sets up refs = [] and goes through its keys one by one:
 #
+#   WHERE THE NEXT CALLS' ARGUMENTS COME FROM
+#
+#   Every new call is born from the LOOP of the previous call. In the
+#   dict branch, the loop is:
+#
+#       for key, sub_value in value.items():
+#           refs.extend(find_actor_refs(sub_value, f"{path}.{key}", depth - 1))
+#
+#   In call 1: value = payload, path = "payload", depth = 3.
+#   value.items() gives one (key, sub_value) pair on each pass:
+#
+#       1st pass: key = "action", sub_value = "opened"
+#       2nd pass: key = "issue",  sub_value = {...issue...}
+#
+#   Substituting on the 1st pass:
+#
+#       sub_value          -> "opened"
+#       f"{path}.{key}"    -> "payload" + "." + "action" = "payload.action"
+#       depth - 1          -> 3 - 1 = 2
+#
+#   and out comes exactly CALL 2. The 2nd pass gives CALL 3.
+#
+#   General rule:
+#     - the pair's VALUE becomes the new `value` (what gets examined);
+#     - the KEY is added to `path` (the trail of where we are);
+#     - `depth` drops by 1, because we've gone down one level.
+#   In the LIST loop there's no key: each item becomes the new `value`,
+#   `path` stays the SAME, and `depth` drops by 1.
+#
+#   Under each call, "Comes from" says which pass of which loop it was
+#   born from.
+#
 #   CALL 2: find_actor_refs("opened", "payload.action", 2)
+#     Comes from: 1st pass of call 1's loop (key = "action").
 #     - It's text: neither dict nor list -> reaches the final
 #       `return []`.
 #     - Returns [].  Call 1 does refs.extend([]) -> refs = [].
 #
 #   CALL 3: find_actor_refs({...issue...}, "payload.issue", 2)
+#     Comes from: 2nd pass of call 1's loop (key = "issue";
+#     path "payload" + ".issue"; depth 3 - 1 = 2).
 #     - Is it a dict? YES. Does it have "login"? No.
 #     - Sets up its OWN refs = [] (separate from call 1's) and goes
 #       through its keys:
 #
 #     CALL 4: find_actor_refs(7, "payload.issue.number", 1)
+#       Comes from: 1st pass of call 3's loop (key = "number";
+#       path "payload.issue" + ".number"; depth 2 - 1 = 1).
 #       - It's a number: neither dict nor list -> returns [].
 #
 #     CALL 5: find_actor_refs({"login": "luis", "id": 1},
 #                             "payload.issue.user", 1)
+#       Comes from: 2nd pass of call 3's loop (key = "user").
 #       - A dict with a text "login" ("luis") -> FOUND!
 #       - Returns ["payload.issue.user"] and doesn't look further in.
 #       Call 3 now has refs = ["payload.issue.user"].
 #
 #     CALL 6: find_actor_refs([{ana}, {marta}],
 #                             "payload.issue.assignees", 1)
+#       Comes from: 3rd pass of call 3's loop (key = "assignees").
 #       - Is it a dict? No. Is it a list? YES.
 #       - Goes through each item. The path does NOT change (no .0, .1).
 #
 #       CALL 7: find_actor_refs({"login": "ana"},
 #                               "payload.issue.assignees", 0)
+#         Comes from: 1st pass of call 6's LIST loop
+#         (item {"login": "ana"}; no key, so the path doesn't change;
+#         depth 1 - 1 = 0).
 #         - depth = 0: zero isn't less than zero -> carry on.
 #         - A dict with "login" -> returns ["payload.issue.assignees"].
 #
 #       CALL 8: find_actor_refs({"login": "marta"},
 #                               "payload.issue.assignees", 0)
+#         Comes from: 2nd pass of call 6's LIST loop
+#         (item {"login": "marta"}).
 #         - Same -> returns ["payload.issue.assignees"].
 #
 #       - Call 6 returns
@@ -303,10 +347,13 @@ def find_actor_refs(value: object, path: str, depth: int) -> list[str]:
 #
 #     CALL 9: find_actor_refs({"creator": {...}},
 #                             "payload.issue.milestone", 1)
+#       Comes from: 4th pass of call 3's loop (key = "milestone").
 #       - A dict without "login" -> goes through its only key:
 #
 #       CALL 10: find_actor_refs({"login": "pedro"},
 #                                "payload.issue.milestone.creator", 0)
+#         Comes from: the only pass of call 9's loop
+#         (key = "creator"; depth 1 - 1 = 0).
 #         - depth = 0 -> carry on. A dict with "login" ->
 #           returns ["payload.issue.milestone.creator"].
 #

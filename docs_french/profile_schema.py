@@ -294,38 +294,83 @@ def find_actor_refs(value: object, path: str, depth: int) -> list[str]:
 #     et issue).
 #   - Prépare refs = [] et parcourt ses clés une par une :
 #
+#   D'OÙ VIENNENT LES ARGUMENTS DES APPELS SUIVANTS
+#
+#   Chaque nouvel appel naît de la BOUCLE de l'appel précédent. Dans la
+#   branche dict, la boucle est :
+#
+#       for key, sub_value in value.items():
+#           refs.extend(find_actor_refs(sub_value, f"{path}.{key}", depth - 1))
+#
+#   Dans l'appel 1 : value = payload, path = "payload", depth = 3.
+#   value.items() donne une paire (key, sub_value) à chaque tour :
+#
+#       1er tour : key = "action", sub_value = "opened"
+#       2e tour  : key = "issue",  sub_value = {...issue...}
+#
+#   En remplaçant au 1er tour :
+#
+#       sub_value          -> "opened"
+#       f"{path}.{key}"    -> "payload" + "." + "action" = "payload.action"
+#       depth - 1          -> 3 - 1 = 2
+#
+#   on obtient exactement l'APPEL 2. Le 2e tour donne l'APPEL 3.
+#
+#   Règle générale :
+#     - la VALEUR de la paire devient le nouveau `value` (ce qu'on
+#       examine) ;
+#     - la CLÉ est ajoutée au `path` (la trace de l'endroit où l'on est) ;
+#     - `depth` baisse de 1, parce qu'on est descendu d'un niveau.
+#   Dans la boucle de LISTE, il n'y a pas de clé : chaque élément devient
+#   le nouveau `value`, le `path` reste le MÊME, et `depth` baisse de 1.
+#
+#   Sous chaque appel, « Vient de » indique de quel tour de quelle boucle
+#   il naît.
+#
 #   APPEL 2 : find_actor_refs("opened", "payload.action", 2)
+#     Vient de : 1er tour de la boucle de l'appel 1 (key = "action").
 #     - C'est du texte : ni dict ni liste -> arrive au `return []`
 #       final.
 #     - Renvoie [].  L'appel 1 fait refs.extend([]) -> refs = [].
 #
 #   APPEL 3 : find_actor_refs({...issue...}, "payload.issue", 2)
+#     Vient de : 2e tour de la boucle de l'appel 1 (key = "issue" ;
+#     path "payload" + ".issue" ; depth 3 - 1 = 2).
 #     - Est-ce un dict ? OUI. A-t-il "login" ? Non.
 #     - Prépare SA PROPRE refs = [] (distincte de celle de l'appel 1) et
 #       parcourt ses clés :
 #
 #     APPEL 4 : find_actor_refs(7, "payload.issue.number", 1)
+#       Vient de : 1er tour de la boucle de l'appel 3 (key = "number" ;
+#       path "payload.issue" + ".number" ; depth 2 - 1 = 1).
 #       - C'est un nombre : ni dict ni liste -> renvoie [].
 #
 #     APPEL 5 : find_actor_refs({"login": "luis", "id": 1},
 #                               "payload.issue.user", 1)
+#       Vient de : 2e tour de la boucle de l'appel 3 (key = "user").
 #       - Un dict avec un "login" texte ("luis") -> TROUVÉ !
 #       - Renvoie ["payload.issue.user"] et ne regarde pas plus loin.
 #       L'appel 3 a maintenant refs = ["payload.issue.user"].
 #
 #     APPEL 6 : find_actor_refs([{ana}, {marta}],
 #                               "payload.issue.assignees", 1)
+#       Vient de : 3e tour de la boucle de l'appel 3 (key = "assignees").
 #       - Est-ce un dict ? Non. Est-ce une liste ? OUI.
 #       - Parcourt chaque élément. Le chemin NE change PAS (pas de .0,
 #         .1).
 #
 #       APPEL 7 : find_actor_refs({"login": "ana"},
 #                                 "payload.issue.assignees", 0)
+#         Vient de : 1er tour de la boucle de LISTE de l'appel 6
+#         (élément {"login": "ana"} ; pas de clé, le path ne change pas ;
+#         depth 1 - 1 = 0).
 #         - depth = 0 : zéro n'est pas inférieur à zéro -> on continue.
 #         - Un dict avec "login" -> renvoie ["payload.issue.assignees"].
 #
 #       APPEL 8 : find_actor_refs({"login": "marta"},
 #                                 "payload.issue.assignees", 0)
+#         Vient de : 2e tour de la boucle de LISTE de l'appel 6
+#         (élément {"login": "marta"}).
 #         - Pareil -> renvoie ["payload.issue.assignees"].
 #
 #       - L'appel 6 renvoie
@@ -333,10 +378,13 @@ def find_actor_refs(value: object, path: str, depth: int) -> list[str]:
 #
 #     APPEL 9 : find_actor_refs({"creator": {...}},
 #                               "payload.issue.milestone", 1)
+#       Vient de : 4e tour de la boucle de l'appel 3 (key = "milestone").
 #       - Un dict sans "login" -> parcourt son unique clé :
 #
 #       APPEL 10 : find_actor_refs({"login": "pedro"},
 #                                  "payload.issue.milestone.creator", 0)
+#         Vient de : l'unique tour de la boucle de l'appel 9
+#         (key = "creator" ; depth 1 - 1 = 0).
 #         - depth = 0 -> on continue. Un dict avec "login" ->
 #           renvoie ["payload.issue.milestone.creator"].
 #
