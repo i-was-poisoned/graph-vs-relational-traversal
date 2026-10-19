@@ -396,6 +396,11 @@ et rapporte :
   fréquent au moins fréquent)
 - le nombre d'acteurs et de dépôts uniques
 - les N acteurs et dépôts les plus actifs par nombre d'événements
+- la connectivité : combien de dépôts ont 2 acteurs distincts ou plus,
+  combien d'acteurs ont touché 2 dépôts ou plus, et combien d'acteurs
+  partagent un dépôt avec au moins un autre acteur
+- les N acteurs ayant touché le plus de dépôts *distincts*, et les N
+  dépôts ayant le plus d'acteurs *distincts*
 
 Exécutez-le avec :
 
@@ -404,6 +409,9 @@ python scripts/summarize_data.py
 
 # Afficher plus d'acteurs/dépôts les plus actifs
 python scripts/summarize_data.py --top 10
+
+# Même synthèse, en ignorant les comptes bots (logins finissant par "[bot]")
+python scripts/summarize_data.py --exclude-bots
 ```
 
 Pour l'heure fixe du 2026-08-27 15h00 UTC, cela a montré 69 429 événements
@@ -431,6 +439,82 @@ chaque acteur a produit environ 4,7 événements (69 429 ÷ 14 728), mais
 cette moyenne cache une répartition très inégale, avec des bots en tête de
 liste ; c'est pourquoi la décision de filtrage des bots ci-dessus influe
 directement sur le degré de connexion du graphe.
+
+### Résultats de connectivité : avec et sans bots
+
+Compter les événements et les noms uniques ne suffit pas pour savoir si les
+données permettent le benchmark. Le benchmark parcourt
+`acteur → dépôt → acteur → dépôt`, et chaque pas d'un dépôt vers un *autre*
+acteur n'est possible que si ce dépôt a été touché par au moins deux
+acteurs différents. `summarize_data.py` mesure donc aussi la connectivité,
+et l'option `--exclude-bots` relance tout sans les comptes dont le login
+finit par `[bot]` :
+
+| Mesure | Tous les événements | Sans bots |
+|---|---|---|
+| Événements | 69 429 | 67 459 (1 970 événements de bots retirés, 2,8 %) |
+| Acteurs uniques | 14 728 | 14 515 |
+| Dépôts uniques | 16 497 | 14 995 |
+| Dépôts avec 2+ acteurs distincts | 145 (0,9 % des dépôts) | 49 (0,3 %) |
+| Acteurs ayant touché 2+ dépôts | 256 (1,7 % des acteurs) | 211 (1,5 %) |
+| Acteurs partageant un dépôt avec un autre acteur | 234 (1,6 % des acteurs) | 101 (0,7 %) |
+
+**Conclusions :**
+
+1. **Les push dominent.** `PushEvent` représente 95,3 % de tous les
+   événements (96,3 % sans bots). Les types d'événements qui relient
+   directement deux personnes (commentaires, revues, issues) font environ
+   1 % au total. Les connexions entre acteurs viendront donc presque
+   entièrement des *dépôts partagés*, ce qui concorde avec ce qu'a trouvé
+   `profile_schema.py` (voir l'étape de conception du schéma plus bas).
+2. **Plus de dépôts que d'acteurs signifie que certains acteurs touchent
+   plusieurs dépôts.** Si chaque acteur n'avait touché qu'un seul dépôt,
+   il y aurait au plus autant de dépôts que d'acteurs. Il y a plus de
+   dépôts (16 497 contre 14 728), donc certains acteurs ont forcément
+   travaillé sur plusieurs — mais seulement 1,7 % d'entre eux.
+3. **Le graphe est extrêmement fragmenté.** 99 % des dépôts ont été touchés
+   par un seul acteur, et environ 98 % des acteurs ne partagent aucun dépôt
+   avec qui que ce soit. L'événement typique est une personne qui pousse
+   vers son propre dépôt. Le dépôt le plus « partagé » compte 12 acteurs
+   distincts avec les bots, et seulement 4 sans. Pour un benchmark de
+   parcours, c'est le résultat clé : la plupart des parcours s'arrêteraient
+   après le premier saut.
+4. **Les bots pèsent peu en volume mais beaucoup en connectivité.** Les bots
+   ne représentent que 2,8 % des événements, mais `github-actions[bot]` à
+   lui seul touche 785 dépôts différents. Retirer les bots supprime environ
+   deux tiers des dépôts partagés (145 → 49) et plus de la moitié des
+   acteurs connectés (234 → 101) : la plupart des connexions de cette heure
+   viennent des bots. Ils
+   agissent comme des centres artificiels, reliant des dépôts qui n'ont
+   rien à voir entre eux. Un benchmark lancé sur ces données mesurerait
+   surtout « tout se connecte via github-actions » ; les bots doivent donc
+   être exclus des données du benchmark.
+5. **Le filtre `[bot]` n'est pas complet.** Certains comptes automatisés
+   n'utilisent pas ce suffixe : `Copilot` touche 41 dépôts. Et une fois les
+   bots retirés, les comptes les plus actifs ont des noms qui semblent
+   générés (`beckjulie09`, `hayeshenry6`, ...), chacun poussant 35 à 39
+   fois vers son propre dépôt au nom aléatoire (`hpmxym`, `eznfko`, ...) —
+   probablement des comptes automatisés ou du spam. Ils n'ajoutent pas de
+   connexions (chacun ne touche que son propre dépôt), mais ils gonflent
+   le volume d'événements.
+
+**Ce que cela implique pour le projet :**
+
+- **Une heure de données ne suffit pas pour un benchmark multi-sauts.** Avec
+  seulement une centaine d'acteurs connectés une fois les bots retirés, un
+  parcours de 3 ou 4 sauts n'a presque nulle part où aller. L'étape
+  suivante est de télécharger plus d'heures (par ex. une journée complète,
+  ou plusieurs jours) et de relancer `summarize_data.py` pour voir si le
+  nombre de dépôts partagés augmente. La question de recherche porte aussi
+  sur le *volume* de données, donc il faudra de toute façon plusieurs
+  tailles de jeu de données.
+- **Politique sur les bots :** exclure les comptes `[bot]` des données du
+  benchmark, et envisager une liste d'exclusion explicite pour les comptes
+  automatisés connus sans ce suffixe (comme `Copilot`).
+- **Vérifier la connectivité avant chaque benchmark.** Relancer ces mesures
+  sur chaque taille de jeu de données avant de chronométrer une requête,
+  pour ne jamais lancer le benchmark sur un graphe où il n'y a rien à
+  parcourir.
 
 ## Ce que signifie « benchmark » pour ce projet
 

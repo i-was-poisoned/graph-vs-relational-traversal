@@ -384,6 +384,11 @@ y reporta:
   menos frecuente)
 - el número de actores y repos únicos
 - los N actores y repos más activos por número de eventos
+- la conectividad: cuántos repos tienen 2 o más actores distintos, cuántos
+  actores han tocado 2 o más repos, y cuántos actores comparten un repo con
+  al menos otro actor
+- los N actores que han tocado más repos *distintos*, y los N repos con más
+  actores *distintos*
 
 Ejecútalo con:
 
@@ -392,6 +397,9 @@ python scripts/summarize_data.py
 
 # Mostrar más actores/repos más activos
 python scripts/summarize_data.py --top 10
+
+# El mismo resumen, ignorando las cuentas bot (logins que terminan en "[bot]")
+python scripts/summarize_data.py --exclude-bots
 ```
 
 Para la hora fija del 2026-08-27 15:00 UTC, esto mostró 69.429 eventos
@@ -418,6 +426,79 @@ media, cada actor produjo unos 4,7 eventos (69.429 ÷ 14.728), pero esa
 media esconde un reparto muy desigual, con bots en lo más alto de la lista;
 por eso la decisión sobre filtrar bots de arriba afecta directamente a lo
 conectado que estará el grafo.
+
+### Resultados de conectividad: con y sin bots
+
+Contar eventos y nombres únicos no basta para saber si los datos sirven
+para el benchmark. El benchmark recorre `actor → repo → actor → repo`, y
+cada paso de un repo a *otro* actor solo es posible si ese repo lo han
+tocado al menos dos actores distintos. Por eso `summarize_data.py` también
+mide la conectividad, y la opción `--exclude-bots` repite todo sin las
+cuentas cuyo login termina en `[bot]`:
+
+| Medida | Todos los eventos | Sin bots |
+|---|---|---|
+| Eventos | 69.429 | 67.459 (1.970 eventos de bots eliminados, 2,8 %) |
+| Actores únicos | 14.728 | 14.515 |
+| Repos únicos | 16.497 | 14.995 |
+| Repos con 2+ actores distintos | 145 (0,9 % de los repos) | 49 (0,3 %) |
+| Actores que tocaron 2+ repos | 256 (1,7 % de los actores) | 211 (1,5 %) |
+| Actores que comparten un repo con otro actor | 234 (1,6 % de los actores) | 101 (0,7 %) |
+
+**Conclusiones:**
+
+1. **Los push dominan.** `PushEvent` es el 95,3 % de todos los eventos (el
+   96,3 % sin bots). Los tipos de evento que conectan directamente a dos
+   personas (comentarios, revisiones, issues) suman alrededor del 1 %. Las
+   conexiones entre actores vendrán casi siempre de *repos compartidos*,
+   lo que coincide con lo que encontró `profile_schema.py` (ver la etapa
+   de diseño del esquema más abajo).
+2. **Que haya más repos que actores significa que algunos actores tocan
+   varios repos.** Si cada actor hubiera tocado un solo repo, habría como
+   mucho tantos repos como actores. Hay más repos (16.497 frente a
+   14.728), así que algunos actores tienen que haber trabajado en varios
+   — pero solo el 1,7 % lo hizo.
+3. **El grafo está extremadamente fragmentado.** El 99 % de los repos lo
+   tocó un único actor, y alrededor del 98 % de los actores no comparte
+   ningún repo con nadie. El evento típico es una persona haciendo push a
+   su propio repo. El repo más "compartido" tiene 12 actores distintos con
+   bots, y solo 4 sin ellos. Para un benchmark de recorridos este es el
+   resultado clave: la mayoría de los recorridos se pararían después del
+   primer salto.
+4. **Los bots pesan poco en volumen pero mucho en conectividad.** Los bots
+   son solo el 2,8 % de los eventos, pero `github-actions[bot]` por sí solo
+   toca 785 repos distintos. Al quitar los bots desaparecen unas dos
+   terceras partes de los repos compartidos (145 → 49) y más de la mitad
+   de los actores conectados (234 → 101): la mayoría de las conexiones de
+   esta hora vienen de bots. Actúan
+   como centros artificiales que unen repos que no tienen nada que ver
+   entre sí. Un benchmark con estos datos mediría sobre todo "todo se
+   conecta a través de github-actions", así que los bots deben quedar
+   fuera de los datos del benchmark.
+5. **El filtro `[bot]` no es completo.** Algunas cuentas automáticas no
+   usan ese sufijo: `Copilot` toca 41 repos. Y sin bots, las cuentas más
+   activas tienen nombres que parecen generados (`beckjulie09`,
+   `hayeshenry6`, ...), cada una haciendo entre 35 y 39 push a su propio
+   repo con un nombre aleatorio (`hpmxym`, `eznfko`, ...): probablemente
+   cuentas automáticas o spam. No añaden conexiones (cada una solo toca su
+   propio repo), pero sí inflan el volumen de eventos.
+
+**Qué significa esto para el proyecto:**
+
+- **Una hora de datos no basta para un benchmark de varios saltos.** Con
+  solo unos 100 actores conectados una vez quitados los bots, un recorrido
+  de 3 o 4 saltos casi no tiene adónde ir. El siguiente paso es descargar
+  más horas (por ejemplo, un día completo o varios días) y volver a
+  ejecutar `summarize_data.py` para ver si crece el número de repos
+  compartidos. La pregunta de investigación también trata del *volumen*
+  de datos, así que de todas formas harán falta varios tamaños de datos.
+- **Política sobre bots:** excluir las cuentas `[bot]` de los datos del
+  benchmark, y plantearse una lista de exclusión explícita para cuentas
+  automáticas conocidas que no llevan el sufijo (como `Copilot`).
+- **Comprobar la conectividad antes de cada benchmark.** Volver a calcular
+  estas medidas para cada tamaño de datos antes de cronometrar ninguna
+  consulta, para no lanzar nunca el benchmark sobre un grafo en el que no
+  hay nada que recorrer.
 
 ## Qué significa "benchmark" para este proyecto
 
