@@ -768,28 +768,140 @@ payload = {
 
 #### 2. La regla que crea las llamadas siguientes
 
-Cada llamada nueva **nace del bucle de una llamada anterior**. Cuando la
-función recibe un diccionario, su bucle es:
+Cada llamada nueva **nace del bucle de una llamada anterior**. Para
+entender cómo, primero hacen falta cinco piezas básicas de Python. Después
+las juntamos.
+
+##### 2.1 Conocimientos base
+
+**a) Un diccionario guarda parejas *clave → valor*.**
+Es como una agenda: buscas por el nombre (la **clave**) y obtienes el dato
+(el **valor**). Nuestro `payload` es un diccionario con **dos** claves:
+
+```python
+payload = {
+    "action": "opened",       # clave "action" → valor "opened"
+    "issue":  {...}           # clave "issue"  → valor: otro diccionario
+}
+
+payload["action"]   # → "opened"
+payload["issue"]    # → {...} (el diccionario del issue)
+```
+
+**b) `.items()` da todas las parejas, una detrás de otra.**
+Si quieres recorrer un diccionario entero, `.items()` te da cada pareja
+como un **par** `(clave, valor)`:
+
+```python
+list(payload.items())
+# → [("action", "opened"), ("issue", {...})]
+#      └── 1er par ──┘     └─── 2º par ───┘
+```
+
+**c) El `for` coge un par en cada vuelta y lo reparte en dos variables.**
+Cuando escribes dos nombres separados por una coma después de `for`,
+Python coge cada par y pone su primera parte en la primera variable y su
+segunda parte en la segunda:
+
+```python
+for key, sub_value in payload.items():
+    print(key, "→", sub_value)
+
+# 1ª vuelta:  key = "action"   sub_value = "opened"
+# 2ª vuelta:  key = "issue"    sub_value = {...}
+```
+
+`key` y `sub_value` son solo nombres que elegimos. En cada vuelta cambian
+de valor: primero valen lo del 1er par, después lo del 2º.
+
+**d) Al llamar a una función, cada argumento va a su parámetro, en orden.**
+La función está definida con tres parámetros:
+
+```python
+def find_actor_refs(value, path, depth):
+```
+
+Así que en una llamada como esta:
+
+```python
+find_actor_refs("opened", "payload.action", 2)
+#               │         │                 │
+#               ▼         ▼                 ▼
+#             value     path              depth
+```
+
+dentro de esa llamada, `value` vale `"opened"`, `path` vale
+`"payload.action"` y `depth` vale `2`. El **primer** valor va al
+**primer** parámetro, el segundo al segundo y el tercero al tercero. Y
+cada llamada tiene **sus propias** copias de esas variables (ver el
+apartado de recursividad).
+
+**e) Un f-string monta un texto con trozos de variables.**
+Un texto con una `f` delante puede llevar variables entre llaves `{}`, y
+Python las sustituye por su valor:
+
+```python
+path = "payload"
+key = "action"
+f"{path}.{key}"     # → "payload" + "." + "action" → "payload.action"
+```
+
+El punto del medio es un punto normal, que forma parte del texto. Por eso
+el resultado parece una "dirección" dentro de los datos:
+`payload.action` significa "la clave `action` dentro del `payload`".
+
+##### 2.2 Juntando las piezas
+
+Ahora sí, la línea del bucle de la función:
 
 ```python
 for key, sub_value in value.items():
     refs.extend(find_actor_refs(sub_value, f"{path}.{key}", depth - 1))
 ```
 
-`value.items()` da un par *(clave, valor)* en cada vuelta, y cada vuelta
-lanza **una llamada**. Por ejemplo, en la llamada 1 (`path = "payload"`,
-`depth = 3`), la primera vuelta da `key = "action"` y
-`sub_value = "opened"`, y al sustituir:
+> **Bucle, iteración y vuelta.** Un **bucle** (en inglés *loop*) es el
+> bloque de código que se repite entero: el `for ...:` con todo lo que
+> tiene dentro. Cada una de sus repeticiones es una **iteración** (en
+> inglés *iteration*), o, dicho de forma más coloquial, una **vuelta**:
+> en estas notas, "vuelta" e "iteración" significan lo mismo. El verbo
+> **iterar** (*to iterate*) significa recorrer algo elemento a elemento,
+> que es justo lo que hace un bucle. Por ejemplo, el `issue` tiene 4
+> claves, así que el bucle de la llamada 3 hace **4 iteraciones**
+> (`number`, `user`, `assignees` y `milestone`).
 
-| Argumento | Cálculo | Resultado |
+Vamos a seguirla dentro de la **llamada 1**. Al empezar esa llamada, sus
+tres parámetros valen (pieza *d*):
+
+| Parámetro | Valor en la llamada 1 |
+|---|---|
+| `value` | todo el `payload` |
+| `path` | `"payload"` |
+| `depth` | `3` |
+
+`value` es un diccionario con dos claves, así que `value.items()` da dos
+pares (pieza *b*) y el bucle da **dos vueltas** (pieza *c*). En cada
+vuelta, Python calcula los tres argumentos de la llamada nueva:
+
+| | 1ª vuelta | 2ª vuelta |
 |---|---|---|
-| `sub_value` | el valor de la clave `"action"` | `"opened"` |
-| `f"{path}.{key}"` | `"payload"` + `"."` + `"action"` | `"payload.action"` |
-| `depth - 1` | `3 - 1` | `2` |
+| `key` (pieza *c*) | `"action"` | `"issue"` |
+| `sub_value` (pieza *c*) | `"opened"` | el diccionario del `issue` |
+| 1er argumento: `sub_value` | `"opened"` | el diccionario del `issue` |
+| 2º argumento: `f"{path}.{key}"` (pieza *e*) | `"payload" + "." + "action"` = `"payload.action"` | `"payload" + "." + "issue"` = `"payload.issue"` |
+| 3er argumento: `depth - 1` | `3 - 1` = `2` | `3 - 1` = `2` |
+| **Llamada que nace** | `find_actor_refs("opened", "payload.action", 2)` → **llamada 2** | `find_actor_refs({...issue...}, "payload.issue", 2)` → **llamada 3** |
 
-Así nace la **llamada 2**: `find_actor_refs("opened", "payload.action", 2)`.
+Y cuando la llamada 2 empieza, sus parámetros reciben esos tres valores en
+orden (pieza *d*): `value = "opened"`, `path = "payload.action"` y
+`depth = 2`. **Lo que en la llamada 1 eran `sub_value`, el texto montado y
+`depth - 1`, en la llamada 2 pasan a ser `value`, `path` y `depth`.**
 
-**Regla general:**
+Lo que hace `refs.extend(...)` con la respuesta de cada llamada se explica
+más abajo, en la parte 6.
+
+##### 2.3 La regla general
+
+Lo mismo pasa en todas las llamadas del ejemplo:
 
 - **Diccionario →** una llamada por cada clave. El **valor** pasa a ser el
   nuevo `value`, la **clave** se añade al `path` y `depth` baja 1.

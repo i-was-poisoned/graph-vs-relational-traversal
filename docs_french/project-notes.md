@@ -794,29 +794,144 @@ payload = {
 
 #### 2. La règle qui crée les appels suivants
 
-Chaque nouvel appel **naît de la boucle d'un appel précédent**. Quand la
-fonction reçoit un dictionnaire, sa boucle est :
+Chaque nouvel appel **naît de la boucle d'un appel précédent**. Pour
+comprendre comment, il faut d'abord cinq notions de base de Python.
+Ensuite, on les assemble.
+
+##### 2.1 Notions de base
+
+**a) Un dictionnaire stocke des paires *clé → valeur*.**
+C'est comme un carnet d'adresses : on cherche par le nom (la **clé**) et on
+obtient l'information (la **valeur**). Notre `payload` est un dictionnaire
+à **deux** clés :
+
+```python
+payload = {
+    "action": "opened",       # clé "action" → valeur "opened"
+    "issue":  {...}           # clé "issue"  → valeur : un autre dictionnaire
+}
+
+payload["action"]   # → "opened"
+payload["issue"]    # → {...} (le dictionnaire de l'issue)
+```
+
+**b) `.items()` donne toutes les paires, l'une après l'autre.**
+Pour parcourir un dictionnaire en entier, `.items()` donne chaque entrée
+sous forme de **paire** `(clé, valeur)` :
+
+```python
+list(payload.items())
+# → [("action", "opened"), ("issue", {...})]
+#      └─ 1re paire ─┘     └── 2e paire ──┘
+```
+
+**c) Le `for` prend une paire à chaque tour et la répartit dans deux
+variables.**
+Quand on écrit deux noms séparés par une virgule après `for`, Python prend
+chaque paire et met sa première partie dans la première variable et sa
+seconde partie dans la seconde :
+
+```python
+for key, sub_value in payload.items():
+    print(key, "→", sub_value)
+
+# 1er tour :  key = "action"   sub_value = "opened"
+# 2e tour  :  key = "issue"    sub_value = {...}
+```
+
+`key` et `sub_value` ne sont que des noms qu'on a choisis. Ils changent de
+valeur à chaque tour : d'abord ceux de la 1re paire, puis ceux de la 2e.
+
+**d) Quand on appelle une fonction, chaque argument va à son paramètre,
+dans l'ordre.**
+La fonction est définie avec trois paramètres :
+
+```python
+def find_actor_refs(value, path, depth):
+```
+
+Donc, dans un appel comme celui-ci :
+
+```python
+find_actor_refs("opened", "payload.action", 2)
+#               │         │                 │
+#               ▼         ▼                 ▼
+#             value     path              depth
+```
+
+à l'intérieur de cet appel, `value` vaut `"opened"`, `path` vaut
+`"payload.action"` et `depth` vaut `2`. La **première** valeur va au
+**premier** paramètre, la deuxième au deuxième et la troisième au
+troisième. Et chaque appel a **ses propres** copies de ces variables (voir
+la partie sur la récursivité).
+
+**e) Une f-string construit un texte à partir de variables.**
+Un texte précédé d'un `f` peut contenir des variables entre accolades
+`{}`, et Python les remplace par leur valeur :
+
+```python
+path = "payload"
+key = "action"
+f"{path}.{key}"     # → "payload" + "." + "action" → "payload.action"
+```
+
+Le point du milieu est un point ordinaire, qui fait partie du texte. C'est
+pour cela que le résultat ressemble à une « adresse » dans les données :
+`payload.action` veut dire « la clé `action` dans le `payload` ».
+
+##### 2.2 Assembler les morceaux
+
+Voici maintenant la ligne de la boucle de la fonction :
 
 ```python
 for key, sub_value in value.items():
     refs.extend(find_actor_refs(sub_value, f"{path}.{key}", depth - 1))
 ```
 
-`value.items()` donne une paire *(clé, valeur)* à chaque tour, et chaque
-tour lance **un appel**. Par exemple, dans l'appel 1 (`path = "payload"`,
-`depth = 3`), le premier tour donne `key = "action"` et
-`sub_value = "opened"`, et en remplaçant :
+> **Boucle, itération et tour.** Une **boucle** (en anglais *loop*) est le
+> bloc de code qui se répète en entier : le `for ...:` avec tout ce qu'il
+> contient. Chacune de ses répétitions est une **itération** (en anglais
+> *iteration*), ou, de façon plus familière, un **tour** : dans ces notes,
+> « tour » et « itération » veulent dire la même chose. Le verbe
+> **itérer** (*to iterate*) signifie parcourir quelque chose élément par
+> élément, ce que fait justement une boucle. Par exemple, l'`issue` a 4
+> clés, donc la boucle de l'appel 3 fait **4 itérations** (`number`,
+> `user`, `assignees` et `milestone`).
 
-| Argument | Calcul | Résultat |
+Suivons-la dans l'**appel 1**. Au début de cet appel, ses trois paramètres
+valent (notion *d*) :
+
+| Paramètre | Valeur dans l'appel 1 |
+|---|---|
+| `value` | tout le `payload` |
+| `path` | `"payload"` |
+| `depth` | `3` |
+
+`value` est un dictionnaire à deux clés, donc `value.items()` donne deux
+paires (notion *b*) et la boucle fait **deux tours** (notion *c*). À chaque
+tour, Python calcule les trois arguments du nouvel appel :
+
+| | 1er tour | 2e tour |
 |---|---|---|
-| `sub_value` | la valeur de la clé `"action"` | `"opened"` |
-| `f"{path}.{key}"` | `"payload"` + `"."` + `"action"` | `"payload.action"` |
-| `depth - 1` | `3 - 1` | `2` |
+| `key` (notion *c*) | `"action"` | `"issue"` |
+| `sub_value` (notion *c*) | `"opened"` | le dictionnaire de l'`issue` |
+| 1er argument : `sub_value` | `"opened"` | le dictionnaire de l'`issue` |
+| 2e argument : `f"{path}.{key}"` (notion *e*) | `"payload" + "." + "action"` = `"payload.action"` | `"payload" + "." + "issue"` = `"payload.issue"` |
+| 3e argument : `depth - 1` | `3 - 1` = `2` | `3 - 1` = `2` |
+| **Appel qui naît** | `find_actor_refs("opened", "payload.action", 2)` → **appel 2** | `find_actor_refs({...issue...}, "payload.issue", 2)` → **appel 3** |
 
-C'est ainsi que naît l'**appel 2** :
-`find_actor_refs("opened", "payload.action", 2)`.
+Et quand l'appel 2 commence, ses paramètres reçoivent ces trois valeurs
+dans l'ordre (notion *d*) : `value = "opened"`, `path = "payload.action"`
+et `depth = 2`. **Ce qui, dans l'appel 1, était `sub_value`, le texte
+construit et `depth - 1` devient `value`, `path` et `depth` dans
+l'appel 2.**
 
-**Règle générale :**
+Ce que fait `refs.extend(...)` avec la réponse de chaque appel est expliqué
+plus bas, dans la partie 6.
+
+##### 2.3 La règle générale
+
+La même chose se produit dans tous les appels de l'exemple :
 
 - **Dictionnaire →** un appel par clé. La **valeur** devient le nouveau
   `value`, la **clé** est ajoutée au `path`, et `depth` baisse de 1.

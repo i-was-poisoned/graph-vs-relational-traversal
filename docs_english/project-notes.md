@@ -713,28 +713,140 @@ payload = {
 
 #### 2. The rule that creates the next calls
 
-Every new call is **born from the loop of an earlier call**. When the
-function receives a dictionary, its loop is:
+Every new call is **born from the loop of an earlier call**. To understand
+how, you first need five basic pieces of Python. Then we put them
+together.
+
+##### 2.1 Background knowledge
+
+**a) A dictionary stores *key → value* pairs.**
+It's like an address book: you look up by name (the **key**) and get the
+information (the **value**). Our `payload` is a dictionary with **two**
+keys:
+
+```python
+payload = {
+    "action": "opened",       # key "action" → value "opened"
+    "issue":  {...}           # key "issue"  → value: another dictionary
+}
+
+payload["action"]   # → "opened"
+payload["issue"]    # → {...} (the issue's dictionary)
+```
+
+**b) `.items()` gives you every pair, one after another.**
+If you want to go through a whole dictionary, `.items()` gives you each
+entry as a **pair** `(key, value)`:
+
+```python
+list(payload.items())
+# → [("action", "opened"), ("issue", {...})]
+#      └─ 1st pair ──┘     └── 2nd pair ──┘
+```
+
+**c) `for` takes one pair on each pass and splits it into two variables.**
+When you write two names separated by a comma after `for`, Python takes
+each pair and puts its first part in the first variable and its second
+part in the second:
+
+```python
+for key, sub_value in payload.items():
+    print(key, "→", sub_value)
+
+# 1st pass:  key = "action"   sub_value = "opened"
+# 2nd pass:  key = "issue"    sub_value = {...}
+```
+
+`key` and `sub_value` are just names we chose. They change value on each
+pass: first they hold the 1st pair, then the 2nd.
+
+**d) When you call a function, each argument goes to its parameter, in
+order.**
+The function is defined with three parameters:
+
+```python
+def find_actor_refs(value, path, depth):
+```
+
+So in a call like this one:
+
+```python
+find_actor_refs("opened", "payload.action", 2)
+#               │         │                 │
+#               ▼         ▼                 ▼
+#             value     path              depth
+```
+
+inside that call, `value` is `"opened"`, `path` is `"payload.action"` and
+`depth` is `2`. The **first** value goes to the **first** parameter, the
+second to the second, and the third to the third. And each call has **its
+own** copies of those variables (see the recursion section).
+
+**e) An f-string builds a piece of text out of variables.**
+A string with an `f` in front can contain variables inside curly braces
+`{}`, and Python replaces them with their values:
+
+```python
+path = "payload"
+key = "action"
+f"{path}.{key}"     # → "payload" + "." + "action" → "payload.action"
+```
+
+The dot in the middle is just an ordinary dot, part of the text. That's
+why the result looks like an "address" inside the data: `payload.action`
+means "the `action` key inside the `payload`".
+
+##### 2.2 Putting the pieces together
+
+Now, the function's loop line:
 
 ```python
 for key, sub_value in value.items():
     refs.extend(find_actor_refs(sub_value, f"{path}.{key}", depth - 1))
 ```
 
-`value.items()` gives one *(key, value)* pair on each pass, and each pass
-launches **one call**. For example, in call 1 (`path = "payload"`,
-`depth = 3`), the first pass gives `key = "action"` and
-`sub_value = "opened"`, and substituting:
+> **Loop, iteration and pass.** A **loop** is the block of code that
+> repeats as a whole: the `for ...:` with everything inside it. Each of
+> its repetitions is an **iteration**, or, more informally, a **pass**:
+> in these notes, "pass" and "iteration" mean the same thing. The verb
+> **to iterate** means going through something item by item, which is
+> exactly what a loop does. For example, the `issue` has 4 keys, so call
+> 3's loop makes **4 iterations** (`number`, `user`, `assignees` and
+> `milestone`).
 
-| Argument | Calculation | Result |
+Let's follow it inside **call 1**. When that call starts, its three
+parameters hold (piece *d*):
+
+| Parameter | Value in call 1 |
+|---|---|
+| `value` | the whole `payload` |
+| `path` | `"payload"` |
+| `depth` | `3` |
+
+`value` is a dictionary with two keys, so `value.items()` gives two pairs
+(piece *b*) and the loop makes **two passes** (piece *c*). On each pass,
+Python works out the three arguments for the new call:
+
+| | 1st pass | 2nd pass |
 |---|---|---|
-| `sub_value` | the value of the `"action"` key | `"opened"` |
-| `f"{path}.{key}"` | `"payload"` + `"."` + `"action"` | `"payload.action"` |
-| `depth - 1` | `3 - 1` | `2` |
+| `key` (piece *c*) | `"action"` | `"issue"` |
+| `sub_value` (piece *c*) | `"opened"` | the `issue` dictionary |
+| 1st argument: `sub_value` | `"opened"` | the `issue` dictionary |
+| 2nd argument: `f"{path}.{key}"` (piece *e*) | `"payload" + "." + "action"` = `"payload.action"` | `"payload" + "." + "issue"` = `"payload.issue"` |
+| 3rd argument: `depth - 1` | `3 - 1` = `2` | `3 - 1` = `2` |
+| **Call that's born** | `find_actor_refs("opened", "payload.action", 2)` → **call 2** | `find_actor_refs({...issue...}, "payload.issue", 2)` → **call 3** |
 
-That's how **call 2** is born: `find_actor_refs("opened", "payload.action", 2)`.
+And when call 2 starts, its parameters receive those three values in order
+(piece *d*): `value = "opened"`, `path = "payload.action"` and
+`depth = 2`. **What were `sub_value`, the built-up text and `depth - 1` in
+call 1 become `value`, `path` and `depth` in call 2.**
 
-**General rule:**
+What `refs.extend(...)` does with each call's answer is explained further
+down, in part 6.
+
+##### 2.3 The general rule
+
+The same thing happens in every call of the example:
 
 - **Dictionary →** one call per key. The **value** becomes the new
   `value`, the **key** is added to `path`, and `depth` drops by 1.
