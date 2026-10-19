@@ -158,12 +158,42 @@ def peek(file_path: Path, num_lines: int) -> None:
 # with two differences worth calling out:
 #
 #   type=Path (for --file)
-#     Whereas download_gharchive.py's --date argument stayed a plain
-#     string, here we tell argparse to convert the --file value straight
-#     into a Path object (argparse will call Path("whatever the user
-#     typed") for us). That means args.file is already a proper Path
-#     by the time peek() receives it, instead of a raw string we'd have
-#     to convert ourselves.
+#     Key idea: everything you type in the terminal reaches Python as
+#     TEXT (a str). If you run
+#
+#         python scripts/peek_data.py --file data/2026-08-27-15.json --lines 10
+#
+#     Python receives "data/2026-08-27-15.json" and "10" — both as text,
+#     even the 10. The `type=` parameter tells argparse what to convert
+#     that text into before handing it to us. Behind the scenes it does
+#     roughly:
+#
+#         args.file  = Path("data/2026-08-27-15.json")   # text -> Path
+#         args.lines = int("10")                          # text -> number 10
+#
+#     That's what "argparse will call Path(...) for us" means: without
+#     type=Path, args.file would be a plain string and we'd have to write
+#     Path(args.file) ourselves later.
+#
+#     Why a Path instead of plain text? A Path is an object that "knows"
+#     it's a file path, so it comes with useful tools that a string
+#     doesn't have:
+#
+#         p = Path("data/2026-08-27-15.json")
+#         p.exists()   # does the file exist? -> True / False
+#         p.name       # "2026-08-27-15.json"
+#         p.parent     # Path("data")
+#
+#     and it works the same on Windows and Linux (no worrying about /
+#     vs \). It also keeps things consistent: DEFAULT_FILE is already a
+#     Path, so with type=Path, args.file is ALWAYS a Path, whether or not
+#     the user passed --file — peek() always receives the same type.
+#
+#     Why download_gharchive.py's --date stayed plain text: there, the
+#     value is only used to build ANOTHER piece of text (the download
+#     URL, https://data.gharchive.org/2026-08-27-15.json.gz), so there's
+#     nothing to convert it into. Here, --file really is a path to a file
+#     on disk, so it makes sense for it to be a Path.
 #
 #   No `choices=` restriction on --lines
 #     download_gharchive.py restricted --hour to range(0, 24) because

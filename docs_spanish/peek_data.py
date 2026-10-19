@@ -181,13 +181,42 @@ def peek(file_path: Path, num_lines: int) -> None:
 # download_gharchive.py, con dos diferencias que vale la pena señalar:
 #
 #   type=Path (para --file)
-#     Mientras que el argumento --date de download_gharchive.py se
-#     mantenía como una cadena de texto simple, aquí le decimos a
-#     argparse que convierta el valor de --file directamente en un
-#     objeto Path (argparse llamará a Path("lo que sea que escribió el
-#     usuario") por nosotros). Eso significa que args.file ya es un Path
-#     propiamente dicho en el momento en que peek() lo recibe, en lugar
-#     de una cadena cruda que tendríamos que convertir nosotros mismos.
+#     Idea clave: todo lo que escribes en la terminal le llega a Python
+#     como TEXTO (una str). Si ejecutas
+#
+#         python scripts/peek_data.py --file data/2026-08-27-15.json --lines 10
+#
+#     Python recibe "data/2026-08-27-15.json" y "10" — los dos como
+#     texto, incluso el 10. El parámetro `type=` le dice a argparse en qué
+#     convertir ese texto antes de dárnoslo. Por dentro hace, más o menos:
+#
+#         args.file  = Path("data/2026-08-27-15.json")   # texto -> Path
+#         args.lines = int("10")                          # texto -> número 10
+#
+#     Eso es lo que significa "argparse llamará a Path(...) por nosotros":
+#     sin type=Path, args.file sería un texto normal y tendríamos que
+#     escribir nosotros mismos Path(args.file) más adelante.
+#
+#     ¿Por qué un Path en lugar de texto? Un Path es un objeto que "sabe"
+#     que es una ruta de archivo, así que trae herramientas útiles que un
+#     texto no tiene:
+#
+#         p = Path("data/2026-08-27-15.json")
+#         p.exists()   # ¿existe el archivo? -> True / False
+#         p.name       # "2026-08-27-15.json"
+#         p.parent     # Path("data")
+#
+#     y funciona igual en Windows y en Linux (sin preocuparse de si las
+#     barras son / o \). Además mantiene la coherencia: DEFAULT_FILE ya
+#     es un Path, así que con type=Path, args.file es SIEMPRE un Path,
+#     tanto si el usuario escribe --file como si no — peek() siempre
+#     recibe el mismo tipo de dato.
+#
+#     Por qué --date de download_gharchive.py se quedaba como texto: allí
+#     el valor solo se usa para construir OTRO texto (la URL de descarga,
+#     https://data.gharchive.org/2026-08-27-15.json.gz), así que no hay
+#     nada en qué convertirlo. Aquí, --file sí es una ruta a un archivo
+#     del disco, así que tiene sentido que sea un Path.
 #
 #   Sin restricción `choices=` en --lines
 #     download_gharchive.py restringía --hour a range(0, 24) porque solo

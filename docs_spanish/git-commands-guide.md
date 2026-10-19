@@ -117,7 +117,7 @@ nunca a ningún otro repositorio en tu máquina.
 
 **Por qué necesitamos esto hoy:** tu máquina Windows tenía guardado en el
 Administrador de Credenciales (Credential Manager) un inicio de sesión de
-GitHub para tu cuenta de trabajo de Celfocus (`NB30006_celfocus`), y
+GitHub para tu cuenta de trabajo, y
 `git push` estaba usando silenciosamente ese inicio de sesión guardado porque
 la URL del remoto (`https://github.com/...`) no especificaba *con qué* cuenta
 autenticarse. GitHub rechazó correctamente el push con un error 403, porque
@@ -130,7 +130,7 @@ específica para ese nombre de usuario, en lugar de reutilizar lo que se
 guardó por última vez para `github.com` a secas. Eso fue lo que permitió que
 el siguiente `git push` solicitara un nuevo inicio de sesión para la cuenta
 correcta, sin alterar la credencial de trabajo guardada que usan tus
-repositorios de Celfocus.
+repositorios de trabajo.
 
 ## 7. `git push` — enviar commits locales a un remoto
 

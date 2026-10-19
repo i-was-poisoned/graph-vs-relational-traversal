@@ -123,7 +123,7 @@ dépôt, jamais un autre dépôt sur votre machine.
 
 **Pourquoi c'était nécessaire aujourd'hui :** votre machine Windows avait
 une connexion GitHub mise en cache dans le Gestionnaire d'identifiants pour
-votre compte professionnel Celfocus (`NB30006_celfocus`), et `git push`
+votre compte professionnel, et `git push`
 utilisait silencieusement cette connexion mise en cache, car l'URL du
 remote (`https://github.com/...`) ne précisait pas *quel* compte utiliser
 pour s'authentifier. GitHub a correctement refusé le push avec une erreur
@@ -137,7 +137,7 @@ sous une clé *distincte*, spécifique à ce nom d'utilisateur, plutôt que de
 réutiliser ce qui avait été mis en cache en dernier pour `github.com` seul.
 C'est ce qui a permis au `git push` suivant de redemander une connexion pour
 le bon compte, sans perturber l'identifiant professionnel mis en cache
-utilisé par vos dépôts Celfocus.
+utilisé par vos dépôts professionnels.
 
 ## 7. `git push` — envoyer les commits locaux vers un remote
 

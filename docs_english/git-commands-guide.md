@@ -110,8 +110,8 @@ touching your commit history at all — it only affects where future
 repo on your machine.
 
 **Why we needed this today:** your Windows machine had a GitHub login cached
-in Credential Manager for your Celfocus work account
-(`NB30006_celfocus`), and `git push` was silently using that cached login
+in Credential Manager for a separate work account,
+and `git push` was silently using that cached login
 because the remote URL (`https://github.com/...`) didn't specify *which*
 account to authenticate as. GitHub correctly refused the push with a 403,
 because that work account has no permission on your personal repo.
@@ -122,7 +122,7 @@ look up (and cache) credentials under a *separate* key specific to that
 username, rather than reusing whatever was last cached for plain
 `github.com`. That's what let the next `git push` prompt a fresh login for
 the correct account, without disturbing the cached work credential used by
-your Celfocus repos.
+your work repos.
 
 ## 7. `git push` — sending local commits to a remote
 
