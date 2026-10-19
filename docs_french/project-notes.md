@@ -389,18 +389,26 @@ d'événements, comment ils se répartissent par type, et combien d'acteurs/dép
 distincts sont impliqués.
 
 `scripts/summarize_data.py` ([copie annotée](summarize_data.py)) lit le fichier JSON Lines entier une seule fois
-et rapporte :
+et affiche trois sections :
 
-- le nombre total d'événements
+1. **Général :** le total d'événements, d'acteurs uniques et de dépôts
+   uniques, chacun réparti entre bots et non bots (y compris combien de
+   dépôts n'ont eu des événements *que* de bots).
+2. **Analyse avec bots :** tous les événements.
+3. **Analyse sans bots :** la même analyse, en retirant tous les comptes
+   dont le login finit par `[bot]`.
+
+Les sections 2 et 3 montrent exactement les mêmes choses, pour pouvoir les
+comparer côte à côte :
+
 - la répartition par type d'événement (décompte et pourcentage, du plus
   fréquent au moins fréquent)
-- le nombre d'acteurs et de dépôts uniques
 - les N acteurs et dépôts les plus actifs par nombre d'événements
-- la connectivité : combien de dépôts ont 2 acteurs distincts ou plus,
-  combien d'acteurs ont touché 2 dépôts ou plus, et combien d'acteurs
-  partagent un dépôt avec au moins un autre acteur
-- les N acteurs ayant touché le plus de dépôts *distincts*, et les N
-  dépôts ayant le plus d'acteurs *distincts*
+- la connectivité : combien de dépôts ont 2 acteurs différents ou plus,
+  combien d'acteurs ont fait des événements dans 2 dépôts ou plus, et
+  combien d'acteurs partagent un dépôt avec au moins un autre acteur
+- les N acteurs ayant fait des événements dans le plus de dépôts
+  *différents*, et les N dépôts ayant le plus d'acteurs *différents*
 
 Exécutez-le avec :
 
@@ -409,9 +417,6 @@ python scripts/summarize_data.py
 
 # Afficher plus d'acteurs/dépôts les plus actifs
 python scripts/summarize_data.py --top 10
-
-# Même synthèse, en ignorant les comptes bots (logins finissant par "[bot]")
-python scripts/summarize_data.py --exclude-bots
 ```
 
 Pour l'heure fixe du 2026-08-27 15h00 UTC, cela a montré 69 429 événements
@@ -447,14 +452,14 @@ données permettent le benchmark. Le benchmark parcourt
 `acteur → dépôt → acteur → dépôt`, et chaque pas d'un dépôt vers un *autre*
 acteur n'est possible que si ce dépôt a été touché par au moins deux
 acteurs différents. `summarize_data.py` mesure donc aussi la connectivité,
-et l'option `--exclude-bots` relance tout sans les comptes dont le login
-finit par `[bot]` :
+une fois avec tous les événements et une fois sans les comptes dont le
+login finit par `[bot]` :
 
 | Mesure | Tous les événements | Sans bots |
 |---|---|---|
 | Événements | 69 429 | 67 459 (1 970 événements de bots retirés, 2,8 %) |
-| Acteurs uniques | 14 728 | 14 515 |
-| Dépôts uniques | 16 497 | 14 995 |
+| Acteurs uniques | 14 728 | 14 515 (213 acteurs bots retirés, 1,4 %) |
+| Dépôts uniques | 16 497 | 14 995 (1 502 dépôts n'ayant eu que des événements de bots retirés, 9,1 %) |
 | Dépôts avec 2+ acteurs distincts | 145 (0,9 % des dépôts) | 49 (0,3 %) |
 | Acteurs ayant touché 2+ dépôts | 256 (1,7 % des acteurs) | 211 (1,5 %) |
 | Acteurs partageant un dépôt avec un autre acteur | 234 (1,6 % des acteurs) | 101 (0,7 %) |
@@ -537,31 +542,116 @@ de données afin de trouver le point de bascule évoqué dans le README.
 
 ## Principe de conception du schéma : la requête d'abord, pas les champs
 
-Un raccourci tentant serait de regarder chaque champ fourni par GH Archive
-et de construire une table ou un type de nœud pour chacun d'eux. C'est le
-mauvais ordre. La conception du schéma pour un benchmark doit être guidée
-par la *requête* testée, pas par « les champs qui se trouvent exister » :
+**D'où vient cette section.** Jusqu'ici, toutes les étapes ont servi à
+*connaître les données* : ce que contient un événement (`peek_data.py`),
+combien d'événements, d'acteurs et de dépôts il y a et comment ils sont
+reliés (`summarize_data.py`). L'étape suivante du projet est de *concevoir
+les schémas* : les tables de la base de données relationnelle et les nœuds
+et arêtes de la base de données graphe. Avant de dessiner une seule table,
+il faut décider **selon quel critère** on va les concevoir, et cette
+section fixe ce critère.
 
-- **Champs d'abord** signifie parcourir les données, voir des champs comme
-  les messages de commit, le texte des revues de PR, et les labels
-  d'issue, et tout modéliser. Cela produit un schéma vaste et détaillé —
-  dont la majeure partie n'est en réalité jamais touchée par le benchmark
-  de parcours.
-- **Requête d'abord** signifie décider *d'abord* exactement ce qui est
-  mesuré (pour ce projet : un parcours `acteur → dépôt → acteur → dépôt` —
-  voir ci-dessous pourquoi cette forme est nécessaire, plutôt qu'une
-  arête acteur-à-acteur directe), puis ne construire que la structure
-  minimale dont ce parcours a besoin : une chose Acteur, une chose Dépôt,
-  et une connexion entre les deux.
+Elle découle directement de la section précédente sur ce qu'est un
+benchmark : un test équitable où tout est contrôlé sauf ce qu'on mesure.
+Le schéma fait partie de ce « tout le reste » qu'il faut contrôler. Si les
+deux schémas ne sont pas équivalents, le benchmark ne compare plus un
+modèle relationnel à un modèle graphe, mais deux conceptions différentes.
 
-Pourquoi cela compte au-delà de la simple propreté : des tables/colonnes
-(ou types de nœud/arête) supplémentaires et inutilisées ne rendent aucun
-des deux côtés de la comparaison « plus correct » — elles ajoutent
-seulement de la complexité qui ne fait pas partie de la mesure. Pire, si
-ce détail supplémentaire est construit de façon inégale (plus côté
-relationnel que côté graphe, ou l'inverse), la comparaison cesse d'être
-équitable, ce qui est pourtant tout l'enjeu de la question de recherche de
-ce projet.
+**Deux termes clés**
+
+- **Schéma :** la « forme » des données dans la base. En relationnel :
+  quelles tables, quelles colonnes, quelles clés. En graphe : quels types
+  de nœud, quels types d'arête et quelles propriétés.
+- **Requête :** la question précise posée à la base de données, et dont
+  on mesure le temps. Par exemple : « en partant de l'acteur X, quels
+  dépôts peut-on atteindre en 3 sauts ? ».
+
+**Deux façons de concevoir un schéma**
+
+| | Champs d'abord | Requête d'abord |
+|---|---|---|
+| Point de départ | Regarder le JSON de GH Archive | Écrire la requête du benchmark |
+| Question posée | « Quels champs existent ? » | « De quoi cette requête a-t-elle besoin pour fonctionner ? » |
+| Résultat | Des dizaines de tables ou de types de nœud (commits, messages, PR, commentaires, labels...), la plupart jamais interrogés | Seulement le minimum : Acteur, Dépôt, et la connexion entre eux |
+
+« Champs d'abord » est tentant parce que cela semble plus complet : GH
+Archive fournit des messages de commit, des titres de PR, le texte des
+revues, des labels d'issue... et on a l'impression que plus on modélise,
+mieux c'est. Mais le benchmark de parcours ne lit jamais rien de tout
+cela. Tout ce détail serait construit, chargé et maintenu sans influencer
+la mesure — ou pire, en l'influençant d'une façon non voulue (voir plus
+bas).
+
+**Exemple avec ce projet.** La requête du benchmark est un parcours
+`acteur → dépôt → acteur → dépôt`. Pour y répondre, il suffit de savoir
+trois choses : qui est chaque acteur, ce qu'est chaque dépôt, et quel
+acteur a fait des événements dans quel dépôt. Le schéma minimal est donc
+le même des deux côtés :
+
+| Concept | Relationnel | Graphe |
+|---|---|---|
+| Acteur | table `actor` (id, login) | nœud `Actor` (id, login) |
+| Dépôt | table `repo` (id, name) | nœud `Repo` (id, name) |
+| Connexion | table `actor_repo` (actor_id, repo_id) | arête `Actor → Repo` |
+
+Pourquoi le parcours doit-il passer par les dépôts, au lieu d'aller
+directement d'un acteur à un autre ? Parce que les données ne relient
+presque jamais deux personnes directement. `PushEvent` (95,3 % des
+événements) ne nomme aucun second acteur (voir l'étape de conception du
+schéma plus bas), et la connectivité mesurée par `summarize_data.py`
+montre que les connexions entre acteurs viennent des *dépôts partagés*.
+
+**Pourquoi il est important de suivre ce principe**
+
+1. **On mesure ce qu'on veut mesurer.** Le temps d'une requête dépend de
+   la quantité de données que la base doit lire. Si chaque ligne traîne
+   des colonnes que la requête n'utilise pas (par exemple de longs
+   messages de commit), la base lit plus de données sur le disque, et le
+   temps mesuré inclut ce bruit en plus du coût réel du parcours.
+2. **La comparaison est équitable.** Si un côté a plus de détail que
+   l'autre, le résultat reflète la différence de conception, pas la
+   différence entre les modèles. Par exemple : si le côté relationnel
+   stocke une ligne par événement (69 429 lignes) et le côté graphe une
+   seule arête par paire acteur–dépôt (beaucoup moins), le graphe
+   « gagne » parce qu'il contient moins de données, pas parce qu'il
+   parcourt mieux. Cela répondrait mal à la question de recherche.
+3. **On peut prouver que les deux côtés sont équivalents.** Avec un petit
+   schéma, il est facile de vérifier que les deux bases contiennent
+   exactement la même chose : le même nombre d'acteurs, de dépôts et de
+   connexions. Avec des dizaines de tables, cette vérification devient
+   difficile.
+4. **Moins de travail et moins d'erreurs.** Moins de tables, c'est moins
+   de code de chargement, des chargements plus rapides et moins d'endroits
+   où se tromper. Le temps gagné peut servir à l'essentiel : répéter les
+   mesures avec différentes tailles de données.
+5. **C'est reproductible et facile à expliquer.** Dans le rapport final,
+   le schéma tient en trois lignes, et n'importe qui peut le reconstruire
+   et refaire l'expérience.
+
+**Mesures concrètes à suivre**
+
+1. **Écrire d'abord la requête** (ou les requêtes) du benchmark, en mots,
+   avant de créer la moindre table ou le moindre nœud.
+2. **Lister les données que lit cette requête.** Seules celles-ci entrent
+   dans le schéma. Si un champ n'apparaît pas dans la requête, il reste
+   dehors.
+3. **Construire le même modèle des deux côtés**, comme dans le tableau
+   ci-dessus : les mêmes entités et la même connexion.
+4. **Charger les deux côtés à partir des mêmes données sources** (les mêmes
+   fichiers et le même filtre de bots) et vérifier que les décomptes
+   correspondent avant de mesurer quoi que ce soit.
+5. **Décider une seule fois comment la connexion est stockée** (une par
+   événement, ou une par paire acteur–dépôt) et appliquer cette même
+   décision des deux côtés.
+6. **Donner à chaque côté ses aides normales, ni plus ni moins.** Côté
+   relationnel, cela veut dire des index sur les colonnes utilisées pour
+   joindre les tables (`actor_id`, `repo_id`) ; le graphe stocke déjà les
+   connexions directement. Mesurer le relationnel sans index reviendrait à
+   le comparer à une version délibérément lente.
+7. **Si on ajoute quelque chose, l'ajouter des deux côtés à la fois, ou
+   d'aucun.** Une nouvelle propriété, un index ou un autre type de
+   connexion : toujours des deux côtés, pour que la comparaison reste
+   équivalente.
 
 ## Étape de conception du schéma (profile_schema.py)
 

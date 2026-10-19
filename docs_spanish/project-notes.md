@@ -377,18 +377,26 @@ la hora descargada, antes de elegir un esquema: cuántos eventos, cómo se
 reparten por tipo, y cuántos actores/repos distintos están involucrados.
 
 `scripts/summarize_data.py` ([copia anotada](summarize_data.py)) lee el archivo JSON Lines completo una sola vez
-y reporta:
+y muestra tres secciones:
 
-- el número total de eventos
+1. **General:** el total de eventos, de actores únicos y de repos únicos,
+   cada uno separado en bots y no bots (incluido cuántos repos *solo*
+   tuvieron eventos de bots).
+2. **Análisis con bots:** todos los eventos.
+3. **Análisis sin bots:** el mismo análisis, quitando todas las cuentas
+   cuyo login termina en `[bot]`.
+
+Las secciones 2 y 3 muestran exactamente lo mismo, para poder compararlas
+una al lado de la otra:
+
 - el desglose por tipo de evento (conteo y porcentaje, del más frecuente al
   menos frecuente)
-- el número de actores y repos únicos
 - los N actores y repos más activos por número de eventos
-- la conectividad: cuántos repos tienen 2 o más actores distintos, cuántos
-  actores han tocado 2 o más repos, y cuántos actores comparten un repo con
-  al menos otro actor
-- los N actores que han tocado más repos *distintos*, y los N repos con más
-  actores *distintos*
+- la conectividad: cuántos repos tienen 2 o más actores diferentes, cuántos
+  actores han hecho eventos en 2 o más repos, y cuántos actores comparten
+  un repo con al menos otro actor
+- los N actores que han hecho eventos en más repos *diferentes*, y los N
+  repos con más actores *diferentes*
 
 Ejecútalo con:
 
@@ -397,9 +405,6 @@ python scripts/summarize_data.py
 
 # Mostrar más actores/repos más activos
 python scripts/summarize_data.py --top 10
-
-# El mismo resumen, ignorando las cuentas bot (logins que terminan en "[bot]")
-python scripts/summarize_data.py --exclude-bots
 ```
 
 Para la hora fija del 2026-08-27 15:00 UTC, esto mostró 69.429 eventos
@@ -433,14 +438,14 @@ Contar eventos y nombres únicos no basta para saber si los datos sirven
 para el benchmark. El benchmark recorre `actor → repo → actor → repo`, y
 cada paso de un repo a *otro* actor solo es posible si ese repo lo han
 tocado al menos dos actores distintos. Por eso `summarize_data.py` también
-mide la conectividad, y la opción `--exclude-bots` repite todo sin las
-cuentas cuyo login termina en `[bot]`:
+mide la conectividad, una vez con todos los eventos y otra sin las cuentas
+cuyo login termina en `[bot]`:
 
 | Medida | Todos los eventos | Sin bots |
 |---|---|---|
 | Eventos | 69.429 | 67.459 (1.970 eventos de bots eliminados, 2,8 %) |
-| Actores únicos | 14.728 | 14.515 |
-| Repos únicos | 16.497 | 14.995 |
+| Actores únicos | 14.728 | 14.515 (213 actores bot eliminados, 1,4 %) |
+| Repos únicos | 16.497 | 14.995 (1.502 repos que solo tuvieron eventos de bots eliminados, 9,1 %) |
 | Repos con 2+ actores distintos | 145 (0,9 % de los repos) | 49 (0,3 %) |
 | Actores que tocaron 2+ repos | 256 (1,7 % de los actores) | 211 (1,5 %) |
 | Actores que comparten un repo con otro actor | 234 (1,6 % de los actores) | 101 (0,7 %) |
@@ -521,29 +526,109 @@ encontrar el punto de cruce que plantea el README.
 
 ## Principio de diseño del esquema: la consulta primero, no los campos
 
-Un atajo tentador sería mirar cada campo que provee GH Archive y construir
-una tabla o un tipo de nodo para cada uno. Ese es el orden equivocado. El
-diseño del esquema para un benchmark debe estar guiado por la *consulta*
-que se está probando, no por "los campos que resultan existir":
+**De dónde viene esta sección.** Hasta aquí, todas las etapas han servido
+para *conocer los datos*: qué contiene un evento (`peek_data.py`), cuántos
+eventos, actores y repos hay y cómo se conectan (`summarize_data.py`). El
+siguiente paso del proyecto es *diseñar los esquemas*: las tablas de la
+base de datos relacional y los nodos y aristas de la base de datos de
+grafo. Antes de dibujar una sola tabla hay que decidir **con qué criterio**
+se van a diseñar, y esta sección fija ese criterio.
 
-- **Campos primero** significa recorrer los datos, ver campos como
-  mensajes de commit, texto de revisiones de PR, y etiquetas de issues, y
-  modelizarlo todo. Esto produce un esquema grande y detallado — la mayor
-  parte del cual el benchmark de recorrido nunca llega a tocar realmente.
-- **Consulta primero** significa decidir *primero* exactamente qué se está
-  midiendo (para este proyecto: un recorrido `actor → repo → actor →
-  repo` — ver más abajo por qué tiene que tener esa forma, y no una arista
-  directa actor-a-actor), y luego construir solo la estructura mínima que
-  ese recorrido necesita: una cosa Actor, una cosa Repo, y una conexión
-  entre ambas.
+Viene directamente de la sección anterior sobre qué es un benchmark: una
+prueba justa en la que todo está controlado salvo lo que se mide. El
+esquema forma parte de "todo lo demás" que hay que controlar. Si los dos
+esquemas no son equivalentes, el benchmark ya no compara un modelo
+relacional con uno de grafo, sino dos diseños distintos.
 
-Por qué importa esto más allá de la prolijidad: tablas/columnas (o tipos
-de nodo/arista) adicionales y sin usar no hacen que ninguno de los dos
-lados de la comparación sea "más correcto" — solo añaden complejidad que
-no forma parte de la medición. Peor aún, si ese detalle adicional se
-construye de forma desigual (más del lado relacional que del lado de
-grafo, o viceversa), la comparación deja de ser equivalente, que es
-precisamente el objetivo de la pregunta de investigación de este proyecto.
+**Dos palabras clave**
+
+- **Esquema:** la "forma" de los datos dentro de la base de datos. En la
+  relacional: qué tablas, qué columnas y qué claves. En la de grafo: qué
+  tipos de nodo, qué tipos de arista y qué propiedades.
+- **Consulta:** la pregunta concreta que se le hace a la base de datos y
+  cuyo tiempo se mide. Por ejemplo: "partiendo del actor X, ¿a qué repos
+  se llega en 3 saltos?".
+
+**Dos maneras de diseñar un esquema**
+
+| | Campos primero | Consulta primero |
+|---|---|---|
+| Por dónde empiezas | Mirando el JSON de GH Archive | Escribiendo la consulta del benchmark |
+| Qué te preguntas | "¿Qué campos hay?" | "¿Qué necesita esta consulta para funcionar?" |
+| Resultado | Decenas de tablas o tipos de nodo (commits, mensajes, PR, comentarios, etiquetas...), la mayoría nunca consultados | Solo lo mínimo: Actor, Repo y la conexión entre ellos |
+
+"Campos primero" es tentador porque parece más completo: GH Archive ofrece
+mensajes de commit, títulos de PR, texto de revisiones, etiquetas de
+issues... y da la impresión de que cuanto más se modele, mejor. Pero el
+benchmark de recorrido nunca lee nada de eso. Todo ese detalle se
+construiría, se cargaría y se mantendría sin que influyera en la medición,
+o peor, influyendo de forma no deseada (ver abajo).
+
+**Ejemplo con este proyecto.** La consulta del benchmark es un recorrido
+`actor → repo → actor → repo`. Para responderla solo hace falta saber tres
+cosas: quién es cada actor, qué es cada repo, y qué actor ha hecho eventos
+en qué repo. Por tanto, el esquema mínimo es el mismo en los dos lados:
+
+| Concepto | Relacional | Grafo |
+|---|---|---|
+| Actor | tabla `actor` (id, login) | nodo `Actor` (id, login) |
+| Repo | tabla `repo` (id, name) | nodo `Repo` (id, name) |
+| Conexión | tabla `actor_repo` (actor_id, repo_id) | arista `Actor → Repo` |
+
+¿Por qué el recorrido tiene que pasar por los repos, en lugar de ir
+directamente de un actor a otro? Porque los datos casi nunca conectan a
+dos personas directamente. `PushEvent` (el 95,3 % de los eventos) no
+nombra a ningún segundo actor (ver la etapa de diseño del esquema más
+abajo), y la conectividad medida por `summarize_data.py` muestra que las
+conexiones entre actores vienen de los *repos compartidos*.
+
+**Por qué es importante seguir este principio**
+
+1. **Mides lo que quieres medir.** El tiempo de una consulta depende de
+   cuántos datos tiene que leer la base de datos. Si cada fila arrastra
+   columnas que la consulta no usa (por ejemplo, mensajes de commit
+   largos), la base de datos lee más datos del disco, y el tiempo medido
+   incluye ese ruido además del coste real del recorrido.
+2. **La comparación es justa.** Si un lado tiene más detalle que el otro,
+   el resultado refleja la diferencia de diseño, no la diferencia entre
+   modelos. Por ejemplo: si en la relacional guardas una fila por cada
+   evento (69.429 filas) y en el grafo una sola arista por cada par
+   actor–repo (muchas menos), el grafo "gana" porque tiene menos datos, no
+   porque sea mejor recorriendo. Eso respondería mal a la pregunta de
+   investigación.
+3. **Puedes demostrar que los dos lados son equivalentes.** Con un esquema
+   pequeño es fácil comprobar que las dos bases de datos contienen
+   exactamente lo mismo: el mismo número de actores, de repos y de
+   conexiones. Con decenas de tablas, esa comprobación se vuelve difícil.
+4. **Menos trabajo y menos errores.** Menos tablas significa menos código
+   de carga, cargas más rápidas y menos sitios donde equivocarse. El
+   tiempo ahorrado se puede dedicar a lo importante: repetir las
+   mediciones con distintos tamaños de datos.
+5. **Es reproducible y fácil de explicar.** En el informe final, el
+   esquema se describe en tres líneas, y cualquier persona puede
+   reconstruirlo y repetir el experimento.
+
+**Medidas concretas a seguir**
+
+1. **Escribir primero la consulta** (o consultas) del benchmark, en
+   palabras, antes de crear ninguna tabla ni ningún nodo.
+2. **Hacer la lista de los datos que lee esa consulta.** Solo eso entra en
+   el esquema. Si un campo no aparece en la consulta, se queda fuera.
+3. **Construir el mismo modelo en los dos lados**, como en la tabla de
+   arriba: las mismas entidades y la misma conexión.
+4. **Cargar los dos lados desde los mismos datos de origen** (los mismos
+   archivos y el mismo filtro de bots) y comprobar que los conteos
+   coinciden antes de medir nada.
+5. **Decidir una sola vez cómo se guarda la conexión** (una por evento o
+   una por par actor–repo) y usar esa misma decisión en los dos lados.
+6. **Dar a cada lado sus ayudas normales, ni más ni menos.** En la
+   relacional, eso significa índices sobre las columnas que se usan para
+   unir tablas (`actor_id`, `repo_id`); el grafo ya guarda las conexiones
+   directamente. Medir la relacional sin índices sería compararla con una
+   versión deliberadamente lenta.
+7. **Si se añade algo, añadirlo en los dos lados a la vez, o en ninguno.**
+   Una propiedad nueva, un índice o otro tipo de conexión: siempre en los
+   dos, para que la comparación siga siendo equivalente.
 
 ## Etapa de diseño del esquema (profile_schema.py)
 

@@ -340,17 +340,25 @@ is to get a sense of *volume and connectivity* across the whole downloaded
 hour, before picking a schema: how many events, how they break down by
 type, and how many distinct actors/repos are involved.
 
-`scripts/summarize_data.py` ([annotated copy](summarize_data.py)) reads the full JSON Lines file once and reports:
+`scripts/summarize_data.py` ([annotated copy](summarize_data.py)) reads the full JSON Lines file once and prints three sections:
 
-- total event count
+1. **General:** total events, unique actors and unique repos, each split
+   into bots and non-bots (including how many repos *only* bots made
+   events in).
+2. **Analysis with bots:** every event.
+3. **Analysis without bots:** the same analysis, with every account whose
+   login ends in `[bot]` removed.
+
+Sections 2 and 3 show exactly the same things, so they can be compared
+side by side:
+
 - event type breakdown (count and percentage, most common first)
-- unique actor and unique repo counts
 - the top N most active actors and repos by event count
-- connectivity: how many repos have 2+ distinct actors, how many actors
-  touched 2+ repos, and how many actors share a repo with at least one
-  other actor
-- the top N actors by number of *distinct* repos touched, and the top N
-  repos by number of *distinct* actors
+- connectivity: how many repos have 2+ different actors, how many actors
+  made events in 2+ repos, and how many actors share a repo with at least
+  one other actor
+- the top N actors by number of *different* repos they made events in, and
+  the top N repos by number of *different* actors who made events in them
 
 Run it with:
 
@@ -359,9 +367,6 @@ python scripts/summarize_data.py
 
 # Show more top actors/repos
 python scripts/summarize_data.py --top 10
-
-# Same summary, ignoring bot accounts (logins ending in "[bot]")
-python scripts/summarize_data.py --exclude-bots
 ```
 
 For the fixed 2026-08-27 15:00 UTC hour, this showed 69,429 events across
@@ -394,14 +399,14 @@ Counting events and unique names isn't enough to know whether the data
 supports the benchmark. The benchmark walks `actor → repo → actor → repo`,
 and each step from a repo to *another* actor only works if that repo was
 touched by at least two different actors. So `summarize_data.py` also
-measures connectivity, and the `--exclude-bots` flag re-runs everything
-without accounts whose login ends in `[bot]`:
+measures connectivity, once with every event and once without the
+accounts whose login ends in `[bot]`:
 
 | Metric | All events | Without bots |
 |---|---|---|
 | Events | 69,429 | 67,459 (1,970 bot events removed, 2.8%) |
-| Unique actors | 14,728 | 14,515 |
-| Unique repos | 16,497 | 14,995 |
+| Unique actors | 14,728 | 14,515 (213 bot actors removed, 1.4%) |
+| Unique repos | 16,497 | 14,995 (1,502 repos that only bots made events in removed, 9.1%) |
 | Repos with 2+ distinct actors | 145 (0.9% of repos) | 49 (0.3%) |
 | Actors who touched 2+ repos | 256 (1.7% of actors) | 211 (1.5%) |
 | Actors sharing a repo with another actor | 234 (1.6% of actors) | 101 (0.7%) |
@@ -473,27 +478,110 @@ the crossover point the README asks about.
 
 ## Schema Design Principle: Query-First, Not Field-First
 
-A tempting shortcut would be to look at every field GH Archive provides and
-build a table or node type for each one. That's the wrong order. Schema
-design for a benchmark should be driven by the *query* being tested, not by
-"whatever fields happen to exist":
+**Where this section comes from.** Up to this point, every stage has been
+about *getting to know the data*: what a single event contains
+(`peek_data.py`), and how many events, actors and repos there are and how
+they connect (`summarize_data.py`). The project's next step is *designing
+the schemas*: the tables of the relational database and the nodes and
+edges of the graph database. Before drawing a single table, you have to
+decide **by what rule** they will be designed, and this section sets that
+rule.
 
-- **Field-first** means scanning the data, seeing fields like commit
-  messages, PR review text, and issue labels, and modeling all of it. This
-  produces a big, detailed schema — most of which the traversal benchmark
-  never actually touches.
-- **Query-first** means deciding *first* exactly what's being measured
-  (for this project: an `actor → repo → actor → repo` walk — see below for
-  why it has to be this shape, not a direct actor-to-actor one), and then
-  building only the minimal structure that walk needs: an Actor thing, a
-  Repo thing, and a connection between them.
+It follows directly from the previous section on what a benchmark is: a
+fair test where everything is controlled except the thing being measured.
+The schema is part of the "everything else" that has to be controlled. If
+the two schemas aren't equivalent, the benchmark no longer compares a
+relational model with a graph model — it compares two different designs.
 
-Why this matters beyond tidiness: extra, unused tables/columns (or
-node/edge types) don't make either side of the comparison "more correct" —
-they just add complexity that isn't part of the measurement. Worse, if
-that extra detail is built unevenly (more on the relational side than the
-graph side, or vice versa), the comparison stops being like-for-like,
-which is the entire point of this project's research question.
+**Two key terms**
+
+- **Schema:** the "shape" of the data inside the database. Relational:
+  which tables, which columns, which keys. Graph: which node types, which
+  edge types, and which properties.
+- **Query:** the specific question asked of the database, and whose time
+  is measured. For example: "starting from actor X, which repos can be
+  reached in 3 hops?".
+
+**Two ways to design a schema**
+
+| | Field-first | Query-first |
+|---|---|---|
+| Where you start | Looking at GH Archive's JSON | Writing the benchmark query |
+| What you ask | "Which fields exist?" | "What does this query need in order to work?" |
+| Result | Dozens of tables or node types (commits, messages, PRs, comments, labels...), most never queried | Only the minimum: Actor, Repo, and the connection between them |
+
+Field-first is tempting because it feels more complete: GH Archive offers
+commit messages, PR titles, review text, issue labels... and it seems
+that the more you model, the better. But the traversal benchmark never
+reads any of that. All that detail would be built, loaded and maintained
+without affecting the measurement — or worse, affecting it in ways you
+don't want (see below).
+
+**Example from this project.** The benchmark query is an
+`actor → repo → actor → repo` walk. To answer it you only need to know
+three things: who each actor is, what each repo is, and which actor made
+events in which repo. So the minimal schema is the same on both sides:
+
+| Concept | Relational | Graph |
+|---|---|---|
+| Actor | table `actor` (id, login) | node `Actor` (id, login) |
+| Repo | table `repo` (id, name) | node `Repo` (id, name) |
+| Connection | table `actor_repo` (actor_id, repo_id) | edge `Actor → Repo` |
+
+Why does the walk have to go through repos instead of going straight from
+one actor to another? Because the data almost never connects two people
+directly. `PushEvent` (95.3% of events) names no second actor at all (see
+the Schema Design Stage below), and the connectivity measured by
+`summarize_data.py` shows that connections between actors come from
+*shared repos*.
+
+**Why following this principle matters**
+
+1. **You measure what you mean to measure.** A query's time depends on how
+   much data the database has to read. If every row carries columns the
+   query doesn't use (long commit messages, for example), the database
+   reads more data from disk, and the measured time includes that noise on
+   top of the real cost of the traversal.
+2. **The comparison is fair.** If one side has more detail than the other,
+   the result reflects the difference in design, not the difference
+   between models. For example: if the relational side stores one row per
+   event (69,429 rows) and the graph side stores one edge per actor–repo
+   pair (far fewer), the graph "wins" because it holds less data, not
+   because it traverses better. That would answer the research question
+   wrongly.
+3. **You can prove the two sides are equivalent.** With a small schema
+   it's easy to check that both databases hold exactly the same thing: the
+   same number of actors, repos and connections. With dozens of tables,
+   that check becomes hard.
+4. **Less work and fewer mistakes.** Fewer tables means less loading code,
+   faster loads, and fewer places to get something wrong. The time saved
+   can go to what matters: repeating the measurements at different data
+   sizes.
+5. **It's reproducible and easy to explain.** In the final write-up, the
+   schema fits in three lines, and anyone can rebuild it and repeat the
+   experiment.
+
+**Concrete rules to follow**
+
+1. **Write the benchmark query (or queries) first**, in words, before
+   creating any table or node.
+2. **List the data that query reads.** Only that goes into the schema. If
+   a field doesn't appear in the query, it stays out.
+3. **Build the same model on both sides**, as in the table above: the same
+   entities and the same connection.
+4. **Load both sides from the same source data** (the same files and the
+   same bot filter) and check that the counts match before measuring
+   anything.
+5. **Decide once how the connection is stored** (one per event, or one
+   per actor–repo pair) and use that same decision on both sides.
+6. **Give each side its normal aids, no more and no less.** On the
+   relational side, that means indexes on the columns used to join tables
+   (`actor_id`, `repo_id`); the graph already stores connections directly.
+   Measuring the relational side without indexes would be comparing
+   against a deliberately slow version.
+7. **If you add something, add it to both sides at once, or to neither.**
+   A new property, an index, or another kind of connection: always on
+   both, so the comparison stays equivalent.
 
 ## Schema Design Stage (profile_schema.py)
 
