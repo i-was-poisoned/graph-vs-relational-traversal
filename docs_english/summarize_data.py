@@ -96,6 +96,18 @@ def summarize(file_path: Path, top_n: int) -> None:
     # first few hundred events wouldn't represent the whole file.
     # ---------------------------------------------------------------
     with open(file_path, "r", encoding="utf-8") as f:
+        # for line in f:
+        #
+        # This is a LOOP: a block of code that REPEATS. Read it as "for
+        # each line in the file f, do the indented lines below". Those
+        # indented lines are written once but run once PER LINE of the
+        # file — 69,429 times for this project's hour, one per event.
+        # Think of counting votes from a ballot box: take one ballot, add
+        # a tally mark next to its name, go back and take the next one,
+        # until the box is empty. When the file runs out of lines, the
+        # loop ends and Python carries on with the first non-indented
+        # line after it (the print() calls below).
+        #
         # No enumerate() needed here — unlike peek(), summarize() never
         # prints a per-line index, so there's no use for the loop
         # position, only the parsed event itself.
@@ -128,6 +140,28 @@ def summarize(file_path: Path, top_n: int) -> None:
     # "how many unique actors/repos appeared in the file" — the sum of
     # all values would instead just equal total_events again, which
     # isn't what we want here.
+    #
+    # Worked example: if the file only had 6 events, made by the actors
+    # ana, luis, ana, marta, ana, luis (in that order), the loop above
+    # would leave
+    #
+    #     actor_event_counts == Counter({"ana": 3, "luis": 2, "marta": 1})
+    #
+    # Each entry has a KEY (the name) and a VALUE (how many times that
+    # name appeared). Then:
+    #
+    #     len(actor_event_counts)            # 3 -> ana, luis, marta
+    #     sum(actor_event_counts.values())   # 6 -> 3 + 2 + 1
+    #
+    # len() answers "how many DIFFERENT actors?" (ana counts once, even
+    # with 3 events). The sum answers "how many events?" — and since
+    # every event has exactly one actor, that always equals total_events,
+    # so it would tell us nothing new.
+    #
+    # "Subclass of dict" just means Counter IS a dictionary with extra
+    # features added (.most_common(), missing keys starting at 0). So
+    # anything that works on a plain dict — like len() counting its
+    # keys — works on a Counter exactly the same way.
     # ---------------------------------------------------------------
     print(f"Unique actors: {len(actor_event_counts)}")
     print(f"Unique repos: {len(repo_event_counts)}")

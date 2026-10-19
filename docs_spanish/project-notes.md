@@ -403,6 +403,22 @@ pena decidir una política de filtrado de bots antes de usar estos datos
 para construir los modelos relacional/de grafo, ya que los `PushEvent`
 generados por bots dominarían la conectividad medida si no se filtran.
 
+**Únicos vs. total — cómo leer estas cifras.** "Actores únicos" y "total de
+eventos" responden a preguntas distintas. Si `ana` hace 3 eventos y `luis`
+hace 2, hay 5 eventos pero solo 2 actores únicos. El script lleva un
+`Counter` por cada cosa que cuenta — un diccionario *nombre → número de
+eventos* — y `len()` de ese diccionario da el número de nombres
+*distintos*, mientras que sumar todos sus valores volvería a dar el total
+de eventos (la [copia anotada](summarize_data.py) lo explica con un ejemplo
+concreto). La diferencia importa en este proyecto porque los actores únicos
+y los repos únicos son lo que se convertirá en los **nodos** del grafo (y
+en las filas de las tablas Actor y Repo) — unos 14,7k + 16,5k ≈ 31k nodos
+para esta hora — mientras que los eventos son lo que los *conecta*. De
+media, cada actor produjo unos 4,7 eventos (69.429 ÷ 14.728), pero esa
+media esconde un reparto muy desigual, con bots en lo más alto de la lista;
+por eso la decisión sobre filtrar bots de arriba afecta directamente a lo
+conectado que estará el grafo.
+
 ## Qué significa "benchmark" para este proyecto
 
 Antes de seguir, vale la pena ser precisos sobre una palabra que este

@@ -415,6 +415,23 @@ peine de décider d'une politique de filtrage des bots avant d'utiliser ces
 données pour construire les modèles relationnel/graphe, car les
 `PushEvent` générés par des bots domineraient sinon la connectivité mesurée.
 
+**Uniques vs. total — comment lire ces chiffres.** « Acteurs uniques » et
+« total d'événements » répondent à des questions différentes. Si `ana` fait
+3 événements et `luis` en fait 2, il y a 5 événements mais seulement 2
+acteurs uniques. Le script tient un `Counter` pour chaque chose qu'il
+compte — un dictionnaire *nom → nombre d'événements* — et `len()` de ce
+dictionnaire donne le nombre de noms *distincts*, alors qu'additionner
+toutes ses valeurs redonnerait simplement le total d'événements (la
+[copie annotée](summarize_data.py) le détaille avec un exemple concret).
+Cette distinction compte pour ce projet, car les acteurs uniques et les
+dépôts uniques sont ce qui deviendra les **nœuds** du graphe (et les lignes
+des tables Actor et Repo) — environ 14,7k + 16,5k ≈ 31k nœuds pour cette
+heure — tandis que les événements sont ce qui les *relie*. En moyenne,
+chaque acteur a produit environ 4,7 événements (69 429 ÷ 14 728), mais
+cette moyenne cache une répartition très inégale, avec des bots en tête de
+liste ; c'est pourquoi la décision de filtrage des bots ci-dessus influe
+directement sur le degré de connexion du graphe.
+
 ## Ce que signifie « benchmark » pour ce projet
 
 Avant d'aller plus loin, il vaut la peine d'être précis sur un mot que ce

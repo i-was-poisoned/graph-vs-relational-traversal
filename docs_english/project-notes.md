@@ -364,6 +364,22 @@ accounting for 95.3% of all events. The most active actors are all bots
 is used to build the relational/graph models, since bot-driven `PushEvent`s
 would otherwise dominate the connectivity being measured.
 
+**Unique vs. total — how to read these numbers.** "Unique actors" and
+"total events" answer different questions. If `ana` makes 3 events and
+`luis` makes 2, there are 5 events but only 2 unique actors. The script
+keeps a `Counter` per thing it tallies — a dictionary of *name → number of
+events* — and `len()` of that dictionary gives the number of *distinct*
+names, while adding up all its values would just give the total event
+count again (the [annotated copy](summarize_data.py) walks through this
+with a worked example). The distinction matters for this project because
+the unique actors and unique repos are what become the **nodes** of the
+graph (and the rows of the Actor and Repo tables) — roughly 14.7k + 16.5k
+≈ 31k nodes for this hour — while the events are what *connect* them. On
+average each actor produced about 4.7 events (69,429 ÷ 14,728), but that
+average hides a very uneven spread, with bots at the top of the list,
+which is why the bot-filtering decision above directly affects how
+connected the graph will be.
+
 ## What "benchmark" means, for this project
 
 Before going further, it's worth being precise about a word this project

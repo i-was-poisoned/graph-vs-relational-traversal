@@ -103,6 +103,19 @@ def summarize(file_path: Path, top_n: int) -> None:
     # pas le fichier entier.
     # ---------------------------------------------------------------
     with open(file_path, "r", encoding="utf-8") as f:
+        # for line in f:
+        #
+        # C'est une BOUCLE : un bloc de code qui SE RÉPÈTE. À lire comme
+        # « pour chaque ligne du fichier f, exécute les lignes indentées
+        # ci-dessous ». Ces lignes indentées sont écrites une seule fois
+        # mais s'exécutent une fois PAR LIGNE du fichier — 69 429 fois
+        # pour l'heure de ce projet, une par événement. Pensez au
+        # dépouillement d'une urne : on prend un bulletin, on ajoute un
+        # trait à côté de son nom, on revient prendre le suivant, jusqu'à
+        # ce que l'urne soit vide. Quand le fichier n'a plus de lignes, la
+        # boucle se termine et Python continue avec la première ligne non
+        # indentée qui suit (les print() ci-dessous).
+        #
         # Pas besoin d'enumerate() ici — contrairement à peek(),
         # summarize() n'affiche jamais d'index de ligne, donc la position
         # dans la boucle ne sert à rien, seul l'événement analysé compte.
@@ -135,6 +148,30 @@ def summarize(file_path: Path, top_n: int) -> None:
     # exactement « combien d'acteurs/dépôts uniques sont apparus dans le
     # fichier » — la somme de toutes les valeurs redonnerait simplement
     # total_events, ce qui n'est pas ce qu'on veut ici.
+    #
+    # Exemple concret : si le fichier ne contenait que 6 événements, faits
+    # par les acteurs ana, luis, ana, marta, ana, luis (dans cet ordre),
+    # la boucle ci-dessus laisserait
+    #
+    #     actor_event_counts == Counter({"ana": 3, "luis": 2, "marta": 1})
+    #
+    # Chaque entrée a une CLÉ (le nom) et une VALEUR (combien de fois ce
+    # nom est apparu). Alors :
+    #
+    #     len(actor_event_counts)            # 3 -> ana, luis, marta
+    #     sum(actor_event_counts.values())   # 6 -> 3 + 2 + 1
+    #
+    # len() répond à « combien d'acteurs DIFFÉRENTS ? » (ana compte une
+    # seule fois, même avec 3 événements). La somme répond à « combien
+    # d'événements ? » — et comme chaque événement a exactement un
+    # acteur, elle est toujours égale à total_events, donc elle ne nous
+    # apprendrait rien de nouveau.
+    #
+    # « Sous-classe de dict » veut simplement dire que Counter EST un
+    # dictionnaire avec des fonctionnalités en plus (.most_common(), les
+    # clés absentes qui valent 0). Donc tout ce qui marche sur un dict
+    # ordinaire — comme len() qui compte ses clés — marche exactement
+    # de la même façon sur un Counter.
     # ---------------------------------------------------------------
     print(f"Unique actors: {len(actor_event_counts)}")
     print(f"Unique repos: {len(repo_event_counts)}")
