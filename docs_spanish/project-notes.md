@@ -666,6 +666,58 @@ python scripts/profile_schema.py
 python scripts/profile_schema.py --type PushEvent
 ```
 
+### Concepto nuevo: la recursividad (una función que se llama a sí misma)
+
+`profile_schema.py` introduce una idea de programación que no aparecía en
+los scripts anteriores: la **recursividad** (o recursión). Su función
+`find_actor_refs()` se llama *a sí misma* dentro de su propio cuerpo. (No
+es "anidar" una función: anidar significa *definir* una función dentro de
+otra. Aquí hay una sola función que se *llama* a sí misma.)
+
+**Por qué se puede hacer.** Cada vez que se llama a una función, Python
+crea una copia nueva y separada de sus parámetros y variables para esa
+llamada. La nueva llamada trabaja con sus propios valores, y la llamada
+que la lanzó espera, en pausa, hasta recibir la respuesta, y luego sigue.
+
+**Una analogía.** Las muñecas rusas (matrioskas): para encontrar una nota
+escondida en algún lugar de un juego de muñecas, las instrucciones son las
+mismas en cada nivel: *"abre la muñeca; si la nota está aquí, cógela; si
+no, aplica estas mismas instrucciones a cada muñeca que haya dentro"*. Las
+instrucciones se refieren a sí mismas.
+
+**Por qué la necesita este script.** El `payload` de un evento es un
+diccionario que puede contener diccionarios, que pueden contener listas de
+diccionarios, y así sucesivamente, y no sabemos de antemano cuántos
+niveles tiene. Un bucle `for` normal solo mira un nivel. Una función
+recursiva se ocupa de un nivel y luego se pide *a sí misma* que se ocupe
+del siguiente, haya los que haya:
+
+```
+payload = {"action": "created", "issue": {"user": {"login": "luis"}}}
+
+find_actor_refs(payload)               -> un dict sin "login": mira dentro
+  find_actor_refs("created")           -> un texto: no hay nada dentro -> []
+  find_actor_refs({"user": {...}})     -> un dict sin "login": mira dentro
+    find_actor_refs({"login": "luis"}) -> ¡un usuario! -> ["payload.issue.user"]
+resultado: ["payload.issue.user"]
+```
+
+**Las dos reglas que necesita toda función recursiva:**
+
+1. **Un caso base:** una situación en la que responde *sin* llamarse a sí
+   misma (aquí: ha encontrado un usuario, ha llegado a un valor simple, o
+   ha llegado al límite de profundidad). Sin él, se llamaría a sí misma
+   para siempre.
+2. **Cada llamada tiene que acercarse a un caso base** (aquí: cada llamada
+   baja un nivel más en los datos, y el contador `depth` baja en 1, con
+   `MAX_SEARCH_DEPTH = 3` como límite).
+
+La recursividad es la herramienta natural siempre que los datos son como
+*cajas dentro de cajas*: carpetas dentro de carpetas, JSON dentro de JSON
+y, más adelante en este proyecto, explorar un grafo salto a salto. La
+[copia anotada](profile_schema.py) explica `find_actor_refs()` línea a
+línea, con un recorrido paso a paso de cada llamada.
+
 ### Para qué sirve el resultado
 
 El resultado de `profile_schema.py` es largo y, a primera vista, parece una

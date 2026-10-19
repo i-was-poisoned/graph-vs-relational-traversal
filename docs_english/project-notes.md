@@ -615,6 +615,55 @@ python scripts/profile_schema.py
 python scripts/profile_schema.py --type PushEvent
 ```
 
+### New concept: recursion (a function that calls itself)
+
+`profile_schema.py` introduces a programming idea that hasn't appeared in
+the earlier scripts: **recursion**. Its function `find_actor_refs()` calls
+*itself* inside its own body. (This isn't "nesting" a function — nesting
+means *defining* one function inside another. Here there's a single
+function that *calls* itself.)
+
+**Why it's possible.** Every time a function is called, Python creates a
+fresh, separate copy of its parameters and variables for that call. The
+new call works with its own values, and the call that started it waits,
+paused, until it gets the answer back, then carries on.
+
+**An analogy.** Russian nesting dolls: to find a note hidden somewhere in
+a set of dolls, the instructions are the same at every level — *"open the
+doll; if the note is here, take it; otherwise, apply these same
+instructions to each doll inside."* The instructions refer to themselves.
+
+**Why this script needs it.** An event's `payload` is a dictionary that
+can contain dictionaries, which can contain lists of dictionaries, and so
+on, and we don't know in advance how many levels there are. A normal
+`for` loop only looks at one level. A recursive function handles one
+level and then asks *itself* to handle the next, however many there are:
+
+```
+payload = {"action": "created", "issue": {"user": {"login": "luis"}}}
+
+find_actor_refs(payload)               -> a dict without "login": look inside
+  find_actor_refs("created")           -> plain text: nothing inside -> []
+  find_actor_refs({"user": {...}})     -> a dict without "login": look inside
+    find_actor_refs({"login": "luis"}) -> a user! -> ["payload.issue.user"]
+result: ["payload.issue.user"]
+```
+
+**The two rules every recursive function needs:**
+
+1. **A base case:** a situation where it answers *without* calling itself
+   (here: it found a user, reached a plain value, or hit the depth limit).
+   Without one, it would call itself forever.
+2. **Each call must get closer to a base case** (here: each call goes one
+   level deeper into the data, and the `depth` counter goes down by 1,
+   with `MAX_SEARCH_DEPTH = 3` as the limit).
+
+Recursion is the natural tool whenever the data looks like *boxes inside
+boxes*: folders inside folders, JSON inside JSON, and — later in this
+project — exploring a graph hop by hop. The
+[annotated copy](profile_schema.py) walks through `find_actor_refs()` line
+by line, with a step-by-step trace of every call.
+
 ### What the output is for
 
 The output of `profile_schema.py` is long and, at first glance, looks like

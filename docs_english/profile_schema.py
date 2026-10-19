@@ -57,6 +57,61 @@ MAX_SEARCH_DEPTH = 3
 
 
 # ---------------------------------------------------------------------
+# WHAT IS RECURSION? (a function that calls itself)
+#
+# find_actor_refs() below calls find_actor_refs() inside its own body.
+# That's called RECURSION, and a function that does it is RECURSIVE.
+# (It's not "nesting" a function — nesting means DEFINING one function
+# inside another. Here there's only one function; it just CALLS itself.)
+#
+# Why it's allowed: every time a function is called, Python creates a
+# fresh, separate copy of its parameters and variables for that call.
+# So when find_actor_refs() calls find_actor_refs() again, the new call
+# has its own `value`, `path` and `depth`, and doesn't overwrite the
+# first call's. The first call simply waits, paused, until the inner
+# call returns its answer, and then carries on where it left off.
+#
+# An analogy: Russian nesting dolls. To find a note hidden somewhere
+# inside a set of dolls, the instructions are the same at every level:
+#   "Open the doll. If the note is here, take it. Otherwise, for each
+#    doll you find inside, apply THESE SAME INSTRUCTIONS to it."
+# The instructions refer to themselves — that's recursion.
+#
+# Why we need it HERE: a payload is a dict that can contain dicts, that
+# can contain lists of dicts, and so on — and we don't know in advance
+# how deep it goes. A plain `for` loop only looks at ONE level. To look
+# at every level, without knowing how many there are, the function
+# handles one level and then asks itself to handle the next one.
+#
+# The two rules every recursive function needs:
+#   1. A BASE CASE: a situation where it answers WITHOUT calling itself
+#      (here: found a user, reached a plain value like a string, or ran
+#      out of depth). Without it, it would call itself forever.
+#   2. Each self-call must move CLOSER to a base case (here: each call
+#      goes one level deeper into the data, with depth - 1).
+#
+# Step by step, with a small payload:
+#
+#     payload = {"action": "created",
+#                "issue": {"user": {"login": "luis"}}}
+#
+#   call 1: find_actor_refs(payload, "payload", 3)
+#           a dict without "login" -> look at each of its values:
+#     call 2: find_actor_refs("created", "payload.action", 2)
+#             a string -> nothing inside -> returns []
+#     call 3: find_actor_refs({"user": {...}}, "payload.issue", 2)
+#             a dict without "login" -> look at each of its values:
+#       call 4: find_actor_refs({"login": "luis"}, "payload.issue.user", 1)
+#               a dict WITH "login" -> returns ["payload.issue.user"]
+#             call 3 collects that and returns ["payload.issue.user"]
+#   call 1 collects [] + ["payload.issue.user"] and returns
+#   ["payload.issue.user"]
+#
+# Each call only deals with ONE level; the answers travel back up, one
+# call at a time, until the first call has the complete list.
+# ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
 # def find_actor_refs(value: object, path: str, depth: int) -> list[str]:
 #
 # `value: object` — the parameter's declared type is `object`, the most

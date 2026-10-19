@@ -61,6 +61,69 @@ MAX_SEARCH_DEPTH = 3
 
 
 # ---------------------------------------------------------------------
+# QU'EST-CE QUE LA RÉCURSIVITÉ ? (une fonction qui s'appelle elle-même)
+#
+# find_actor_refs(), ci-dessous, appelle find_actor_refs() dans son
+# propre corps. C'est ce qu'on appelle la RÉCURSIVITÉ (ou récursion), et
+# une fonction qui fait cela est RÉCURSIVE. (Ce n'est pas « imbriquer »
+# une fonction : imbriquer veut dire DÉFINIR une fonction à l'intérieur
+# d'une autre. Ici, il n'y a qu'une seule fonction, qui S'APPELLE
+# simplement elle-même.)
+#
+# Pourquoi c'est possible : à chaque appel d'une fonction, Python crée
+# une copie neuve et séparée de ses paramètres et de ses variables pour
+# cet appel. Donc quand find_actor_refs() appelle à nouveau
+# find_actor_refs(), le nouvel appel a ses propres `value`, `path` et
+# `depth`, et n'écrase pas ceux du premier. Le premier appel attend
+# simplement, en pause, que l'appel intérieur lui renvoie sa réponse,
+# puis reprend là où il s'était arrêté.
+#
+# Une analogie : les poupées russes (matriochkas). Pour trouver un mot
+# caché quelque part dans un jeu de poupées, les instructions sont les
+# mêmes à chaque niveau :
+#   « Ouvre la poupée. Si le mot est là, prends-le. Sinon, à chaque
+#     poupée que tu trouves dedans, applique CES MÊMES INSTRUCTIONS. »
+# Les instructions font référence à elles-mêmes : c'est la récursivité.
+#
+# Pourquoi on en a besoin ICI : un payload est un dictionnaire qui peut
+# contenir des dictionnaires, qui peuvent contenir des listes de
+# dictionnaires, et ainsi de suite — et on ne sait pas à l'avance
+# combien de niveaux il y a. Une boucle `for` ordinaire ne regarde
+# qu'UN niveau. Pour regarder tous les niveaux, sans savoir combien il y
+# en a, la fonction s'occupe d'un niveau et se demande à elle-même de
+# s'occuper du suivant.
+#
+# Les deux règles dont a besoin toute fonction récursive :
+#   1. Un CAS DE BASE : une situation où elle répond SANS s'appeler
+#      elle-même (ici : elle a trouvé un utilisateur, elle est arrivée à
+#      une valeur simple comme un texte, ou elle n'a plus de profondeur
+#      disponible). Sans cela, elle s'appellerait elle-même à l'infini.
+#   2. Chaque appel à elle-même doit se RAPPROCHER d'un cas de base
+#      (ici : chaque appel descend d'un niveau dans les données, avec
+#      depth - 1).
+#
+# Pas à pas, avec un petit payload :
+#
+#     payload = {"action": "created",
+#                "issue": {"user": {"login": "luis"}}}
+#
+#   appel 1 : find_actor_refs(payload, "payload", 3)
+#             un dict sans "login" -> regarde chacune de ses valeurs :
+#     appel 2 : find_actor_refs("created", "payload.action", 2)
+#               un texte -> rien dedans -> renvoie []
+#     appel 3 : find_actor_refs({"user": {...}}, "payload.issue", 2)
+#               un dict sans "login" -> regarde chacune de ses valeurs :
+#       appel 4 : find_actor_refs({"login": "luis"}, "payload.issue.user", 1)
+#                 un dict AVEC "login" -> renvoie ["payload.issue.user"]
+#               l'appel 3 le récupère et renvoie ["payload.issue.user"]
+#   l'appel 1 rassemble [] + ["payload.issue.user"] et renvoie
+#   ["payload.issue.user"]
+#
+# Chaque appel ne s'occupe que d'UN niveau ; les réponses remontent,
+# d'appel en appel, jusqu'à ce que le premier ait la liste complète.
+# ---------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
 # def find_actor_refs(value: object, path: str, depth: int) -> list[str]:
 #
 # `value: object` — le type déclaré du paramètre est `object`, le type

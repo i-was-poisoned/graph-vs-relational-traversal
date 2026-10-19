@@ -690,6 +690,59 @@ python scripts/profile_schema.py
 python scripts/profile_schema.py --type PushEvent
 ```
 
+### Nouveau concept : la récursivité (une fonction qui s'appelle elle-même)
+
+`profile_schema.py` introduit une idée de programmation qui n'apparaissait
+pas dans les scripts précédents : la **récursivité** (ou récursion). Sa
+fonction `find_actor_refs()` s'appelle *elle-même* dans son propre corps.
+(Ce n'est pas « imbriquer » une fonction : imbriquer veut dire *définir*
+une fonction à l'intérieur d'une autre. Ici, il y a une seule fonction qui
+s'*appelle* elle-même.)
+
+**Pourquoi c'est possible.** À chaque appel d'une fonction, Python crée
+une copie neuve et séparée de ses paramètres et de ses variables pour cet
+appel. Le nouvel appel travaille avec ses propres valeurs, et l'appel qui
+l'a lancé attend, en pause, de recevoir la réponse, puis continue.
+
+**Une analogie.** Les poupées russes (matriochkas) : pour trouver un mot
+caché quelque part dans un jeu de poupées, les instructions sont les mêmes
+à chaque niveau : *« ouvre la poupée ; si le mot est là, prends-le ;
+sinon, applique ces mêmes instructions à chaque poupée qui se trouve
+dedans »*. Les instructions font référence à elles-mêmes.
+
+**Pourquoi ce script en a besoin.** Le `payload` d'un événement est un
+dictionnaire qui peut contenir des dictionnaires, qui peuvent contenir des
+listes de dictionnaires, et ainsi de suite — et on ne sait pas à l'avance
+combien de niveaux il y a. Une boucle `for` ordinaire ne regarde qu'un
+niveau. Une fonction récursive s'occupe d'un niveau, puis se demande *à
+elle-même* de s'occuper du suivant, quel que soit leur nombre :
+
+```
+payload = {"action": "created", "issue": {"user": {"login": "luis"}}}
+
+find_actor_refs(payload)               -> un dict sans "login" : regarde dedans
+  find_actor_refs("created")           -> un texte : rien dedans -> []
+  find_actor_refs({"user": {...}})     -> un dict sans "login" : regarde dedans
+    find_actor_refs({"login": "luis"}) -> un utilisateur ! -> ["payload.issue.user"]
+résultat : ["payload.issue.user"]
+```
+
+**Les deux règles dont a besoin toute fonction récursive :**
+
+1. **Un cas de base :** une situation où elle répond *sans* s'appeler
+   elle-même (ici : elle a trouvé un utilisateur, atteint une valeur
+   simple, ou atteint la limite de profondeur). Sans cela, elle
+   s'appellerait elle-même à l'infini.
+2. **Chaque appel doit se rapprocher d'un cas de base** (ici : chaque
+   appel descend d'un niveau dans les données, et le compteur `depth`
+   diminue de 1, avec `MAX_SEARCH_DEPTH = 3` comme limite).
+
+La récursivité est l'outil naturel dès que les données ressemblent à des
+*boîtes dans des boîtes* : des dossiers dans des dossiers, du JSON dans du
+JSON et, plus tard dans ce projet, l'exploration d'un graphe saut par
+saut. La [copie annotée](profile_schema.py) détaille `find_actor_refs()`
+ligne par ligne, avec un déroulé pas à pas de chaque appel.
+
 ### À quoi sert le résultat
 
 Le résultat de `profile_schema.py` est long et, à première vue, ressemble à
