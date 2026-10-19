@@ -274,25 +274,55 @@ trouve. L'exécuter sur l'heure fixe de ce projet montre :
   REST de GitHub. Les seules références à un second acteur sur ce type
   d'événement sont les champs optionnels `assignee`/`assignees`, présents
   sur seulement ~2 % des événements de PR.
-- **Les événements plus riches, de type commentaire/revue, portent de
-  façon fiable un second acteur :** `IssueCommentEvent`
-  (`payload.comment.user`, `payload.issue.user`), `IssuesEvent`
-  (`payload.issue.user`), `PullRequestReviewCommentEvent`
-  (`payload.comment.user`), `PullRequestReviewEvent`
-  (`payload.review.user`), `CommitCommentEvent` (`payload.comment.user`),
-  `ReleaseEvent` (`payload.release.author`), `ForkEvent`
-  (`payload.forkee.owner`), et `MemberEvent` (`payload.member` lui-même) —
-  tous présents sur 100 % des événements de leur type respectif.
+- **Les événements plus riches, de type commentaire/revue, contiennent
+  toujours un objet utilisateur imbriqué — mais c'est le plus souvent
+  l'acteur lui-même, pas une seconde personne.**
+  `scripts/profile_schema.py` vérifie seulement qu'un objet `login`
+  *existe* à un chemin donné, pas *qui* il est. En comparant chaque
+  `login` imbriqué avec le `actor.login` de premier niveau de
+  l'événement, on obtient :
+  - Le `payload.comment.user` de `IssueCommentEvent` est l'acteur dans
+    100 % des événements (194/194) — l'auteur du commentaire *est*
+    l'acteur. Son `payload.issue.user` (l'auteur de l'issue) est l'acteur
+    dans 34 % des cas et une personne réellement différente dans 66 %
+    (128/194).
+  - Le `payload.issue.user` de `IssuesEvent` est l'acteur dans 87 % des
+    cas (164/189).
+  - `PullRequestReviewCommentEvent` `payload.comment.user` (100 %),
+    `PullRequestReviewEvent` `payload.review.user` (99 %), `ReleaseEvent`
+    `payload.release.author` (100 %), `CommitCommentEvent`
+    `payload.comment.user` (100 %) et `ForkEvent` `payload.forkee.owner`
+    (100 % — celui qui forke possède le nouveau fork) désignent tous
+    l'acteur.
+  - Le `payload.member` de `MemberEvent` est l'acteur dans 3 événements
+    sur 5 ; les champs `assignee`/`assignees` diffèrent de l'acteur dans
+    environ 30 à 70 % des cas.
+  - `*.performed_via_github_app.owner` n'est *jamais* l'acteur, mais
+    c'est le propriétaire de la GitHub App qui a publié le
+    commentaire/l'issue (en général une organisation), pas un
+    participant — il ne compte donc pas non plus.
 
-À retenir en pratique : si le parcours mesuré a besoin de vraies arêtes
-acteur-à-acteur (pas seulement acteur-à-dépôt, avec « dépôt partagé »
-comme seule connexion entre acteurs), ces arêtes proviennent presque
-entièrement des ~4,7 % d'événements qui ne sont pas des `PushEvent` —
-principalement les commentaires, revues, issues, releases, forks, et
-changements d'adhésion. Exécutez vous-même
+  En excluant les propriétaires d'apps, seuls **178 des 69 429
+  événements (0,26 %)** nomment une personne autre que l'acteur, et
+  seulement **76** d'entre eux proviennent d'acteurs qui ne sont pas des
+  bots. Par type d'événement : `IssueCommentEvent` 131/194, `IssuesEvent`
+  35/189, `PullRequestEvent` 7/532, `ReleaseEvent` 2/44, `MemberEvent`
+  2/5, `PullRequestReviewEvent` 1/131. Le tableau complet se trouve dans
+  [project-notes.md](project-notes.md) (« Étape de conception du
+  schéma »).
+
+À retenir en pratique : les arêtes directes acteur-à-acteur sont
+pratiquement inexistantes dans ces données. Les ~4,7 % d'événements qui
+ne sont pas des `PushEvent` ne sont qu'une borne supérieure de ce qui
+*pourrait* fournir une telle arête ; le chiffre réel est de 0,26 %
+(178 événements), surtout des commentaires d'issue qui nomment l'auteur
+de l'issue. En pratique, les connexions entre acteurs passent par des
+dépôts partagés — un parcours acteur-dépôt-acteur. Exécutez vous-même
 `python scripts/profile_schema.py` (éventuellement avec
 `--type <EventType>`) pour voir la répartition complète et à jour avant de
-finaliser le schéma.
+finaliser le schéma, en gardant à l'esprit que ses « actor references »
+montrent seulement où un objet utilisateur *existe*, pas s'il s'agit
+d'une personne différente.
 
 ## 7. Récupérer les données sur votre machine
 

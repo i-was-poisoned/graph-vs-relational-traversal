@@ -256,6 +256,42 @@ def profile(file_path: Path, type_filter: str | None) -> None:
             for ref_path in ref_paths:
                 ref_counts[ref_path] += 1
 
+    # ---------------------------------------------------------------
+    # Comment lire la sortie
+    #
+    # Un exemple réel tiré de l'heure fixe de ce projet :
+    #
+    #   IssueCommentEvent (194 events)
+    #     payload.action               present in 100.0% (194/194) - types: str x194
+    #     payload.issue                present in 100.0% (194/194) - types: dict x194
+    #     payload.comment              present in 100.0% (194/194) - types: dict x194
+    #     actor references (nested 'login' fields):
+    #       payload.issue.user                  present in 100.0% (194/194)
+    #       payload.comment.user                present in 100.0% (194/194)
+    #
+    # - Ligne 1 : le type d'événement, et combien d'événements de ce
+    #   type le fichier contient.
+    # - Chaque ligne de payload : le nom du champ, puis « present in
+    #   X% » — dans combien de CES événements le champ existe. 100 %
+    #   veut dire toujours là (fiable) ; un faible % veut dire
+    #   seulement parfois, donc ce serait une colonne
+    #   optionnelle/nullable. « types » indique quel genre de valeur
+    #   il contenait (str, int, dict, list, NoneType) et combien de
+    #   fois. NoneType veut dire que le champ est parfois vide — par
+    #   ex. la description de CreateEvent vaut None dans 633
+    #   événements sur 1290.
+    # - « actor references » : les chemins vers des objets
+    #   utilisateur imbriqués (tout ce qui a un « login »), et dans
+    #   quel % des événements chacun apparaît.
+    #
+    # IMPORTANT : cela vérifie seulement qu'un objet utilisateur
+    # EXISTE à ce chemin, pas QUI il est. payload.comment.user est
+    # l'auteur du commentaire — c'est-à-dire l'acteur lui-même (100 %
+    # du temps). payload.issue.user est l'auteur de l'issue, une
+    # personne différente dans 66 % des cas. Voir project-notes.md
+    # (« Étape de conception du schéma ») pour la comparaison avec
+    # l'acteur de l'événement.
+    # ---------------------------------------------------------------
     for event_type, total in event_type_totals.most_common():
         print(f"{event_type} ({total} events)")
         fields = payload_field_types[event_type]

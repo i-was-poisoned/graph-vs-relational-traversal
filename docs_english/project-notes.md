@@ -414,8 +414,9 @@ accounts whose login ends in `[bot]`:
 **Conclusions:**
 
 1. **Pushes dominate.** `PushEvent` is 95.3% of all events (96.3% without
-   bots). The event types that link two people directly (comments,
-   reviews, issues) add up to around 1%. Connections between actors will
+   bots). The event types that *could* link two people directly
+   (comments, reviews, issues) add up to around 1%, and only 0.26% of
+   events actually name a second, different person. Connections between actors will
    come almost entirely from *shared repos*, which matches what
    `profile_schema.py` found (see the Schema Design Stage below).
 2. **More repos than actors means some actors touch several repos.** If
@@ -614,19 +615,102 @@ python scripts/profile_schema.py
 python scripts/profile_schema.py --type PushEvent
 ```
 
-**Key finding:** `PushEvent` — 95.3% of all events in this project's fixed
-hour — carries no second actor anywhere in its payload; it only has `ref`,
-`before`/`head` (commit SHAs), and `repository_id`. `PullRequestEvent`'s
-`payload.pull_request` is also a trimmed reference object that omits the
-PR's author (unlike GitHub's full REST API response). Real second-actor
-references live almost entirely in the remaining ~4.7% of events —
-comments, reviews, issues, releases, forks, and membership changes (full
-breakdown in
+### What the output is for
+
+The output of `profile_schema.py` is long and, at first glance, looks like
+a list of technical fields. But it answers one very specific question for
+this project: **besides the actor who made the event, does the event name
+another person?** If the answer were "yes, often", the graph could have
+direct person → person connections (e.g. "Ana commented on Luis's issue"),
+and the benchmark's walks could use them. If the answer is "almost never",
+people only connect through the repos they share, and the schema has to
+reflect that.
+
+On top of that, the output is useful for three practical things when
+designing the schema:
+
+1. **Knowing what data each event type holds.** Each event type stores
+   different things in its `payload`. A `PushEvent` stores the branch and
+   the commits; an `IssueCommentEvent` stores the issue and the comment.
+2. **Knowing whether a field is reliable.** "present in 100%" means the
+   field is always there; a low percentage means it only appears
+   sometimes. In a table, that would be an optional column (one that can
+   be empty).
+3. **Knowing what kind of data it is.** `str` (text), `int` (number),
+   `dict` (an object with more fields inside), `list` (a list) or
+   `NoneType` (empty). For example, in `CreateEvent` the `description`
+   field is empty (`NoneType`) in 633 of 1,290 events: if it were stored,
+   it would need a column that allows empty values.
+
+### How to read one block of the output
+
+```
+IssueCommentEvent (194 events)
+  payload.action               present in 100.0% (194/194) - types: str x194
+  payload.issue                present in 100.0% (194/194) - types: dict x194
+  payload.comment              present in 100.0% (194/194) - types: dict x194
+  actor references (nested 'login' fields):
+    payload.issue.user                  present in 100.0% (194/194)
+    payload.comment.user                present in 100.0% (194/194)
+```
+
+- **First line:** the event type and how many events of that type there
+  are (194 comments on issues).
+- **`payload.…` lines:** each field of the `payload`, in what percentage
+  of those events it appears, and what type of data it holds. Here all
+  three fields are always present: `action` is text, and `issue` and
+  `comment` are objects with more data inside.
+- **`actor references`:** the paths inside the `payload` where there's an
+  object shaped like a GitHub user (a dict with `login`), and in what
+  percentage of events it appears. `payload.issue.user` is whoever opened
+  the issue; `payload.comment.user` is whoever wrote the comment.
+
+### Second check: is it really another person?
+
+There's a catch. `profile_schema.py` only checks that a user **exists** at
+that path, not **who** it is. And often it's the actor themself: in an
+`IssueCommentEvent`, whoever wrote the comment (`comment.user`) is exactly
+the person who made the event. To find out, each user found has to be
+compared with the event's `actor`. That comparison, run on this project's
+data, gives this:
+
+| Event type and path | Who it is | Is it the actor themself? |
+|---|---|---|
+| `IssueCommentEvent` `comment.user` | the comment's author | Yes, 100% |
+| `IssueCommentEvent` `issue.user` | whoever opened the issue | Only 34%: **66% of the time it's someone else** |
+| `IssuesEvent` `issue.user` | whoever opened the issue | 87% (people usually manage their own issues) |
+| `PullRequestReviewEvent` `review.user` | the review's author | 99% |
+| `PullRequestReviewCommentEvent` `comment.user` | the comment's author | 100% |
+| `ReleaseEvent` `release.author` | the release's author | 100% |
+| `ForkEvent` `forkee.owner` | owner of the new copy (the fork) | 100%: whoever forks owns the copy |
+| `assignee` / `assignees` (several types) | assigned people | Between 30% and 70%, depending on the case |
+| `performed_via_github_app.owner` | owner of the app that posted the event | Never, but not a participant either: usually an organisation |
+
+**Result:** of the 69,429 events, only **178 (0.26%)** name a person who
+is really different from the actor (not counting app owners), and only
+**76** of those come from non-bot actors. Almost all are comments on
+someone else's issue (`IssueCommentEvent`, 131) or actions on someone
+else's issue (`IssuesEvent`, 35).
+
+**Key finding:** `PushEvent` — 95.3% of all events — names no other person
+anywhere in its `payload`: it only has `ref`, `before`/`head` (commit
+identifiers) and `repository_id`. `PullRequestEvent`'s
+`payload.pull_request` is also a trimmed reference that omits the PR's
+author (unlike GitHub's full REST API response). And in the remaining
+events, most nested users are the actor themself. An earlier version of
+these notes said second-actor references lived in the ~4.7% of events
+that aren't `PushEvent`; that was only an upper bound. The real figure,
+after comparing with the actor, is **0.26%** (breakdown in
 [gh-archive-guide.md](gh-archive-guide.md#where-a-second-actor-appears-nested-references)).
-This directly shapes the schema decision: an actor-to-actor edge type, if
-modeled at all, will be sparse and drawn from a small slice of event types —
-most of the graph's connectivity will come from the actor→repo edges
-themselves (many actors sharing a repo), not from direct actor→actor links.
+
+**What this means for the schema:** direct person → person connections
+are practically nonexistent in this data. With 76 connections between
+people (without bots), no multi-hop walk can be built. That's why the
+benchmark schema is **Actor, Repo, and the connection between them**, with
+no actor → actor edge: people connect through the repos they share, as
+measured by `summarize_data.py`. And a general lesson: a field that
+*looks like* another person isn't necessarily one; always check it
+against the actor.
 
 The overall pipeline so far is: **download_gharchive.py → peek_data.py →
 summarize_data.py → profile_schema.py** — first fetch and decompress the

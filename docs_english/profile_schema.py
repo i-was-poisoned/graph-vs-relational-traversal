@@ -234,6 +234,38 @@ def profile(file_path: Path, type_filter: str | None) -> None:
             for ref_path in ref_paths:
                 ref_counts[ref_path] += 1
 
+    # ---------------------------------------------------------------
+    # How to read the output
+    #
+    # A real example from this project's fixed hour:
+    #
+    #   IssueCommentEvent (194 events)
+    #     payload.action               present in 100.0% (194/194) - types: str x194
+    #     payload.issue                present in 100.0% (194/194) - types: dict x194
+    #     payload.comment              present in 100.0% (194/194) - types: dict x194
+    #     actor references (nested 'login' fields):
+    #       payload.issue.user                  present in 100.0% (194/194)
+    #       payload.comment.user                present in 100.0% (194/194)
+    #
+    # - Line 1: the event type, and how many events of that type the
+    #   file contains.
+    # - Each payload line: the field name, then "present in X%" - in
+    #   how many of THOSE events the field exists at all. 100% means
+    #   always there (reliable); a low % means only sometimes, so it
+    #   would become an optional/nullable column. "types" says what
+    #   kind of value it held (str, int, dict, list, NoneType) and how
+    #   often. NoneType means the field is sometimes empty - e.g.
+    #   CreateEvent's description is None in 633 of 1290 events.
+    # - "actor references": paths to nested user objects (anything
+    #   with a "login"), and in what % of events each one appears.
+    #
+    # IMPORTANT: this only checks that a user object EXISTS at that
+    # path, not WHO it is. payload.comment.user is the commenter -
+    # i.e. the actor themself (100% of the time). payload.issue.user
+    # is the issue's author, a different person in 66% of cases. See
+    # project-notes.md (Schema Design Stage) for the check against
+    # the event's actor.
+    # ---------------------------------------------------------------
     for event_type, total in event_type_totals.most_common():
         print(f"{event_type} ({total} events)")
         fields = payload_field_types[event_type]

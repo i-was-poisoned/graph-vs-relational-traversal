@@ -269,24 +269,52 @@ Ejecutarlo sobre la hora fija de este proyecto muestra:
   REST de GitHub. Las únicas referencias a un segundo actor en este tipo
   de evento son los campos opcionales `assignee`/`assignees`, presentes en
   solo ~2 % de los eventos de PR.
-- **Los eventos más ricos, del tipo comentario/revisión, llevan de forma
-  fiable un segundo actor:** `IssueCommentEvent` (`payload.comment.user`,
-  `payload.issue.user`), `IssuesEvent` (`payload.issue.user`),
-  `PullRequestReviewCommentEvent` (`payload.comment.user`),
-  `PullRequestReviewEvent` (`payload.review.user`), `CommitCommentEvent`
-  (`payload.comment.user`), `ReleaseEvent` (`payload.release.author`),
-  `ForkEvent` (`payload.forkee.owner`), y `MemberEvent`
-  (`payload.member` mismo) — todos presentes en el 100 % de los eventos de
-  su tipo respectivo.
+- **Los eventos más ricos, del tipo comentario/revisión, siempre
+  contienen un objeto de usuario anidado — pero casi siempre es el propio
+  actor, no una segunda persona.** `scripts/profile_schema.py` solo
+  comprueba que un objeto con `login` *existe* en una ruta, no *quién*
+  es. Al comparar cada `login` anidado con el `actor.login` de nivel
+  superior del evento, se obtiene:
+  - El `payload.comment.user` de `IssueCommentEvent` es el actor en el
+    100 % de los eventos (194/194) — quien comenta *es* el actor. Su
+    `payload.issue.user` (el autor de la issue) es el actor en el 34 % de
+    los casos y una persona realmente distinta en el 66 % (128/194).
+  - El `payload.issue.user` de `IssuesEvent` es el actor en el 87 %
+    (164/189).
+  - `PullRequestReviewCommentEvent` `payload.comment.user` (100 %),
+    `PullRequestReviewEvent` `payload.review.user` (99 %), `ReleaseEvent`
+    `payload.release.author` (100 %), `CommitCommentEvent`
+    `payload.comment.user` (100 %) y `ForkEvent` `payload.forkee.owner`
+    (100 % — quien hace el fork es el dueño del nuevo fork) son todos el
+    propio actor.
+  - El `payload.member` de `MemberEvent` es el actor en 3 de 5 eventos;
+    los campos `assignee`/`assignees` difieren del actor en
+    aproximadamente un 30–70 % de los casos.
+  - `*.performed_via_github_app.owner` *nunca* es el actor, pero es el
+    dueño de la GitHub App que publicó el comentario/la issue
+    (normalmente una organización), no un participante — así que
+    tampoco cuenta.
 
-Conclusión práctica: si el recorrido que se va a medir necesita aristas
-actor-a-actor reales (no solo actor-a-repo, con "repo compartido" como
-única conexión entre actores), esas aristas provienen casi por completo
-del ~4,7 % de eventos que no son `PushEvent` — principalmente
-comentarios, revisiones, issues, releases, forks, y cambios de membresía.
-Ejecuta tú mismo `python scripts/profile_schema.py` (opcionalmente con
-`--type <EventType>`) para ver el desglose completo y actualizado antes
-de finalizar el esquema.
+  Sin contar a los dueños de apps, solo **178 de 69.429 eventos
+  (0,26 %)** nombran a una persona distinta del actor, y solo **76** de
+  ellos vienen de actores que no son bots. Por tipo de evento:
+  `IssueCommentEvent` 131/194, `IssuesEvent` 35/189, `PullRequestEvent`
+  7/532, `ReleaseEvent` 2/44, `MemberEvent` 2/5,
+  `PullRequestReviewEvent` 1/131. La tabla completa está en
+  [project-notes.md](project-notes.md) ("Etapa de diseño del
+  esquema").
+
+Conclusión práctica: las aristas directas actor-a-actor son
+prácticamente inexistentes en estos datos. El ~4,7 % de eventos que no
+son `PushEvent` es solo un límite superior de dónde *podría* salir una
+arista así; la cifra real es del 0,26 % (178 eventos), sobre todo
+comentarios de issues que nombran al autor de la issue. En la práctica,
+las conexiones entre actores vienen de repos compartidos — un recorrido
+actor-repo-actor. Ejecuta tú mismo `python scripts/profile_schema.py`
+(opcionalmente con `--type <EventType>`) para ver el desglose completo y
+actualizado antes de finalizar el esquema, teniendo en cuenta que sus
+"actor references" solo muestran dónde *existe* un objeto de usuario, no
+si se trata de otra persona.
 
 ## 7. Cómo llevar los datos a tu máquina
 

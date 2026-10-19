@@ -241,22 +241,45 @@ this project's fixed hour shows:
   PR's author the way GitHub's full REST API response would. The only
   second-actor references on this event type are the optional `assignee`/
   `assignees` fields, present on just ~2% of PR events.
-- **Richer, comment/review-style events reliably carry a second actor:**
-  `IssueCommentEvent` (`payload.comment.user`, `payload.issue.user`),
-  `IssuesEvent` (`payload.issue.user`), `PullRequestReviewCommentEvent`
-  (`payload.comment.user`), `PullRequestReviewEvent` (`payload.review.user`),
-  `CommitCommentEvent` (`payload.comment.user`), `ReleaseEvent`
-  (`payload.release.author`), `ForkEvent` (`payload.forkee.owner`), and
-  `MemberEvent` (`payload.member` itself) — all present on 100% of their
-  respective event type's events.
+- **Richer, comment/review-style events always contain a nested user
+  object — but it is usually the actor themself, not a second person.**
+  `scripts/profile_schema.py` only checks that a `login` object *exists*
+  at a path, not *who* it is. Comparing each nested `login` with the
+  event's top-level `actor.login` shows:
+  - `IssueCommentEvent` `payload.comment.user` is the actor in 100% of
+    events (194/194) — the commenter *is* the actor. Its
+    `payload.issue.user` (the issue's author) is the actor in 34% of
+    events and a genuinely different person in 66% (128/194).
+  - `IssuesEvent` `payload.issue.user` is the actor in 87% (164/189).
+  - `PullRequestReviewCommentEvent` `payload.comment.user` (100%),
+    `PullRequestReviewEvent` `payload.review.user` (99%), `ReleaseEvent`
+    `payload.release.author` (100%), `CommitCommentEvent`
+    `payload.comment.user` (100%) and `ForkEvent` `payload.forkee.owner`
+    (100% — whoever forks owns the new fork) are all the actor.
+  - `MemberEvent` `payload.member` is the actor in 3 of 5 events; the
+    `assignee`/`assignees` fields differ from the actor in roughly
+    30–70% of cases.
+  - `*.performed_via_github_app.owner` is *never* the actor, but it is the
+    owner of the GitHub App that posted the comment/issue (usually an
+    organisation), not a participant — so it doesn't count either.
 
-Practical takeaway: if the benchmarked traversal needs real actor-to-actor
-edges (not just actor-to-repo, with "shared repo" as the only connection
-between actors), those edges come almost entirely from the ~4.7% of events
-that aren't `PushEvent` — mainly comments, reviews, issues, releases, forks,
-and membership changes. Run `python scripts/profile_schema.py` yourself
-(optionally with `--type <EventType>`) to see the full, current breakdown
-before finalizing the schema.
+  Excluding app owners, only **178 of 69,429 events (0.26%)** name a
+  person other than the actor, and only **76** of those come from non-bot
+  actors. By event type: `IssueCommentEvent` 131/194, `IssuesEvent`
+  35/189, `PullRequestEvent` 7/532, `ReleaseEvent` 2/44, `MemberEvent`
+  2/5, `PullRequestReviewEvent` 1/131. The full table is in
+  [project-notes.md](project-notes.md) (Schema Design Stage).
+
+Practical takeaway: direct actor-to-actor edges are practically
+nonexistent in this data. The ~4.7% of events that aren't `PushEvent` is
+only an upper bound for where such an edge *could* come from; the real
+figure is 0.26% (178 events), mostly issue comments that name the issue's
+author. In practice, connections between actors come from shared repos —
+an actor-repo-actor traversal. Run `python scripts/profile_schema.py`
+yourself (optionally with `--type <EventType>`) to see the full, current
+breakdown before finalizing the schema, and remember that its "actor
+references" only show where a user object *exists*, not whether it is a
+different person.
 
 ## 7. Getting the data onto your machine
 
