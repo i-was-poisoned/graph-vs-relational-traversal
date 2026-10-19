@@ -1171,6 +1171,100 @@ mesure `summarize_data.py`. Et une leçon générale : un champ qui
 *ressemble* à une autre personne n'en est pas forcément une ; il faut
 toujours le vérifier par rapport à l'acteur.
 
+### Synthèse : ce que l'on sait des données de cette heure
+
+Cette partie rassemble en un seul endroit ce qu'ont découvert
+`peek_data.py`, `summarize_data.py` et `profile_schema.py` sur l'heure fixe
+du projet (2026-08-27, 15h00 UTC, 69 429 événements).
+
+#### 1. Comment lire les données d'un événement
+
+Chaque ligne du fichier est un JSON indépendant. `json.loads(line)` le
+transforme en **dictionnaire** Python, et à partir de là on accède à chaque
+donnée par sa clé. Certaines données se trouvent dans un **dictionnaire à
+l'intérieur d'un autre dictionnaire**, d'où les **deux paires de
+crochets** : la première entre dans le dictionnaire intérieur, la seconde
+prend la valeur.
+
+| Ce qu'on veut savoir | Comment l'obtenir | Exemple |
+|---|---|---|
+| Qui a fait l'action | `event["actor"]["login"]` | `"octocat"` |
+| Son identifiant numérique | `event["actor"]["id"]` | `583231` |
+| Dans quel dépôt | `event["repo"]["name"]` | `"octocat/Hello-World"` |
+| L'identifiant numérique du dépôt | `event["repo"]["id"]` | `1296269` |
+| Quel type d'action | `event["type"]` | `"PushEvent"` |
+| Quand | `event["created_at"]` | `"2026-08-27T15:00:01Z"` |
+| Les détails de l'action | `event["payload"]` | dépend du type d'événement |
+
+Par exemple, `event["actor"]["login"]` se lit ainsi : « dans l'événement,
+prends le dictionnaire `actor` ; dans celui-ci, prends la valeur de
+`login` ».
+
+Les cinq premières données sont présentes dans **tous** les événements
+(vérifié : les 69 429 ont `actor.id` et `repo.id`). C'est exactement ce dont
+a besoin le schéma minimal du benchmark : qui (Acteur), où (Dépôt) et la
+connexion entre les deux. Pour les clés des tables et des nœuds, mieux vaut
+utiliser les `id` numériques plutôt que les noms : un utilisateur peut
+changer de `login`, mais son `id` ne change jamais.
+
+#### 2. D'autres personnes dans le `payload`
+
+Le `payload` peut contenir d'autres utilisateurs, de même forme que
+l'acteur (un dictionnaire avec `login`). `profile_schema.py` les trouve en
+cherchant `login` à n'importe quel niveau du `payload`, grâce à la
+récursivité.
+
+Mais **trouver un utilisateur ne veut pas dire trouver une autre
+personne**. En comparant chaque utilisateur trouvé avec l'acteur de
+l'événement, la plupart s'avèrent être l'acteur lui-même (voir « Deuxième
+vérification » plus haut). Seuls **178 événements sur 69 429 (0,26 %)**
+nomment vraiment une personne différente, et seulement **76** une fois les
+bots retirés.
+
+#### 3. Ce que contient chaque type d'événement dans cette heure
+
+| Type d'événement | Événements | % du total | Ce que contient le `payload` | Utilisateurs dans le `payload` | Nomme-t-il une autre personne ? |
+|---|---|---|---|---|---|
+| `PushEvent` | 66 174 | 95,3 % | La branche (`ref`), le commit avant et après le push (`before`, `head`), `push_id` et `repository_id` | Aucun | Non |
+| `CreateEvent` | 1 290 | 1,9 % | Ce qui a été créé : dans cette heure, toujours une branche (`ref_type = "branch"`). Aussi la branche principale et une `description`, vide dans 633 cas sur 1 290 | Aucun | Non |
+| `DeleteEvent` | 615 | 0,9 % | Ce qui a été supprimé : 586 branches et 29 tags | Aucun | Non |
+| `PullRequestEvent` | 532 | 0,8 % | L'action (`opened`, `closed`...), le numéro de la PR, un `pull_request` tronqué **sans son auteur**, et parfois des labels (25 %) | `assignee`/`assignees` (2,1 %) | Très rarement : 7 événements |
+| `IssueCommentEvent` | 194 | 0,3 % | L'issue commentée et le commentaire | `comment.user` (100 %), `issue.user` (100 %), propriétaire de l'application (63 %), personnes assignées (16,5 %), créateur du milestone (3,6 %) | **Oui, le plus souvent :** `issue.user` est quelqu'un d'autre dans 66 % des cas (131 événements) |
+| `IssuesEvent` | 189 | 0,3 % | L'issue et son action ; parfois des labels (45 %) et des personnes assignées (7,4 %) | `issue.user` (100 %), personnes assignées (20 %), propriétaire de l'application (11 %) et autres | Parfois : 35 événements (`issue.user` est l'acteur dans 87 % des cas) |
+| `PullRequestReviewCommentEvent` | 134 | 0,2 % | Le commentaire et la PR | `comment.user` (100 %) | Non : c'est l'acteur |
+| `PullRequestReviewEvent` | 131 | 0,2 % | La revue et la PR | `review.user` (100 %) | Presque jamais : 1 événement |
+| `WatchEvent` | 96 | 0,1 % | Seulement l'action : toujours `started`, c'est-à-dire que quelqu'un a **mis une étoile** au dépôt | Aucun | Non |
+| `ReleaseEvent` | 44 | 0,1 % | La release publiée | `release.author` (100 %), mentions (6,8 %) | Presque jamais : 2 événements |
+| `ForkEvent` | 18 | 0,03 % | La nouvelle copie du dépôt (`forkee`) | `forkee.owner` (100 %) | Non : le propriétaire du fork est celui qui le crée |
+| `CommitCommentEvent` | 7 | 0,01 % | Le commentaire sur un commit | `comment.user` (100 %) | Non : c'est l'acteur |
+| `MemberEvent` | 5 | 0,01 % | La personne ajoutée au dépôt (`member`) | `member` (100 %) | Parfois : 2 événements |
+
+Comment lire le tableau : la colonne « Utilisateurs dans le `payload` » est
+ce qu'affiche `profile_schema.py`, et la dernière colonne est le résultat
+de la comparaison de ces utilisateurs avec l'acteur.
+
+#### 4. Ce que cela implique pour le projet
+
+- **L'essentiel est dans tous les événements et facile à lire :**
+  `actor.id`/`actor.login`, `repo.id`/`repo.name`, `type` et
+  `created_at`. Cela suffit pour construire le schéma minimal (Acteur,
+  Dépôt et la connexion entre eux).
+- **Presque tout est un push (95,3 %), et un push ne nomme personne
+  d'autre.** Les personnes sont reliées entre elles à travers les **dépôts
+  qu'elles partagent**, pas directement.
+- **Les connexions directes personne → personne sont presque
+  inexistantes** (0,26 % des événements, 76 sans bots) ; le benchmark ne
+  peut donc pas s'appuyer dessus. C'est pourquoi le schéma n'a pas d'arête
+  acteur → acteur.
+- **Un champ qui ressemble à une autre personne n'en est pas forcément
+  une.** Avant d'utiliser un utilisateur du `payload`, il faut le vérifier
+  par rapport à l'acteur, et écarter des chemins comme
+  `performed_via_github_app.owner`, qui est le propriétaire d'une
+  application et non un participant.
+- **Cette heure seule est petite et fragmentée** (voir « Résultats de
+  connectivité » dans l'étape de synthèse). L'étape suivante est de
+  télécharger plus d'heures et de mesurer à nouveau.
+
 Le pipeline global jusqu'à présent est : **download_gharchive.py →
 peek_data.py → summarize_data.py → profile_schema.py** — d'abord récupérer
 et décompresser l'heure fixe du jeu de données, puis inspecter une poignée

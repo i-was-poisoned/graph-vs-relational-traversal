@@ -1072,6 +1072,92 @@ measured by `summarize_data.py`. And a general lesson: a field that
 *looks like* another person isn't necessarily one; always check it
 against the actor.
 
+### Summary: what we know about this hour's data
+
+This section brings together in one place what `peek_data.py`,
+`summarize_data.py` and `profile_schema.py` have found about the project's
+fixed hour (2026-08-27, 15:00 UTC, 69,429 events).
+
+#### 1. How to read an event's data
+
+Each line of the file is a separate JSON. `json.loads(line)` turns it into
+a Python **dictionary**, and from there each piece of data is reached by
+its key. Some data sits in a **dictionary inside another dictionary**,
+which is why it takes **two sets of square brackets**: the first goes into
+the inner dictionary, and the second picks the value.
+
+| What you want to know | How to get it | Example |
+|---|---|---|
+| Who did the action | `event["actor"]["login"]` | `"octocat"` |
+| Their numeric identifier | `event["actor"]["id"]` | `583231` |
+| Which repo it happened in | `event["repo"]["name"]` | `"octocat/Hello-World"` |
+| The repo's numeric identifier | `event["repo"]["id"]` | `1296269` |
+| What kind of action it was | `event["type"]` | `"PushEvent"` |
+| When it happened | `event["created_at"]` | `"2026-08-27T15:00:01Z"` |
+| The action's details | `event["payload"]` | depends on the event type |
+
+For example, `event["actor"]["login"]` reads as: "inside the event, take
+the `actor` dictionary; inside that, take the value of `login`".
+
+The first five are present in **every** event (checked: all 69,429 have
+`actor.id` and `repo.id`). They're exactly what the benchmark's minimal
+schema needs: who (Actor), where (Repo), and the connection between them.
+For table and node keys it's better to use the numeric `id`s, not the
+names: a user can change their `login`, but their `id` never changes.
+
+#### 2. Other people inside the `payload`
+
+The `payload` can contain more users, shaped like the actor (a dictionary
+with `login`). `profile_schema.py` finds them by looking for `login` at any
+level of the `payload`, thanks to recursion.
+
+But **finding a user doesn't mean finding another person**. When each user
+found is compared with the event's actor, most turn out to be the actor
+themself (see "Second check" above). Only **178 of 69,429 events (0.26%)**
+really name a different person, and only **76** once bots are removed.
+
+#### 3. What each event type holds in this hour
+
+| Event type | Events | % of total | What the `payload` holds | Users inside the `payload` | Does it name another person? |
+|---|---|---|---|---|---|
+| `PushEvent` | 66,174 | 95.3% | The branch (`ref`), the commit before and after the push (`before`, `head`), `push_id` and `repository_id` | None | No |
+| `CreateEvent` | 1,290 | 1.9% | What was created: in this hour, always a branch (`ref_type = "branch"`). Also the main branch and a `description`, which is empty in 633 of 1,290 | None | No |
+| `DeleteEvent` | 615 | 0.9% | What was deleted: 586 branches and 29 tags | None | No |
+| `PullRequestEvent` | 532 | 0.8% | The action (`opened`, `closed`...), the PR number, a trimmed `pull_request` **without its author**, and sometimes labels (25%) | `assignee`/`assignees` (2.1%) | Very rarely: 7 events |
+| `IssueCommentEvent` | 194 | 0.3% | The commented issue and the comment | `comment.user` (100%), `issue.user` (100%), app owner (63%), assignees (16.5%), milestone creator (3.6%) | **Yes, the most:** `issue.user` is someone else 66% of the time (131 events) |
+| `IssuesEvent` | 189 | 0.3% | The issue and its action; sometimes labels (45%) and assignees (7.4%) | `issue.user` (100%), assignees (20%), app owner (11%) and others | Sometimes: 35 events (`issue.user` is the actor 87% of the time) |
+| `PullRequestReviewCommentEvent` | 134 | 0.2% | The comment and the PR | `comment.user` (100%) | No: it's the actor |
+| `PullRequestReviewEvent` | 131 | 0.2% | The review and the PR | `review.user` (100%) | Almost never: 1 event |
+| `WatchEvent` | 96 | 0.1% | Only the action: always `started`, i.e. someone **starred** the repo | None | No |
+| `ReleaseEvent` | 44 | 0.1% | The published release | `release.author` (100%), mentions (6.8%) | Almost never: 2 events |
+| `ForkEvent` | 18 | 0.03% | The new copy of the repo (`forkee`) | `forkee.owner` (100%) | No: the fork's owner is whoever forks it |
+| `CommitCommentEvent` | 7 | 0.01% | The comment on a commit | `comment.user` (100%) | No: it's the actor |
+| `MemberEvent` | 5 | 0.01% | The person added to the repo (`member`) | `member` (100%) | Sometimes: 2 events |
+
+How to read the table: the "Users inside the `payload`" column is what
+`profile_schema.py` shows, and the last column is the result of comparing
+those users with the actor.
+
+#### 4. What this means for the project
+
+- **The essentials are in every event and easy to read:**
+  `actor.id`/`actor.login`, `repo.id`/`repo.name`, `type` and
+  `created_at`. That's enough to build the minimal schema (Actor, Repo,
+  and the connection between them).
+- **Almost everything is a push (95.3%), and a push names nobody else.**
+  People connect to each other through the **repos they share**, not
+  directly.
+- **Direct person → person connections are almost nonexistent** (0.26% of
+  events, 76 without bots), so the benchmark can't rely on them. That's
+  why the schema has no actor → actor edge.
+- **A field that looks like another person isn't necessarily one.**
+  Before using any user from the `payload`, check it against the actor,
+  and drop paths like `performed_via_github_app.owner`, which is an app's
+  owner, not a participant.
+- **This hour on its own is small and fragmented** (see "Connectivity
+  findings" in the Summary Stage). The next step is to download more hours
+  and measure again.
+
 The overall pipeline so far is: **download_gharchive.py → peek_data.py →
 summarize_data.py → profile_schema.py** — first fetch and decompress the
 fixed dataset hour, then inspect a handful of raw events, then get an
