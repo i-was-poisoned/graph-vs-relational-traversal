@@ -237,6 +237,127 @@ def find_actor_refs(value: object, path: str, depth: int) -> list[str]:
     return []
 
 
+# ---------------------------------------------------------------------
+# FULL EXAMPLE: a complete walk through find_actor_refs()
+#
+# This example goes through EVERY branch of the function: a dict
+# without "login", a dict with "login", a list, plain values, and the
+# depth limit. It's a payload similar to an IssuesEvent's:
+#
+#     payload = {
+#         "action": "opened",
+#         "issue": {
+#             "number": 7,
+#             "user": {"login": "luis", "id": 1},
+#             "assignees": [{"login": "ana"}, {"login": "marta"}],
+#             "milestone": {"creator": {"login": "pedro"}}
+#         }
+#     }
+#
+# profile() calls it like this:  find_actor_refs(payload, "payload", 3)
+#
+# Each indentation level is a call made INSIDE the previous one. The
+# outer call waits, paused, until the inner one finishes.
+#
+# CALL 1: find_actor_refs(payload, "payload", 3)
+#   - depth < 0? 3 isn't -> carry on.
+#   - Is it a dict? YES. Does it have "login"? No (its keys are action
+#     and issue).
+#   - Sets up refs = [] and goes through its keys one by one:
+#
+#   CALL 2: find_actor_refs("opened", "payload.action", 2)
+#     - It's text: neither dict nor list -> reaches the final
+#       `return []`.
+#     - Returns [].  Call 1 does refs.extend([]) -> refs = [].
+#
+#   CALL 3: find_actor_refs({...issue...}, "payload.issue", 2)
+#     - Is it a dict? YES. Does it have "login"? No.
+#     - Sets up its OWN refs = [] (separate from call 1's) and goes
+#       through its keys:
+#
+#     CALL 4: find_actor_refs(7, "payload.issue.number", 1)
+#       - It's a number: neither dict nor list -> returns [].
+#
+#     CALL 5: find_actor_refs({"login": "luis", "id": 1},
+#                             "payload.issue.user", 1)
+#       - A dict with a text "login" ("luis") -> FOUND!
+#       - Returns ["payload.issue.user"] and doesn't look further in.
+#       Call 3 now has refs = ["payload.issue.user"].
+#
+#     CALL 6: find_actor_refs([{ana}, {marta}],
+#                             "payload.issue.assignees", 1)
+#       - Is it a dict? No. Is it a list? YES.
+#       - Goes through each item. The path does NOT change (no .0, .1).
+#
+#       CALL 7: find_actor_refs({"login": "ana"},
+#                               "payload.issue.assignees", 0)
+#         - depth = 0: zero isn't less than zero -> carry on.
+#         - A dict with "login" -> returns ["payload.issue.assignees"].
+#
+#       CALL 8: find_actor_refs({"login": "marta"},
+#                               "payload.issue.assignees", 0)
+#         - Same -> returns ["payload.issue.assignees"].
+#
+#       - Call 6 returns
+#         ["payload.issue.assignees", "payload.issue.assignees"].
+#
+#     CALL 9: find_actor_refs({"creator": {...}},
+#                             "payload.issue.milestone", 1)
+#       - A dict without "login" -> goes through its only key:
+#
+#       CALL 10: find_actor_refs({"login": "pedro"},
+#                                "payload.issue.milestone.creator", 0)
+#         - depth = 0 -> carry on. A dict with "login" ->
+#           returns ["payload.issue.milestone.creator"].
+#
+#       - Call 9 returns ["payload.issue.milestone.creator"].
+#
+#     - Call 3 finishes its loop and returns its 4 paths.
+#
+#   - Call 1 does refs.extend(...) with those 4 paths and returns:
+#
+#     ['payload.issue.user',
+#      'payload.issue.assignees',
+#      'payload.issue.assignees',
+#      'payload.issue.milestone.creator']
+#
+# WHICH BRANCH SHOWS UP IN WHICH CALL
+#   dict without "login" -> look inside ......... calls 1, 3 and 9
+#   dict WITH "login" -> return [path] .......... calls 5, 7, 8 and 10
+#   list -> look at each item, same path ........ call 6
+#   plain value -> return [] .................... calls 2 and 4
+#   depth drops by 1 at each level: 3 -> 2 -> 1 -> 0, all the way down
+#
+# That's 10 calls to the SAME function. Each one has its own value,
+# path, depth and refs, and none of them overwrites another's
+# variables. The answers travel back UP: calls 7 and 8 answer call 6,
+# call 6 answers call 3, and call 3 answers call 1.
+#
+# TWO MORE DETAILS
+#
+# 1. The depth limit in action. If the user were one level deeper:
+#
+#        deep = {"a": {"b": {"c": {"d": {"login": "x"}}}}}
+#        find_actor_refs(deep, "payload", 3)   # -> []
+#
+#    by the time it reached {"login": "x"}, depth would be -1, and the
+#    first check (`if depth < 0: return []`) would stop there: it does
+#    NOT find it. That's the price of the safety net; since GH Archive
+#    payloads are shallow, nothing is lost in practice.
+#
+# 2. Why profile() uses set(...) afterwards. The list contains
+#    "payload.issue.assignees" TWICE (once for ana, once for marta).
+#    profile() calls set(...), which keeps each path only once:
+#
+#        {'payload.issue.user', 'payload.issue.assignees',
+#         'payload.issue.milestone.creator'}
+#
+#    So this event counts as ONE event that has assignees, not two:
+#    what's being counted is IN HOW MANY EVENTS each path appears, not
+#    how many users there are.
+# ---------------------------------------------------------------------
+
+
 def profile(file_path: Path, type_filter: str | None) -> None:
     event_type_totals: Counter[str] = Counter()
     # For each event type, for each payload field name, a Counter of how
