@@ -1787,48 +1787,214 @@ activo.
 
 ### Paso 4: pasar las contraseñas a Python sin escribirlas en el código
 
-Las contraseñas se guardan en **variables de entorno**: valores que viven
-en la terminal mientras está abierta, fuera de cualquier archivo. En Git
-Bash:
+#### 4.1 La idea: variables de entorno
+
+Las contraseñas no se escriben en el código de Python. Se guardan en
+**variables de entorno**: valores que viven en la terminal mientras está
+abierta, fuera del código. El proyecto usa dos:
+
+| Variable | Contraseña de | Quién la lee |
+|---|---|---|
+| `PGPASSWORD` | el usuario `postgres` de PostgreSQL | PostgreSQL y `psycopg`, **automáticamente**: es un nombre estándar, así que el código ni siquiera la menciona |
+| `NEO4J_PASSWORD` | el usuario `neo4j` de Neo4j | Nuestros scripts, con `os.environ["NEO4J_PASSWORD"]` |
+
+Se podrían definir a mano con `export` cada vez que se abre una terminal,
+pero es incómodo y fácil de olvidar. En su lugar, se guardan en un pequeño
+script de bash que se carga con un solo comando.
+
+#### 4.2 Por qué funciona: las variables se heredan
+
+Cuando un programa arranca otro, el nuevo **recibe una copia de las
+variables de entorno** del que lo lanzó. Si la terminal tiene definida
+`NEO4J_PASSWORD`, cualquier script de Python que se ejecute desde ella la
+hereda y puede leerla.
+
+Pero hay que cargar el script de la forma correcta:
+
+| Comando | Qué pasa |
+|---|---|
+| `source secrets.sh` | El script se ejecuta **dentro de tu terminal**. Las variables quedan definidas en ella, y todo lo que ejecutes después las hereda, hasta que cierres la terminal. **Esta es la forma correcta.** |
+| `bash secrets.sh` | El script se ejecuta en **otro bash aparte**, que define las variables y termina enseguida. Tu terminal no las ve, y Python tampoco. |
+
+#### 4.3 Los dos archivos
+
+| Archivo | Qué contiene | ¿Se sube a GitHub? |
+|---|---|---|
+| `secrets.example.sh` | Una **plantilla** con las dos variables y valores de ejemplo, sin contraseñas reales | **Sí**: así se sabe qué variables hacen falta |
+| `secrets.sh` | Las **contraseñas reales** | **Nunca**: está en el `.gitignore` |
+
+#### 4.4 Crear tu `secrets.sh` (solo una vez)
+
+1. Copia la plantilla:
+
+   ```bash
+   cp secrets.example.sh secrets.sh
+   ```
+
+2. Abre `secrets.sh` en VS Code y cambia los dos valores de ejemplo por
+   tus contraseñas reales, dejando las comillas simples:
+
+   ```bash
+   export PGPASSWORD='...'
+   export NEO4J_PASSWORD='...'
+   ```
+
+3. Comprueba que git lo ignora:
+
+   ```bash
+   git check-ignore -v secrets.sh
+   ```
+
+   Debería responder con la línea del `.gitignore` que lo ignora
+   (`/secrets.sh`). Y `git status` **no** debería mostrar `secrets.sh` como
+   archivo nuevo.
+
+#### 4.5 Precauciones con las contraseñas
+
+- **Escríbelas directamente en `secrets.sh`.** No las pegues en chats,
+  correos, notas ni en ningún otro archivo del proyecto. Una contraseña que
+  ha quedado escrita en otro sitio ya no se debe considerar secreta: si
+  pasa, cámbiala.
+- **Usa una contraseña distinta para cada base de datos**, larga y difícil
+  de adivinar, y guárdalas en un gestor de contraseñas.
+- **Si `secrets.sh` llegara a subirse a GitHub,** aunque se borre después,
+  queda en el historial de git. En ese caso, hay que cambiar las dos
+  contraseñas.
+- **Para cambiarlas:** en PostgreSQL, desde pgAdmin (**Login/Group Roles**
+  → **postgres** → **Properties** → **Definition**); en Neo4j, desde Neo4j
+  Browser, con `:use system` y después
+  `ALTER CURRENT USER SET PASSWORD FROM '...' TO '...';`. Luego actualiza
+  `secrets.sh`.
+
+#### 4.6 La rutina de cada día, completa
+
+Cada vez que abras una terminal para trabajar en el proyecto:
 
 ```bash
-export PGPASSWORD='la-contraseña-de-postgres'
-export NEO4J_PASSWORD='la-contraseña-de-neo4j'
+cd /c/dev/Research
+source .venv/Scripts/activate     # el Python del proyecto
+source secrets.sh                 # las contraseñas
 ```
 
-- `PGPASSWORD` es un nombre estándar: PostgreSQL (y `psycopg`) lo leen
-  automáticamente, así que ni siquiera hay que mencionarlo en el código.
-- `NEO4J_PASSWORD` lo leeremos nosotros desde Python con
-  `os.environ["NEO4J_PASSWORD"]`.
-- Estas variables desaparecen al cerrar la terminal. Hay que volver a
-  definirlas cada vez, igual que se activa el entorno virtual.
+Para comprobar que las contraseñas están cargadas **sin mostrarlas en
+pantalla**:
+
+```bash
+[ -n "$PGPASSWORD" ] && echo "PGPASSWORD cargada"
+[ -n "$NEO4J_PASSWORD" ] && echo "NEO4J_PASSWORD cargada"
+```
+
+(`-n` comprueba que la variable no está vacía; así no se escribe su valor
+en la terminal.)
+
+#### 4.7 Un atajo: `run.sh`, que lo prepara todo y ejecuta Python
+
+La rutina del punto 4.6 funciona, pero son tres comandos cada vez, y si se
+olvida uno (activar `.venv` o cargar `secrets.sh`), el script de Python
+falla con un error poco claro. Por eso el proyecto tiene un pequeño script
+de bash, **`run.sh`**, en la raíz, que hace todo de una vez:
+
+```bash
+./run.sh scripts/check_connections.py
+```
+
+Por dentro, `run.sh` hace esto, en orden:
+
+1. **Se sitúa en la carpeta del proyecto**, la llames desde donde la
+   llames.
+2. **Comprueba que todo está en su sitio** y, si no, se para con un
+   mensaje claro:
+   - si no le has dicho qué script ejecutar, muestra cómo usarlo;
+   - si no existe `.venv`, dice cómo crearlo (paso 3);
+   - si no existe `secrets.sh`, dice cómo crearlo (punto 4.4);
+   - si `secrets.sh` todavía tiene las contraseñas de ejemplo de la
+     plantilla, avisa de que hay que cambiarlas.
+3. **Activa el entorno virtual** (`source .venv/Scripts/activate`).
+4. **Carga las contraseñas** (`source secrets.sh`).
+5. **Ejecuta Python** con el script que le hayas pasado y sus opciones, si
+   las tiene. Python **hereda** las contraseñas de `run.sh` (punto 4.2).
+
+**Por qué es mejor que cargar las contraseñas en tu terminal:**
+
+| | Rutina del punto 4.6 | `./run.sh` |
+|---|---|---|
+| Comandos cada vez | 3 | 1 |
+| Si se olvida algo | Python falla con un error confuso | `run.sh` para y explica qué falta |
+| Dónde viven las contraseñas | En tu terminal, hasta que la cierres | Solo mientras corre el script; al terminar, desaparecen |
+
+Este último punto es el de tu idea original: las contraseñas se quedan
+**fuera del código de Python**, en un script de bash, y Python las hereda
+al ser lanzado desde él. `run.sh` no necesita `source`: se ejecuta como
+un programa normal, porque es **él mismo** quien lanza Python, y la
+herencia ocurre dentro.
+
+**Sirve para cualquier script del proyecto,** presente o futuro. Lo que
+escribas después del nombre del script se le pasa tal cual:
+
+```bash
+./run.sh scripts/check_connections.py
+./run.sh scripts/summarize_data.py --top 10
+```
+
+(Los scripts antiguos no necesitan las contraseñas, pero funcionan igual
+a través de `run.sh`.)
+
+**Si `./run.sh` no funciona:** en Git Bash, un archivo que empieza por
+`#!/usr/bin/env bash` se puede ejecutar directamente. Si aun así te dice
+*Permission denied*, usa `bash run.sh scripts/check_connections.py`, que
+hace exactamente lo mismo.
 
 ### Paso 5: comprobar que Python llega a las dos bases de datos
 
-Con el entorno virtual activo, las dos bases de datos en marcha y las
-variables de entorno definidas, este código debería mostrar la versión de
-PostgreSQL y un `1` de Neo4j:
+El proyecto tiene un script para esto: **`scripts/check_connections.py`**
+(con su explicación línea a línea en
+[check_connections.py](check_connections.py), la copia anotada). Se conecta
+a PostgreSQL y a Neo4j con las contraseñas de las variables de entorno y
+muestra la versión de cada servidor.
 
-```python
-import os
+**Cómo ejecutarlo**, con las dos bases de datos en marcha y tu
+`secrets.sh` ya rellenado:
 
-import psycopg
-from neo4j import GraphDatabase
-
-# PostgreSQL: la contraseña se lee sola de PGPASSWORD
-with psycopg.connect(host="localhost", dbname="gharchive", user="postgres") as conn:
-    print(conn.execute("SELECT version();").fetchone()[0])
-
-# Neo4j: la contraseña se lee de NEO4J_PASSWORD
-driver = GraphDatabase.driver("neo4j://localhost:7687",
-                              auth=("neo4j", os.environ["NEO4J_PASSWORD"]))
-with driver.session() as session:
-    print(session.run("RETURN 1 AS ok").single()["ok"])
-driver.close()
+```bash
+./run.sh scripts/check_connections.py
 ```
 
-Este código se puede guardar como `scripts/check_connections.py` y
-ejecutarse con `python scripts/check_connections.py`.
+**Si todo va bien**, verás algo así:
+
+```
+PostgreSQL OK: PostgreSQL 18.6 on x86_64-windows, ...
+Neo4j OK: Neo4j Kernel 2026.10.0 (enterprise edition)
+Both databases are reachable.
+```
+
+**Cómo funciona el script, en resumen:**
+
+1. Comprueba que existen `PGPASSWORD` y `NEO4J_PASSWORD`. Si falta alguna,
+   para y dice que hay que ejecutarlo a través de `run.sh`.
+2. **PostgreSQL:** se conecta a la base `gharchive` como `postgres` y
+   ejecuta `SELECT version();`. La contraseña la lee `psycopg` solo, de
+   `PGPASSWORD`.
+3. **Neo4j:** lee `NEO4J_PASSWORD`, se conecta a `neo4j://localhost:7687`
+   como `neo4j` y ejecuta la misma consulta de versión que en Neo4j
+   Browser (`CALL dbms.components() ...`).
+4. Hace **las dos comprobaciones aunque una falle** (con `try`/`except`),
+   para que un error en una no esconda el resultado de la otra.
+
+**Si algo falla**, el script dice cuál de las dos y por qué:
+
+| Mensaje | Causa probable | Solución |
+|---|---|---|
+| `Missing environment variable(s): ...` | Se ejecutó con `python` directamente, sin `run.sh` | Ejecútalo con `./run.sh scripts/check_connections.py` |
+| `PostgreSQL FAILED: ... password authentication failed` | La contraseña de `secrets.sh` no es la de `postgres` | Corrige `PGPASSWORD` en `secrets.sh` |
+| `PostgreSQL FAILED: ... Connection refused` | El servicio de PostgreSQL está parado | Arráncalo desde *Servicios* de Windows (ver el apartado de pgAdmin) |
+| `PostgreSQL FAILED: ... database "gharchive" does not exist` | No se creó la base del proyecto | Créala (paso 1, punto 5, o desde pgAdmin) |
+| `Neo4j FAILED: ... Unauthorized` | La contraseña de `secrets.sh` no es la de `neo4j` | Corrige `NEO4J_PASSWORD` en `secrets.sh` |
+| `Neo4j FAILED: ... Couldn't connect` / `Unable to retrieve routing information` | La instancia de Neo4j no está arrancada | Arráncala en Neo4j Desktop (*Start*) |
+| `ModuleNotFoundError: No module named 'psycopg'` | Falta el entorno virtual o sus paquetes | Revisa el paso 3 (`run.sh` ya activa `.venv`) |
+
+Cuando aparezca `Both databases are reachable.`, **toda la cadena
+funciona**: el entorno virtual, las contraseñas, los conectores y las dos
+bases de datos. Es el punto de partida para crear las tablas y los nodos.
 
 ### Lista de comprobación
 
@@ -1839,7 +2005,7 @@ ejecutarse con `python scripts/check_connections.py`.
 | Neo4j en marcha | `RETURN 1;` en Neo4j Browser | `1` |
 | Entorno virtual activo | La línea de Git Bash empieza por `(.venv)` | — |
 | Conectores instalados | `python -m pip show psycopg neo4j` | Información de los dos paquetes |
-| Python llega a las dos | `python scripts/check_connections.py` | La versión de PostgreSQL y un `1` |
+| Python llega a las dos | `./run.sh scripts/check_connections.py` | `PostgreSQL OK: ...`, `Neo4j OK: ...` y `Both databases are reachable.` |
 
 **Anota las versiones instaladas** (de PostgreSQL, de Neo4j y de los dos
 paquetes de Python). Forman parte de las condiciones del benchmark: para

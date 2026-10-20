@@ -2,6 +2,10 @@
 # scripts/download_gharchive.py + the hour recorded in README.md)
 /data/
 
+# Local database passwords (copy secrets.example.sh to secrets.sh and fill it in).
+# Never commit this file.
+/secrets.sh
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

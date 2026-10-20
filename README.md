@@ -83,12 +83,22 @@ source .venv/Scripts/activate        # Git Bash on Windows
 python -m pip install -r requirements.txt
 ```
 
-Database passwords are never stored in the repository. They are passed
-through environment variables:
+Database passwords are never stored in the repository. They live in a local,
+git-ignored `secrets.sh` (created from the [secrets.example.sh](secrets.example.sh)
+template) as environment variables: `PGPASSWORD` (read automatically by
+PostgreSQL/psycopg) and `NEO4J_PASSWORD` (read by the project's scripts).
 
 ```bash
-export PGPASSWORD='...'        # read automatically by PostgreSQL/psycopg
-export NEO4J_PASSWORD='...'    # read by the project's scripts
+cp secrets.example.sh secrets.sh     # then fill in your passwords
+```
+
+Scripts that need the databases are run through [run.sh](run.sh), which
+activates `.venv`, loads `secrets.sh` and runs Python (which inherits the
+passwords only for that run). For example, to check that both databases are
+reachable:
+
+```bash
+./run.sh scripts/check_connections.py
 ```
 
 Step-by-step installation of PostgreSQL, Neo4j and the virtual environment

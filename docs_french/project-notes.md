@@ -1855,48 +1855,223 @@ toujours travailler avec lui actif.
 
 ### Étape 4 : transmettre les mots de passe à Python sans les écrire dans le code
 
-Les mots de passe vont dans des **variables d'environnement** : des valeurs
-qui vivent dans le terminal tant qu'il est ouvert, en dehors de tout
-fichier. Dans Git Bash :
+#### 4.1 L'idée : les variables d'environnement
+
+Les mots de passe ne sont pas écrits dans le code Python. Ils sont gardés
+dans des **variables d'environnement** : des valeurs qui vivent dans le
+terminal tant qu'il est ouvert, en dehors du code. Le projet en utilise
+deux :
+
+| Variable | Mot de passe de | Qui la lit |
+|---|---|---|
+| `PGPASSWORD` | l'utilisateur `postgres` de PostgreSQL | PostgreSQL et `psycopg`, **automatiquement** : c'est un nom standard, donc le code ne la mentionne même pas |
+| `NEO4J_PASSWORD` | l'utilisateur `neo4j` de Neo4j | Nos scripts, avec `os.environ["NEO4J_PASSWORD"]` |
+
+On pourrait les définir à la main avec `export` à chaque ouverture de
+terminal, mais c'est fastidieux et facile à oublier. À la place, on les
+garde dans un petit script bash qu'on charge en une seule commande.
+
+#### 4.2 Pourquoi cela marche : les variables sont héritées
+
+Quand un programme en lance un autre, le nouveau **reçoit une copie des
+variables d'environnement** de celui qui l'a lancé. Si le terminal a
+`NEO4J_PASSWORD` définie, tout script Python lancé depuis ce terminal en
+hérite et peut la lire.
+
+Mais il faut charger le script de la bonne façon :
+
+| Commande | Ce qui se passe |
+|---|---|
+| `source secrets.sh` | Le script s'exécute **dans votre terminal**. Les variables y restent définies, et tout ce que vous lancez ensuite en hérite, jusqu'à la fermeture du terminal. **C'est la bonne façon.** |
+| `bash secrets.sh` | Le script s'exécute dans **un autre bash, à part**, qui définit les variables et se termine aussitôt. Votre terminal ne les voit pas, et Python non plus. |
+
+#### 4.3 Les deux fichiers
+
+| Fichier | Ce qu'il contient | Envoyé sur GitHub ? |
+|---|---|---|
+| `secrets.example.sh` | Un **modèle** avec les deux variables et des valeurs d'exemple, sans vrais mots de passe | **Oui** : pour savoir quelles variables sont nécessaires |
+| `secrets.sh` | Les **vrais mots de passe** | **Jamais** : il est dans le `.gitignore` |
+
+#### 4.4 Créer votre `secrets.sh` (une seule fois)
+
+1. Copiez le modèle :
+
+   ```bash
+   cp secrets.example.sh secrets.sh
+   ```
+
+2. Ouvrez `secrets.sh` dans VS Code et remplacez les deux valeurs
+   d'exemple par vos vrais mots de passe, en gardant les guillemets
+   simples :
+
+   ```bash
+   export PGPASSWORD='...'
+   export NEO4J_PASSWORD='...'
+   ```
+
+3. Vérifiez que git l'ignore :
+
+   ```bash
+   git check-ignore -v secrets.sh
+   ```
+
+   Il devrait répondre avec la ligne du `.gitignore` qui l'ignore
+   (`/secrets.sh`). Et `git status` ne devrait **pas** afficher
+   `secrets.sh` comme nouveau fichier.
+
+#### 4.5 Précautions avec les mots de passe
+
+- **Tapez-les directement dans `secrets.sh`.** Ne les collez pas dans des
+  chats, des e-mails, des notes ni dans aucun autre fichier du projet. Un
+  mot de passe qui a été écrit ailleurs ne doit plus être considéré comme
+  secret : si cela arrive, changez-le.
+- **Utilisez un mot de passe différent pour chaque base de données**, long
+  et difficile à deviner, et gardez-les dans un gestionnaire de mots de
+  passe.
+- **Si `secrets.sh` était un jour envoyé sur GitHub,** il resterait dans
+  l'historique git même après suppression. Dans ce cas, changez les deux
+  mots de passe.
+- **Pour les changer :** dans PostgreSQL, depuis pgAdmin
+  (**Login/Group Roles** → **postgres** → **Properties** → **Definition**) ;
+  dans Neo4j, depuis Neo4j Browser, avec `:use system` puis
+  `ALTER CURRENT USER SET PASSWORD FROM '...' TO '...';`. Mettez ensuite
+  `secrets.sh` à jour.
+
+#### 4.6 La routine complète de chaque jour
+
+Chaque fois que vous ouvrez un terminal pour travailler sur le projet :
 
 ```bash
-export PGPASSWORD='le-mot-de-passe-postgres'
-export NEO4J_PASSWORD='le-mot-de-passe-neo4j'
+cd /c/dev/Research
+source .venv/Scripts/activate     # le Python du projet
+source secrets.sh                 # les mots de passe
 ```
 
-- `PGPASSWORD` est un nom standard : PostgreSQL (et `psycopg`) le lisent
-  automatiquement, donc le code n'a même pas besoin de le mentionner.
-- `NEO4J_PASSWORD`, c'est nous qui le lirons depuis Python avec
-  `os.environ["NEO4J_PASSWORD"]`.
-- Ces variables disparaissent à la fermeture du terminal. Il faut les
-  définir à nouveau à chaque fois, comme on active l'environnement virtuel.
+Pour vérifier que les mots de passe sont chargés **sans les afficher à
+l'écran** :
+
+```bash
+[ -n "$PGPASSWORD" ] && echo "PGPASSWORD chargée"
+[ -n "$NEO4J_PASSWORD" ] && echo "NEO4J_PASSWORD chargée"
+```
+
+(`-n` vérifie que la variable n'est pas vide ; ainsi, sa valeur n'est
+jamais écrite dans le terminal.)
+
+#### 4.7 Un raccourci : `run.sh`, qui prépare tout et lance Python
+
+La routine du point 4.6 fonctionne, mais ce sont trois commandes à chaque
+fois, et si on en oublie une (activer `.venv` ou charger `secrets.sh`), le
+script Python échoue avec une erreur peu claire. C'est pourquoi le projet a
+un petit script bash, **`run.sh`**, à la racine, qui fait tout d'un coup :
+
+```bash
+./run.sh scripts/check_connections.py
+```
+
+À l'intérieur, `run.sh` fait ceci, dans l'ordre :
+
+1. **Il se place dans le dossier du projet**, d'où que vous l'appeliez.
+2. **Il vérifie que tout est en place** et, sinon, s'arrête avec un
+   message clair :
+   - si vous n'avez pas indiqué quel script lancer, il montre comment
+     l'utiliser ;
+   - si `.venv` n'existe pas, il indique comment le créer (étape 3) ;
+   - si `secrets.sh` n'existe pas, il indique comment le créer
+     (point 4.4) ;
+   - si `secrets.sh` contient encore les mots de passe d'exemple du
+     modèle, il prévient qu'il faut les remplacer.
+3. **Il active l'environnement virtuel** (`source .venv/Scripts/activate`).
+4. **Il charge les mots de passe** (`source secrets.sh`).
+5. **Il lance Python** avec le script que vous lui avez passé et ses
+   options éventuelles. Python **hérite** des mots de passe de `run.sh`
+   (point 4.2).
+
+**Pourquoi c'est mieux que de charger les mots de passe dans votre
+terminal :**
+
+| | Routine du point 4.6 | `./run.sh` |
+|---|---|---|
+| Commandes à chaque fois | 3 | 1 |
+| Si on oublie quelque chose | Python échoue avec une erreur confuse | `run.sh` s'arrête et explique ce qui manque |
+| Où vivent les mots de passe | Dans votre terminal, jusqu'à sa fermeture | Seulement pendant l'exécution du script ; ils disparaissent à la fin |
+
+Ce dernier point, c'est l'idée de départ : les mots de passe restent **en
+dehors du code Python**, dans un script bash, et Python en hérite parce
+qu'il est lancé depuis ce script. `run.sh` n'a pas besoin de `source` : il
+s'exécute comme un programme normal, car c'est **run.sh lui-même** qui
+lance Python, et l'héritage se fait à l'intérieur.
+
+**Il sert pour n'importe quel script du projet,** actuel ou futur. Ce que
+vous écrivez après le nom du script lui est transmis tel quel :
+
+```bash
+./run.sh scripts/check_connections.py
+./run.sh scripts/summarize_data.py --top 10
+```
+
+(Les anciens scripts n'ont pas besoin des mots de passe, mais ils
+fonctionnent de la même façon via `run.sh`.)
+
+**Si `./run.sh` ne fonctionne pas :** dans Git Bash, un fichier qui
+commence par `#!/usr/bin/env bash` peut être lancé directement. S'il
+affiche quand même *Permission denied*, utilisez
+`bash run.sh scripts/check_connections.py`, qui fait exactement la même
+chose.
 
 ### Étape 5 : vérifier que Python atteint les deux bases de données
 
-Avec l'environnement virtuel actif, les deux bases démarrées et les
-variables d'environnement définies, ce code devrait afficher la version de
-PostgreSQL et un `1` venant de Neo4j :
+Le projet a un script pour cela : **`scripts/check_connections.py`** (avec
+son explication ligne par ligne dans [check_connections.py](check_connections.py),
+la copie annotée). Il se connecte à PostgreSQL et à Neo4j avec les mots de
+passe des variables d'environnement et affiche la version de chaque
+serveur.
 
-```python
-import os
+**Comment le lancer**, avec les deux bases démarrées et votre `secrets.sh`
+déjà rempli :
 
-import psycopg
-from neo4j import GraphDatabase
-
-# PostgreSQL : le mot de passe est lu automatiquement dans PGPASSWORD
-with psycopg.connect(host="localhost", dbname="gharchive", user="postgres") as conn:
-    print(conn.execute("SELECT version();").fetchone()[0])
-
-# Neo4j : le mot de passe est lu dans NEO4J_PASSWORD
-driver = GraphDatabase.driver("neo4j://localhost:7687",
-                              auth=("neo4j", os.environ["NEO4J_PASSWORD"]))
-with driver.session() as session:
-    print(session.run("RETURN 1 AS ok").single()["ok"])
-driver.close()
+```bash
+./run.sh scripts/check_connections.py
 ```
 
-Ce code peut être enregistré sous `scripts/check_connections.py` et lancé
-avec `python scripts/check_connections.py`.
+**Si tout va bien**, vous verrez quelque chose comme :
+
+```
+PostgreSQL OK: PostgreSQL 18.6 on x86_64-windows, ...
+Neo4j OK: Neo4j Kernel 2026.10.0 (enterprise edition)
+Both databases are reachable.
+```
+
+**Comment fonctionne le script, en bref :**
+
+1. Il vérifie que `PGPASSWORD` et `NEO4J_PASSWORD` existent. S'il en
+   manque une, il s'arrête et indique qu'il faut le lancer via `run.sh`.
+2. **PostgreSQL :** il se connecte à la base `gharchive` en tant que
+   `postgres` et exécute `SELECT version();`. `psycopg` lit le mot de passe
+   tout seul dans `PGPASSWORD`.
+3. **Neo4j :** il lit `NEO4J_PASSWORD`, se connecte à
+   `neo4j://localhost:7687` en tant que `neo4j`, et exécute la même requête
+   de version que dans Neo4j Browser (`CALL dbms.components() ...`).
+4. Il fait **les deux vérifications même si l'une échoue** (avec
+   `try`/`except`), pour qu'une erreur dans l'une ne cache pas le résultat
+   de l'autre.
+
+**Si quelque chose ne va pas**, le script indique laquelle et pourquoi :
+
+| Message | Cause probable | Solution |
+|---|---|---|
+| `Missing environment variable(s): ...` | Il a été lancé directement avec `python`, sans `run.sh` | Lancez-le avec `./run.sh scripts/check_connections.py` |
+| `PostgreSQL FAILED: ... password authentication failed` | Le mot de passe de `secrets.sh` n'est pas celui de `postgres` | Corrigez `PGPASSWORD` dans `secrets.sh` |
+| `PostgreSQL FAILED: ... Connection refused` | Le service PostgreSQL est arrêté | Démarrez-le depuis les *Services* de Windows (voir la partie sur pgAdmin) |
+| `PostgreSQL FAILED: ... database "gharchive" does not exist` | La base du projet n'a pas été créée | Créez-la (étape 1, point 5, ou depuis pgAdmin) |
+| `Neo4j FAILED: ... Unauthorized` | Le mot de passe de `secrets.sh` n'est pas celui de `neo4j` | Corrigez `NEO4J_PASSWORD` dans `secrets.sh` |
+| `Neo4j FAILED: ... Couldn't connect` / `Unable to retrieve routing information` | L'instance Neo4j n'est pas démarrée | Démarrez-la dans Neo4j Desktop (*Start*) |
+| `ModuleNotFoundError: No module named 'psycopg'` | L'environnement virtuel ou ses paquets manquent | Revoyez l'étape 3 (`run.sh` active déjà `.venv`) |
+
+Quand `Both databases are reachable.` apparaît, **toute la chaîne
+fonctionne** : l'environnement virtuel, les mots de passe, les connecteurs
+et les deux bases de données. C'est le point de départ pour créer les
+tables et les nœuds.
 
 ### Liste de vérification
 
@@ -1907,7 +2082,7 @@ avec `python scripts/check_connections.py`.
 | Neo4j en marche | `RETURN 1;` dans Neo4j Browser | `1` |
 | Environnement virtuel actif | La ligne de Git Bash commence par `(.venv)` | — |
 | Connecteurs installés | `python -m pip show psycopg neo4j` | Les informations des deux paquets |
-| Python atteint les deux | `python scripts/check_connections.py` | La version de PostgreSQL et un `1` |
+| Python atteint les deux | `./run.sh scripts/check_connections.py` | `PostgreSQL OK: ...`, `Neo4j OK: ...` et `Both databases are reachable.` |
 
 **Notez les versions installées** (de PostgreSQL, de Neo4j et des deux
 paquets Python). Elles font partie des conditions du benchmark : pour que
