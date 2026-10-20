@@ -1436,3 +1436,49 @@ ejecutarse con `python scripts/check_connections.py`.
 paquetes de Python). Forman parte de las condiciones del benchmark: para
 que alguien pueda repetir el experimento, tiene que saber con qué versiones
 se hizo.
+
+### Dos formas de trabajar con PostgreSQL: Git Bash (`psql`) o pgAdmin 4
+
+Todo lo que se hace con `psql` en Git Bash también se puede hacer con
+**pgAdmin 4**, la interfaz gráfica que se instala junto con PostgreSQL.
+**Puedes usar la que prefieras, o las dos**: trabajan sobre la misma base
+de datos, así que lo que crees con una lo verás con la otra.
+
+| Tarea | Con Git Bash (`psql`) | Con pgAdmin 4 |
+|---|---|---|
+| Abrir | Una terminal de Git Bash (con `psql` en el PATH, paso 1.3) | Buscar **pgAdmin 4** en el menú Inicio |
+| Conectarse | Cada comando lleva `-U postgres` y pide la contraseña (o la lee de `PGPASSWORD`) | Panel izquierdo: **Servers** → **PostgreSQL** → escribir la contraseña de `postgres` |
+| Ver la versión | `psql -U postgres -c "SELECT version();"` | Abrir el Query Tool (ver abajo), escribir `SELECT version();` y pulsar **F5** |
+| Crear la base `gharchive` | `psql -U postgres -c "CREATE DATABASE gharchive;"` | Clic derecho en **Databases** → **Create** → **Database...** → nombre `gharchive` → **Save** |
+| Ejecutar una consulta | `psql -U postgres -d gharchive -c "..."` | Seleccionar `gharchive` en el árbol → menú **Tools** → **Query Tool** → escribir la consulta → **F5** (o ▶) |
+| Ver las tablas | `psql -U postgres -d gharchive -c "\dt"` | Árbol: **gharchive** → **Schemas** → **public** → **Tables** |
+| Ver los datos de una tabla | `psql -U postgres -d gharchive -c "SELECT * FROM actor LIMIT 10;"` | Clic derecho en la tabla → **View/Edit Data** |
+
+**Primeros pasos con pgAdmin 4:**
+
+1. **Abrirlo** desde el menú Inicio. La primera vez puede pedirte una
+   *master password*: es una contraseña solo para pgAdmin, que protege las
+   contraseñas que guarde. Elígela y guárdala en tu gestor de contraseñas.
+2. **Conectarte:** en el panel izquierdo, despliega **Servers** y haz clic
+   en **PostgreSQL**. Escribe la contraseña de `postgres`, la que elegiste
+   al instalar.
+3. **Crear la base `gharchive`** si todavía no existe: clic derecho en
+   **Databases** → **Create** → **Database...**, nombre `gharchive`,
+   **Save**.
+4. **Probar una consulta:** selecciona `gharchive`, abre **Tools** →
+   **Query Tool**, escribe `SELECT 1;` y pulsa **F5**. El resultado aparece
+   abajo, en forma de tabla.
+
+**Cuándo conviene cada una:**
+
+- **pgAdmin 4** es más cómodo para **explorar**: ver qué tablas hay, mirar
+  sus datos y probar consultas con calma. Si lo usas, el paso 1.3 (añadir
+  `psql` al PATH) es opcional.
+- **Git Bash** sigue siendo necesario para **ejecutar los scripts de
+  Python** del proyecto (los que crearán los CSV, cargarán los datos y
+  medirán los tiempos). Y `psql` es útil cuando un comando se quiere
+  repetir siempre igual, copiándolo de estas notas.
+
+Otra opción, si se prefiere no salir del editor, es la extensión
+**PostgreSQL** de Microsoft para VS Code, que también permite conectarse y
+ejecutar consultas.
