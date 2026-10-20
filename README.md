@@ -23,3 +23,75 @@ Download it with:
 ```bash
 python scripts/download_gharchive.py
 ```
+
+## Schema
+
+The schema is designed **query-first**: it contains only what the
+benchmarked traversal (`actor → repo → actor → repo`, at increasing depths)
+needs, and it is the same logical model on both sides, so the comparison
+stays like-for-like.
+
+Why the walk goes through repos: in this dataset almost every event is a
+`PushEvent` (95.3%), which names no second person, and only 0.26% of events
+name a genuinely different user. People are therefore connected through the
+repos they share, not directly. See
+[docs_english/project-notes.md](docs_english/project-notes.md) (Schema Design
+Stage) for the full analysis.
+
+| Concept | Relational (PostgreSQL) | Graph (Neo4j) |
+|---|---|---|
+| Actor | table `actor` (`id`, `login`) | node `:Actor` (`id`, `login`) |
+| Repo | table `repo` (`id`, `name`) | node `:Repo` (`id`, `name`) |
+| Connection | table `actor_repo` (`actor_id`, `repo_id`) | edge `(:Actor)-[...]->(:Repo)` |
+
+- Keys use GitHub's numeric ids (`event["actor"]["id"]`, `event["repo"]["id"]`),
+  not names: a user can change their login, but their id never changes.
+- Bot accounts (logins ending in `[bot]`) will be excluded from the
+  benchmark data, since they act as artificial hubs between unrelated repos.
+- Both databases will be loaded from the same extracted files, and their
+  counts (actors, repos, connections) checked to match before any query is
+  timed.
+- Still to decide (and to be applied identically on both sides): whether a
+  connection is stored once per event or once per actor–repo pair.
+
+## Tools and versions
+
+Everything runs locally on the same machine, so neither database gains an
+advantage from network or hardware differences.
+
+| Tool | Version | Role |
+|---|---|---|
+| Python | 3.14.0 | Scripts for downloading, profiling, loading and timing |
+| PostgreSQL | 18.6 | Relational database (managed with pgAdmin 4 or `psql`) |
+| Neo4j | 2026.10.0 (Enterprise Edition bundled with Neo4j Desktop, free for local development) | Graph database (managed with Neo4j Desktop and Neo4j Browser) |
+| psycopg | 3.3.6 | Python connector for PostgreSQL |
+| neo4j (Python driver) | 6.4.1 | Python connector for Neo4j |
+
+Versions are pinned on purpose: this project compares two tools, so every
+condition (database versions, connectors, Python) must stay the same across
+all measurements. If any of them is upgraded, the change is recorded here and
+every measurement is repeated.
+
+## Setup
+
+The Python connectors are installed in a project-only **virtual environment**
+(`.venv`, not committed), from the pinned [requirements.txt](requirements.txt):
+
+```bash
+python -m venv .venv
+source .venv/Scripts/activate        # Git Bash on Windows
+python -m pip install -r requirements.txt
+```
+
+Database passwords are never stored in the repository. They are passed
+through environment variables:
+
+```bash
+export PGPASSWORD='...'        # read automatically by PostgreSQL/psycopg
+export NEO4J_PASSWORD='...'    # read by the project's scripts
+```
+
+Step-by-step installation of PostgreSQL, Neo4j and the virtual environment
+(with checks and troubleshooting) is in
+[docs_english/project-notes.md](docs_english/project-notes.md), section
+"Installing the software".
