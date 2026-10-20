@@ -94,12 +94,18 @@ cp secrets.example.sh secrets.sh     # then fill in your passwords
 
 Scripts that need the databases are run through [run.sh](run.sh), which
 activates `.venv`, loads `secrets.sh` and runs Python (which inherits the
-passwords only for that run). For example, to check that both databases are
-reachable:
+passwords only for that run). `run.sh` is a generic launcher: always give it
+the script to run, followed by that script's own options, if any. For
+example, to check that both databases are reachable:
 
 ```bash
 ./run.sh scripts/check_connections.py
+# or, equivalently (e.g. if ./run.sh says "Permission denied"):
+bash run.sh scripts/check_connections.py
 ```
+
+Any other script works the same way, e.g.
+`./run.sh scripts/summarize_data.py --top 10`.
 
 Step-by-step installation of PostgreSQL, Neo4j and the virtual environment
 (with checks and troubleshooting) is in
