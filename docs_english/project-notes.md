@@ -1767,6 +1767,13 @@ But the script has to be loaded the right way:
    cp secrets.example.sh secrets.sh
    ```
 
+   > ⚠️ **Don't edit or rename `secrets.example.sh`.** It's the template,
+   > and it's pushed to GitHub on purpose, with no passwords, so it's clear
+   > which variables are needed. The real passwords go **only in the copy**,
+   > `secrets.sh`. `.gitignore` blocks exactly that name (`/secrets.sh`),
+   > not everything starting with `secrets`: that's why the template is
+   > pushed and the copy isn't.
+
 2. Open `secrets.sh` in VS Code and replace both placeholder values with
    your real passwords, keeping the single quotes:
 
@@ -1877,6 +1884,46 @@ through `run.sh`.)
 `#!/usr/bin/env bash` can be run directly. If it still says *Permission
 denied*, use `bash run.sh scripts/check_connections.py`, which does
 exactly the same thing.
+
+#### 4.8 And why not keep the passwords inside `.venv`?
+
+It sounds logical: if the project already has its own virtual environment,
+why not put the passwords there too? For example, by adding the two
+`export` lines to the end of `.venv/Scripts/activate`, so they load when the
+environment is activated. It would work, but it's worse than what we have,
+for two reasons.
+
+**1. A virtual environment isolates packages, not secrets.** `.venv` is
+there so the project has its own versions of `psycopg` and `neo4j`. It
+doesn't protect anything: it's a folder of ordinary files on your disk,
+readable by any program running under your Windows user, exactly like
+`secrets.sh`. Moving the passwords there doesn't make them safer; it only
+changes which file they're in.
+
+**2. It has practical drawbacks:**
+
+| | Passwords in `.venv/Scripts/activate` | What we use (`secrets.sh` + `run.sh`) |
+|---|---|---|
+| Kept out of GitHub? | Yes (`.venv` is in `.gitignore`) | Yes (`secrets.sh` is in `.gitignore`) |
+| Survive recreating the environment? | **No.** The environment is disposable (point 3.8: "delete `.venv` and create it again"), and the passwords would go with it | **Yes.** `secrets.sh` doesn't depend on the environment |
+| How long are they loaded? | As long as the environment is active in the terminal, available to **any** command you run there | **Only while one script runs:** `run.sh` loads them, Python inherits them, and they're gone when it finishes |
+| Easy to find and understand? | No: hidden inside a generated file nobody normally touches | Yes: one obvious file, with a template that documents it |
+
+The last two rows are the ones that matter. `run.sh` already gives the
+**narrowest exposure**: the passwords only exist while a script is running.
+
+**Rule:** each tool for its own job. `.venv` for packages; `secrets.sh` +
+`run.sh` for passwords.
+
+**And in real projects?** In professional projects, or with sensitive
+data, the usual step up is a **secret manager**: a service that keeps the
+passwords **encrypted** and hands them only to the authorised program,
+without them sitting in any readable file. Windows has one built in, the
+**Credential Manager**, which Python can access with the `keyring`
+package; cloud providers offer their own. It isn't needed here: it's a
+personal project, with public data, and both databases only accept
+connections from your own computer. But it's the option to consider if the
+project ever handled anything sensitive.
 
 ### Step 5: check that Python can reach both databases
 

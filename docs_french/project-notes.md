@@ -1900,6 +1900,14 @@ Mais il faut charger le script de la bonne façon :
    cp secrets.example.sh secrets.sh
    ```
 
+   > ⚠️ **Ne modifiez pas et ne renommez pas `secrets.example.sh`.** C'est
+   > le modèle, et il est envoyé sur GitHub exprès, sans mots de passe, pour
+   > qu'on sache quelles variables sont nécessaires. Les vrais mots de passe
+   > vont **uniquement dans la copie**, `secrets.sh`. Le `.gitignore` bloque
+   > exactement ce nom (`/secrets.sh`), pas tout ce qui commence par
+   > `secrets` : c'est pourquoi le modèle est envoyé et la copie ne l'est
+   > pas.
+
 2. Ouvrez `secrets.sh` dans VS Code et remplacez les deux valeurs
    d'exemple par vos vrais mots de passe, en gardant les guillemets
    simples :
@@ -2018,6 +2026,51 @@ commence par `#!/usr/bin/env bash` peut être lancé directement. S'il
 affiche quand même *Permission denied*, utilisez
 `bash run.sh scripts/check_connections.py`, qui fait exactement la même
 chose.
+
+#### 4.8 Et pourquoi ne pas garder les mots de passe dans `.venv` ?
+
+L'idée paraît logique : si le projet a déjà son propre environnement
+virtuel, pourquoi ne pas y mettre aussi les mots de passe ? Par exemple, en
+ajoutant les deux lignes `export` à la fin de `.venv/Scripts/activate`,
+pour qu'ils soient chargés à l'activation de l'environnement. Cela
+fonctionnerait, mais c'est moins bien que ce que nous avons, pour deux
+raisons.
+
+**1. Un environnement virtuel isole des paquets, pas des secrets.**
+`.venv` sert à donner au projet ses propres versions de `psycopg` et
+`neo4j`. Il ne protège rien : c'est un dossier de fichiers ordinaires sur
+votre disque, lisible par n'importe quel programme lancé avec votre
+utilisateur Windows, exactement comme `secrets.sh`. Y déplacer les mots de
+passe ne les rend pas plus sûrs ; cela change seulement le fichier où ils
+se trouvent.
+
+**2. Cela a des inconvénients pratiques :**
+
+| | Mots de passe dans `.venv/Scripts/activate` | Ce que nous utilisons (`secrets.sh` + `run.sh`) |
+|---|---|---|
+| Hors de GitHub ? | Oui (`.venv` est dans le `.gitignore`) | Oui (`secrets.sh` est dans le `.gitignore`) |
+| Survivent-ils si on recrée l'environnement ? | **Non.** L'environnement est jetable (point 3.8 : « supprimez `.venv` et recréez-le »), et les mots de passe partiraient avec lui | **Oui.** `secrets.sh` ne dépend pas de l'environnement |
+| Combien de temps sont-ils chargés ? | Tant que l'environnement est actif dans le terminal, à la portée de **n'importe quelle** commande lancée dedans | **Seulement pendant l'exécution d'un script :** `run.sh` les charge, Python en hérite, et ils disparaissent à la fin |
+| Faciles à trouver et à comprendre ? | Non : cachés dans un fichier généré que personne ne touche d'habitude | Oui : un fichier évident, avec un modèle qui le documente |
+
+Les deux dernières lignes sont les plus importantes. `run.sh` offre déjà
+l'**exposition minimale** : les mots de passe n'existent que pendant
+l'exécution d'un script.
+
+**Règle :** chaque outil pour son rôle. `.venv` pour les paquets ;
+`secrets.sh` + `run.sh` pour les mots de passe.
+
+**Et dans les vrais projets ?** Dans les projets professionnels, ou avec
+des données sensibles, on va en général plus loin avec un **gestionnaire
+de secrets** (*secret manager*) : un service qui garde les mots de passe
+**chiffrés** et ne les remet qu'au programme autorisé, sans qu'ils se
+trouvent dans un fichier lisible. Windows en a un intégré, le
+**Gestionnaire d'identification**, auquel Python peut accéder avec le
+paquet `keyring` ; les fournisseurs cloud proposent les leurs. Ce n'est pas
+nécessaire ici : c'est un projet personnel, avec des données publiques, et
+les deux bases n'acceptent que des connexions venant de votre propre
+ordinateur. Mais c'est l'option à envisager si le projet devait un jour
+manipuler quelque chose de sensible.
 
 ### Étape 5 : vérifier que Python atteint les deux bases de données
 
