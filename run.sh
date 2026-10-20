@@ -15,8 +15,19 @@ set -eo pipefail
 # Work from the project folder, wherever run.sh was called from.
 cd "$(dirname "$0")"
 
+# run.sh is a generic launcher: it prepares the environment, then runs the
+# Python script named right after it. $# is the number of arguments given to
+# run.sh; if it's 0, there's no script to run, so explain and stop.
 if [ $# -eq 0 ]; then
-    echo "Usage: ./run.sh <script.py> [arguments...]" >&2
+    echo "run.sh needs the Python script to run, written right after it." >&2
+    echo "" >&2
+    echo "Usage:" >&2
+    echo "    ./run.sh <script.py> [script options...]" >&2
+    echo "    bash run.sh <script.py> [script options...]   (same thing)" >&2
+    echo "" >&2
+    echo "Examples:" >&2
+    echo "    ./run.sh scripts/check_connections.py" >&2
+    echo "    ./run.sh scripts/summarize_data.py --top 10" >&2
     exit 1
 fi
 

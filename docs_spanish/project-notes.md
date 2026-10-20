@@ -1929,11 +1929,56 @@ Por dentro, `run.sh` hace esto, en orden:
 | Si se olvida algo | Python falla con un error confuso | `run.sh` para y explica qué falta |
 | Dónde viven las contraseñas | En tu terminal, hasta que la cierres | Solo mientras corre el script; al terminar, desaparecen |
 
-Este último punto es el de tu idea original: las contraseñas se quedan
-**fuera del código de Python**, en un script de bash, y Python las hereda
-al ser lanzado desde él. `run.sh` no necesita `source`: se ejecuta como
-un programa normal, porque es **él mismo** quien lanza Python, y la
-herencia ocurre dentro.
+**Cómo llegan las contraseñas a Python sin pasar por tu terminal.** Este
+último punto es el de la idea original: las contraseñas se quedan **fuera
+del código de Python**, en un script de bash, y Python las **hereda** al
+ser lanzado desde él. Para entenderlo bien hay que ver qué programas se
+ponen en marcha, y en qué orden, cuando escribes
+`./run.sh scripts/check_connections.py`:
+
+```
+Tu terminal (Git Bash)                  ← no tiene las contraseñas, ni antes ni después
+ └── lanza run.sh  → un bash NUEVO, hijo de tu terminal
+       ├── source .venv/Scripts/activate  → activa el entorno DENTRO de este bash hijo
+       ├── source secrets.sh              → carga las contraseñas DENTRO de este bash hijo
+       └── exec python scripts/check_connections.py
+             └── Python ocupa el lugar del bash hijo y HEREDA sus variables:
+                 el entorno activado y las dos contraseñas
+                       ↓
+             Python termina → el proceso desaparece, y con él las contraseñas
+```
+
+Paso a paso:
+
+1. **Tu terminal lanza `run.sh` como un programa nuevo**, un bash *hijo*.
+   El hijo recibe una copia de las variables de tu terminal (punto 4.2),
+   pero tu terminal no recibirá nunca nada de vuelta: la herencia solo va
+   de padre a hijo, nunca al revés.
+2. **Dentro del hijo, `run.sh` sí usa `source`**, dos veces: para activar
+   `.venv` y para cargar `secrets.sh`. Con `source`, esos scripts se
+   ejecutan *dentro* del bash hijo, así que las contraseñas quedan
+   definidas en él (no en un bash aparte que se cierra enseguida).
+3. **Al final, `run.sh` lanza Python con `exec`.** `exec` hace que Python
+   **ocupe el lugar** del bash hijo, en vez de crear un proceso más. Python
+   hereda todo lo que el hijo tenía definido: el entorno virtual activado y
+   las dos contraseñas. Por eso `psycopg` encuentra `PGPASSWORD` y el
+   script encuentra `NEO4J_PASSWORD`.
+4. **Cuando Python termina, su proceso desaparece**, y con él las
+   contraseñas. Tu terminal sigue igual que antes: si escribes
+   `echo "$NEO4J_PASSWORD"`, no sale nada.
+
+**Por qué aquí no hace falta escribir `source run.sh`.** En el punto 4.2
+vimos que `bash secrets.sh` no sirve: el bash aparte carga las contraseñas
+y se cierra **sin lanzar nada**, así que nadie las aprovecha. Con `run.sh`
+pasa justo lo contrario: el bash aparte carga las contraseñas **y además
+lanza Python desde dentro**, así que Python las hereda antes de que ese
+bash termine. El `source` sigue existiendo, pero está *dentro* de
+`run.sh`, no en tu terminal.
+
+**Por qué es la opción más segura de las que hemos visto:** las
+contraseñas solo existen en la memoria **mientras corre el script**, y
+solo en ese proceso. Ningún otro comando que ejecutes en tu terminal puede
+verlas, y no se quedan cargadas cuando terminas.
 
 **Sirve para cualquier script del proyecto,** presente o futuro. Lo que
 escribas después del nombre del script se le pasa tal cual:
@@ -2044,6 +2089,100 @@ Both databases are reachable.
 Cuando aparezca `Both databases are reachable.`, **toda la cadena
 funciona**: el entorno virtual, las contraseñas, los conectores y las dos
 bases de datos. Es el punto de partida para crear las tablas y los nodos.
+
+### Cómo sabe Python dónde está cada base de datos
+
+Cuando `check_connections.py` funciona, surge una pregunta natural: ¿cómo
+sabe Python dónde está cada base de datos? ¿Las busca solo por el
+ordenador? ¿Cómo distingue cuál es PostgreSQL y cuál Neo4j?
+
+**La respuesta corta: no busca nada. Se lo decimos nosotros**, con una
+dirección exacta para cada una, escrita al principio del script:
+
+```python
+POSTGRES_SETTINGS = {"host": "localhost", "dbname": "gharchive", "user": "postgres"}
+NEO4J_URI = "neo4j://localhost:7687"
+```
+
+#### Las tres piezas de una dirección
+
+Para conectarse a una base de datos hacen falta tres cosas, igual que para
+llegar a una tienda dentro de un centro comercial:
+
+| Pieza | En el centro comercial | En la base de datos | PostgreSQL | Neo4j |
+|---|---|---|---|---|
+| **Máquina** (*host*) | El edificio | El ordenador donde corre el servidor | `localhost` | `localhost` |
+| **Puerto** | El número del local | La "puerta" por la que escucha ese servidor | `5432` | `7687` |
+| **Protocolo** | El idioma que hablan dentro | El "idioma" con el que se comunican cliente y servidor | El de PostgreSQL | *Bolt* (el de Neo4j) |
+
+**1. La máquina: `localhost`.** Es un nombre especial que siempre
+significa **"este mismo ordenador"** (su dirección numérica es
+`127.0.0.1`, la que aparece en Neo4j Desktop como *Connection URI*). Por
+eso la conexión nunca sale a internet: Python y las dos bases de datos
+están en tu portátil.
+
+**2. El puerto: el número de la puerta.** Un ordenador puede tener muchos
+programas esperando conexiones a la vez; cada uno "escucha" en un número de
+puerto distinto, y así no se mezclan. Al instalar, cada servidor ocupó el
+suyo:
+
+- **PostgreSQL** escucha en el **5432** (el que aceptaste en el
+  instalador).
+- **Neo4j** escucha en el **7687** para los programas (protocolo *Bolt*) y
+  en el **7474** para el navegador (Neo4j Browser).
+
+En el script de PostgreSQL no aparece el `5432`: cuando no se indica,
+`psycopg` usa ese puerto por defecto. En el de Neo4j sí aparece, dentro de
+la dirección `neo4j://localhost:7687`.
+
+**3. El protocolo: cada conector habla un solo idioma.** Aquí está la
+respuesta a "¿cómo sabe si es PostgreSQL o Neo4j?": **lo decide qué
+conector usamos**.
+
+- `psycopg.connect(...)` solo sabe hablar el idioma de PostgreSQL, así que
+  solo puede conectarse a un servidor PostgreSQL.
+- `GraphDatabase.driver(...)` solo sabe hablar *Bolt*, el idioma de Neo4j.
+  El `neo4j://` del principio de la dirección lo indica.
+
+Si por error se apuntara `psycopg` al puerto de Neo4j, no "encontraría"
+otra cosa: la conexión fallaría, porque el servidor del otro lado no
+entiende el idioma.
+
+#### Qué tiene que estar funcionando en tu ordenador
+
+Para que la conexión funcione, **el servidor tiene que estar en marcha y
+escuchando en su puerto**:
+
+| Servidor | Qué lo mantiene en marcha | Si no está en marcha |
+|---|---|---|
+| PostgreSQL | Un **servicio de Windows**, que arranca solo al encender el ordenador | `Connection refused` (nadie contesta en el 5432) |
+| Neo4j | La instancia `gharchive`, arrancada en **Neo4j Desktop** | `Couldn't connect` (nadie contesta en el 7687) |
+
+#### El resto de los datos de conexión
+
+Una vez dentro del servidor, faltan dos datos más:
+
+- **Con qué usuario** se entra: `postgres` en PostgreSQL y `neo4j` en
+  Neo4j. La contraseña de cada uno llega por las variables de entorno
+  (paso 4).
+- **Qué base de datos** se usa, porque un servidor puede tener varias:
+  - En PostgreSQL lo dice `dbname="gharchive"`.
+  - En Neo4j, el script todavía no lo indica, así que se usa la base por
+    defecto de la instancia (`neo4j`). Tu instancia también tiene una base
+    `gharchive`; cuando se decida en cuál se trabaja, se indicará en los
+    scripts que carguen los datos.
+
+#### Si un día las bases de datos estuvieran en otro sitio
+
+Solo habría que cambiar la dirección: por ejemplo, poner el nombre de otro
+ordenador en lugar de `localhost`, o el puerto que use ese servidor. Nada
+más del código cambiaría. Por eso las direcciones están juntas, como
+constantes, al principio del script.
+
+La salida de `check_connections.py` confirma todo esto: la línea de
+PostgreSQL dice `on x86_64-windows` (es tu ordenador con Windows), y la de
+Neo4j muestra la versión de la instancia que tienes arrancada en Neo4j
+Desktop.
 
 ### Lista de comprobación
 

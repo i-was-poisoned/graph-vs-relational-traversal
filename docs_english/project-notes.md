@@ -1863,11 +1863,56 @@ Inside, `run.sh` does this, in order:
 | If something is forgotten | Python fails with a confusing error | `run.sh` stops and explains what's missing |
 | Where the passwords live | In your terminal, until you close it | Only while the script runs; they're gone when it finishes |
 
+**How the passwords reach Python without going through your terminal.**
 That last point is the original idea: the passwords stay **outside the
-Python code**, in a bash script, and Python inherits them by being launched
-from it. `run.sh` doesn't need `source`: it runs like a normal program,
-because it's **run.sh itself** that launches Python, and the inheritance
-happens inside it.
+Python code**, in a bash script, and Python **inherits** them by being
+launched from it. To understand it properly, it helps to see which programs
+start, and in what order, when you type
+`./run.sh scripts/check_connections.py`:
+
+```
+Your terminal (Git Bash)                ← never has the passwords, before or after
+ └── launches run.sh  → a NEW bash, a child of your terminal
+       ├── source .venv/Scripts/activate  → activates the environment INSIDE this child bash
+       ├── source secrets.sh              → loads the passwords INSIDE this child bash
+       └── exec python scripts/check_connections.py
+             └── Python takes the child bash's place and INHERITS its variables:
+                 the activated environment and both passwords
+                       ↓
+             Python finishes → the process disappears, and the passwords with it
+```
+
+Step by step:
+
+1. **Your terminal launches `run.sh` as a new program**, a *child* bash.
+   The child receives a copy of your terminal's variables (point 4.2), but
+   your terminal never gets anything back: inheritance only flows from
+   parent to child, never the other way round.
+2. **Inside the child, `run.sh` does use `source`**, twice: to activate
+   `.venv` and to load `secrets.sh`. With `source`, those scripts run
+   *inside* the child bash, so the passwords end up set in it (not in a
+   separate bash that closes straight away).
+3. **Finally, `run.sh` launches Python with `exec`.** `exec` makes Python
+   **take the place** of the child bash, instead of creating yet another
+   process. Python inherits everything the child had set: the activated
+   virtual environment and both passwords. That's why `psycopg` finds
+   `PGPASSWORD` and the script finds `NEO4J_PASSWORD`.
+4. **When Python finishes, its process disappears**, and the passwords
+   with it. Your terminal is just as it was: if you type
+   `echo "$NEO4J_PASSWORD"`, nothing comes out.
+
+**Why you don't need to type `source run.sh` here.** In point 4.2 we saw
+that `bash secrets.sh` doesn't work: the separate bash loads the passwords
+and closes **without launching anything**, so nobody gets to use them.
+With `run.sh` it's exactly the opposite: the separate bash loads the
+passwords **and then launches Python from inside**, so Python inherits them
+before that bash ends. `source` is still there, but *inside* `run.sh`, not
+in your terminal.
+
+**Why it's the safest of the options we've seen:** the passwords only
+exist in memory **while the script runs**, and only in that process. No
+other command you run in your terminal can see them, and they don't stay
+loaded when you're done.
 
 **It works for any project script,** present or future. Whatever you type
 after the script's name is passed on as-is:
@@ -1975,6 +2020,98 @@ Both databases are reachable.
 Once `Both databases are reachable.` appears, **the whole chain works**: the
 virtual environment, the passwords, the connectors, and both databases.
 It's the starting point for creating the tables and the nodes.
+
+### How Python knows where each database is
+
+Once `check_connections.py` works, a natural question comes up: how does
+Python know where each database is? Does it search the computer for them?
+How does it tell which one is PostgreSQL and which one is Neo4j?
+
+**The short answer: it doesn't search for anything. We tell it**, with an
+exact address for each one, written at the top of the script:
+
+```python
+POSTGRES_SETTINGS = {"host": "localhost", "dbname": "gharchive", "user": "postgres"}
+NEO4J_URI = "neo4j://localhost:7687"
+```
+
+#### The three parts of an address
+
+Connecting to a database takes three things, just like reaching a shop
+inside a shopping centre:
+
+| Part | In the shopping centre | For the database | PostgreSQL | Neo4j |
+|---|---|---|---|---|
+| **Machine** (*host*) | The building | The computer the server runs on | `localhost` | `localhost` |
+| **Port** | The shop number | The "door" that server listens on | `5432` | `7687` |
+| **Protocol** | The language spoken inside | The "language" client and server use to talk | PostgreSQL's | *Bolt* (Neo4j's) |
+
+**1. The machine: `localhost`.** It's a special name that always means
+**"this same computer"** (its numeric address is `127.0.0.1`, the one shown
+in Neo4j Desktop as the *Connection URI*). That's why the connection never
+goes out to the internet: Python and both databases are on your laptop.
+
+**2. The port: the door number.** A computer can have many programs
+waiting for connections at the same time; each one "listens" on a different
+port number, so they don't get mixed up. When installed, each server took
+its own:
+
+- **PostgreSQL** listens on **5432** (the one you accepted in the
+  installer).
+- **Neo4j** listens on **7687** for programs (the *Bolt* protocol) and on
+  **7474** for the browser (Neo4j Browser).
+
+The PostgreSQL settings don't mention `5432`: when no port is given,
+`psycopg` uses that one by default. The Neo4j one does, inside the address
+`neo4j://localhost:7687`.
+
+**3. The protocol: each connector speaks only one language.** Here's the
+answer to "how does it know whether it's PostgreSQL or Neo4j?": **it's
+decided by which connector we use**.
+
+- `psycopg.connect(...)` only speaks PostgreSQL's language, so it can only
+  connect to a PostgreSQL server.
+- `GraphDatabase.driver(...)` only speaks *Bolt*, Neo4j's language. The
+  `neo4j://` at the start of the address says so.
+
+If `psycopg` were pointed at Neo4j's port by mistake, it wouldn't "find"
+something else: the connection would fail, because the server on the other
+side doesn't understand the language.
+
+#### What has to be running on your computer
+
+For the connection to work, **the server has to be running and listening
+on its port**:
+
+| Server | What keeps it running | If it isn't running |
+|---|---|---|
+| PostgreSQL | A **Windows service**, which starts on its own when the computer boots | `Connection refused` (nobody answers on 5432) |
+| Neo4j | The `gharchive` instance, started in **Neo4j Desktop** | `Couldn't connect` (nobody answers on 7687) |
+
+#### The rest of the connection details
+
+Once inside the server, two more things are needed:
+
+- **Which user** to log in as: `postgres` in PostgreSQL and `neo4j` in
+  Neo4j. Each one's password arrives through the environment variables
+  (step 4).
+- **Which database** to use, because a server can hold several:
+  - In PostgreSQL, `dbname="gharchive"` says so.
+  - In Neo4j, the script doesn't say yet, so the instance's default
+    database (`neo4j`) is used. Your instance also has a `gharchive`
+    database; once it's decided which one to work in, it will be set in
+    the scripts that load the data.
+
+#### If the databases were ever somewhere else
+
+Only the address would change: for example, another computer's name
+instead of `localhost`, or the port that server uses. Nothing else in the
+code would change. That's why the addresses are kept together, as
+constants, at the top of the script.
+
+`check_connections.py`'s output confirms all of this: the PostgreSQL line
+says `on x86_64-windows` (that's your Windows computer), and the Neo4j one
+shows the version of the instance you have running in Neo4j Desktop.
 
 ### Checklist
 

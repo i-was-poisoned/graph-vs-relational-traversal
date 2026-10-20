@@ -2004,11 +2004,59 @@ terminal :**
 | Si on oublie quelque chose | Python échoue avec une erreur confuse | `run.sh` s'arrête et explique ce qui manque |
 | Où vivent les mots de passe | Dans votre terminal, jusqu'à sa fermeture | Seulement pendant l'exécution du script ; ils disparaissent à la fin |
 
-Ce dernier point, c'est l'idée de départ : les mots de passe restent **en
-dehors du code Python**, dans un script bash, et Python en hérite parce
-qu'il est lancé depuis ce script. `run.sh` n'a pas besoin de `source` : il
-s'exécute comme un programme normal, car c'est **run.sh lui-même** qui
-lance Python, et l'héritage se fait à l'intérieur.
+**Comment les mots de passe arrivent à Python sans passer par votre
+terminal.** Ce dernier point, c'est l'idée de départ : les mots de passe
+restent **en dehors du code Python**, dans un script bash, et Python en
+**hérite** parce qu'il est lancé depuis ce script. Pour bien le comprendre,
+il faut voir quels programmes démarrent, et dans quel ordre, quand vous
+tapez `./run.sh scripts/check_connections.py` :
+
+```
+Votre terminal (Git Bash)               ← n'a jamais les mots de passe, ni avant ni après
+ └── lance run.sh  → un NOUVEAU bash, enfant de votre terminal
+       ├── source .venv/Scripts/activate  → active l'environnement DANS ce bash enfant
+       ├── source secrets.sh              → charge les mots de passe DANS ce bash enfant
+       └── exec python scripts/check_connections.py
+             └── Python prend la place du bash enfant et HÉRITE de ses variables :
+                 l'environnement activé et les deux mots de passe
+                       ↓
+             Python se termine → le processus disparaît, et les mots de passe avec lui
+```
+
+Pas à pas :
+
+1. **Votre terminal lance `run.sh` comme un nouveau programme**, un bash
+   *enfant*. L'enfant reçoit une copie des variables de votre terminal
+   (point 4.2), mais votre terminal ne reçoit jamais rien en retour :
+   l'héritage va seulement du parent vers l'enfant, jamais dans l'autre
+   sens.
+2. **Dans l'enfant, `run.sh` utilise bien `source`**, deux fois : pour
+   activer `.venv` et pour charger `secrets.sh`. Avec `source`, ces scripts
+   s'exécutent *dans* le bash enfant ; les mots de passe y restent donc
+   définis (et pas dans un bash à part qui se ferme aussitôt).
+3. **À la fin, `run.sh` lance Python avec `exec`.** `exec` fait que Python
+   **prend la place** du bash enfant, au lieu de créer un processus de
+   plus. Python hérite de tout ce que l'enfant avait défini :
+   l'environnement virtuel activé et les deux mots de passe. C'est pour
+   cela que `psycopg` trouve `PGPASSWORD` et que le script trouve
+   `NEO4J_PASSWORD`.
+4. **Quand Python se termine, son processus disparaît**, et les mots de
+   passe avec lui. Votre terminal est exactement comme avant : si vous
+   tapez `echo "$NEO4J_PASSWORD"`, rien ne s'affiche.
+
+**Pourquoi il n'est pas nécessaire de taper `source run.sh` ici.** Au
+point 4.2, on a vu que `bash secrets.sh` ne fonctionne pas : le bash à part
+charge les mots de passe et se ferme **sans rien lancer**, donc personne ne
+peut s'en servir. Avec `run.sh`, c'est exactement l'inverse : le bash à
+part charge les mots de passe **puis lance Python depuis l'intérieur** ;
+Python en hérite donc avant que ce bash ne se termine. Le `source` est
+toujours là, mais *dans* `run.sh`, pas dans votre terminal.
+
+**Pourquoi c'est l'option la plus sûre parmi celles vues :** les mots de
+passe n'existent en mémoire **que pendant l'exécution du script**, et
+seulement dans ce processus. Aucune autre commande lancée dans votre
+terminal ne peut les voir, et ils ne restent pas chargés une fois le
+travail terminé.
 
 **Il sert pour n'importe quel script du projet,** actuel ou futur. Ce que
 vous écrivez après le nom du script lui est transmis tel quel :
@@ -2125,6 +2173,101 @@ Quand `Both databases are reachable.` apparaît, **toute la chaîne
 fonctionne** : l'environnement virtuel, les mots de passe, les connecteurs
 et les deux bases de données. C'est le point de départ pour créer les
 tables et les nœuds.
+
+### Comment Python sait où se trouve chaque base de données
+
+Quand `check_connections.py` fonctionne, une question naturelle se pose :
+comment Python sait-il où se trouve chaque base ? Les cherche-t-il tout
+seul sur l'ordinateur ? Comment distingue-t-il PostgreSQL de Neo4j ?
+
+**La réponse courte : il ne cherche rien. C'est nous qui le lui disons**,
+avec une adresse exacte pour chacune, écrite en haut du script :
+
+```python
+POSTGRES_SETTINGS = {"host": "localhost", "dbname": "gharchive", "user": "postgres"}
+NEO4J_URI = "neo4j://localhost:7687"
+```
+
+#### Les trois parties d'une adresse
+
+Pour se connecter à une base de données, il faut trois choses, comme pour
+trouver une boutique dans un centre commercial :
+
+| Partie | Dans le centre commercial | Pour la base de données | PostgreSQL | Neo4j |
+|---|---|---|---|---|
+| **Machine** (*host*) | Le bâtiment | L'ordinateur où tourne le serveur | `localhost` | `localhost` |
+| **Port** | Le numéro de la boutique | La « porte » sur laquelle écoute ce serveur | `5432` | `7687` |
+| **Protocole** | La langue parlée à l'intérieur | La « langue » dans laquelle client et serveur communiquent | Celle de PostgreSQL | *Bolt* (celle de Neo4j) |
+
+**1. La machine : `localhost`.** C'est un nom spécial qui signifie
+toujours **« ce même ordinateur »** (son adresse numérique est
+`127.0.0.1`, celle qui apparaît dans Neo4j Desktop comme *Connection URI*).
+C'est pourquoi la connexion ne sort jamais sur internet : Python et les
+deux bases de données sont sur votre ordinateur portable.
+
+**2. Le port : le numéro de la porte.** Un ordinateur peut avoir de
+nombreux programmes qui attendent des connexions en même temps ; chacun
+« écoute » sur un numéro de port différent, pour ne pas se mélanger. À
+l'installation, chaque serveur a pris le sien :
+
+- **PostgreSQL** écoute sur le **5432** (celui accepté dans
+  l'installateur).
+- **Neo4j** écoute sur le **7687** pour les programmes (protocole *Bolt*)
+  et sur le **7474** pour le navigateur (Neo4j Browser).
+
+Les réglages de PostgreSQL ne mentionnent pas le `5432` : quand aucun port
+n'est indiqué, `psycopg` utilise celui-là par défaut. Celui de Neo4j, lui,
+apparaît dans l'adresse `neo4j://localhost:7687`.
+
+**3. Le protocole : chaque connecteur ne parle qu'une langue.** Voici la
+réponse à « comment sait-il si c'est PostgreSQL ou Neo4j ? » : **c'est le
+connecteur utilisé qui en décide**.
+
+- `psycopg.connect(...)` ne parle que la langue de PostgreSQL ; il ne peut
+  donc se connecter qu'à un serveur PostgreSQL.
+- `GraphDatabase.driver(...)` ne parle que *Bolt*, la langue de Neo4j. Le
+  `neo4j://` au début de l'adresse l'indique.
+
+Si on dirigeait `psycopg` par erreur vers le port de Neo4j, il ne
+« trouverait » pas autre chose : la connexion échouerait, car le serveur
+en face ne comprend pas la langue.
+
+#### Ce qui doit fonctionner sur votre ordinateur
+
+Pour que la connexion marche, **le serveur doit être démarré et écouter
+sur son port** :
+
+| Serveur | Ce qui le maintient en marche | S'il n'est pas démarré |
+|---|---|---|
+| PostgreSQL | Un **service Windows**, qui démarre tout seul à l'allumage de l'ordinateur | `Connection refused` (personne ne répond sur le 5432) |
+| Neo4j | L'instance `gharchive`, démarrée dans **Neo4j Desktop** | `Couldn't connect` (personne ne répond sur le 7687) |
+
+#### Le reste des informations de connexion
+
+Une fois dans le serveur, il manque deux informations :
+
+- **Avec quel utilisateur** on entre : `postgres` dans PostgreSQL et
+  `neo4j` dans Neo4j. Le mot de passe de chacun arrive par les variables
+  d'environnement (étape 4).
+- **Quelle base de données** on utilise, car un serveur peut en avoir
+  plusieurs :
+  - Dans PostgreSQL, c'est `dbname="gharchive"` qui l'indique.
+  - Dans Neo4j, le script ne l'indique pas encore ; c'est donc la base par
+    défaut de l'instance (`neo4j`) qui est utilisée. Votre instance a aussi
+    une base `gharchive` ; quand on aura décidé dans laquelle travailler,
+    on l'indiquera dans les scripts qui chargeront les données.
+
+#### Si un jour les bases de données étaient ailleurs
+
+Il suffirait de changer l'adresse : par exemple, mettre le nom d'un autre
+ordinateur à la place de `localhost`, ou le port utilisé par ce serveur.
+Rien d'autre dans le code ne changerait. C'est pour cela que les adresses
+sont regroupées, sous forme de constantes, en haut du script.
+
+La sortie de `check_connections.py` confirme tout cela : la ligne de
+PostgreSQL indique `on x86_64-windows` (c'est votre ordinateur Windows), et
+celle de Neo4j affiche la version de l'instance démarrée dans Neo4j
+Desktop.
 
 ### Liste de vérification
 
