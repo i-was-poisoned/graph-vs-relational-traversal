@@ -1675,13 +1675,16 @@ Qué significa cada parte:
 paquetes (otros paquetes que ellos necesitan), así que verás más nombres en
 la salida de los que has pedido. Es normal.
 
-**Anotar las dependencias.** Crea en la raíz del proyecto un archivo
-`requirements.txt` con estas dos líneas:
+**Anotar las dependencias.** En la raíz del proyecto hay un archivo
+`requirements.txt` con los dos paquetes y **su versión exacta**:
 
 ```
-psycopg[binary]
-neo4j
+psycopg[binary]==3.3.6
+neo4j==6.4.1
 ```
+
+(Las líneas que empiezan por `#` en el archivo real son comentarios, y
+`pip` las ignora.)
 
 Es la "lista de la compra" del proyecto: dice qué paquetes necesita. Este
 archivo **sí** se sube a GitHub. En otro ordenador (o si un día recreas el
@@ -1691,15 +1694,48 @@ entorno), basta con:
 python -m pip install -r requirements.txt
 ```
 
-Para el benchmark, además, interesa saber las **versiones exactas**. Este
-comando las muestra todas, incluidas las dependencias:
+Las dependencias de estos dos paquetes (`psycopg-binary`, `tzdata` y
+`pytz`) no hace falta escribirlas: `pip` las instala solo.
+
+**Por qué `==`: en un benchmark, las condiciones tienen que ser siempre
+las mismas.** `==` significa "exactamente esta versión". Sin él, `pip`
+instala la versión **más reciente** que exista en el momento de instalar,
+así que el mismo `requirements.txt` daría versiones distintas hoy y dentro
+de seis meses.
+
+En un proyecto normal eso suele dar igual. En este, no, porque el objetivo
+es **comparar dos herramientas**, y una comparación solo es justa si lo
+único que cambia es lo que se mide (ver "Qué significa *benchmark* para
+este proyecto"). Los conectores forman parte del camino que recorre cada
+consulta: Python → conector → base de datos → conector → Python. Si una
+versión nueva de un conector es más rápida o más lenta, los tiempos
+cambian, y no por PostgreSQL ni por Neo4j. Fijar las versiones evita tres
+problemas:
+
+1. **Comparaciones contaminadas.** Si a mitad del proyecto se actualiza el
+   conector de Neo4j pero no el de PostgreSQL, las mediciones posteriores
+   ya no comparan lo mismo que las anteriores.
+2. **Resultados que no se pueden repetir.** Quien quiera comprobar los
+   resultados, o tú mismo dentro de unos meses, necesita reconstruir
+   exactamente el mismo entorno. Con `==`, `pip install -r
+   requirements.txt` lo consigue siempre.
+3. **Cambios que pasan desapercibidos.** Si un tiempo cambia de una
+   medición a otra, hay que poder descartar que haya sido por una
+   actualización. Con las versiones fijadas, se sabe que no.
+
+Por la misma razón hay que anotar **todas** las versiones que intervienen,
+no solo las de Python: la de PostgreSQL, la de Neo4j, la de Python (3.14)
+y las de los conectores. Este comando muestra las versiones exactas de
+todos los paquetes del entorno, dependencias incluidas:
 
 ```bash
 python -m pip freeze
 ```
 
-Apunta las de `psycopg` y `neo4j` junto con las versiones de PostgreSQL y
-Neo4j: juntas forman las condiciones técnicas del experimento.
+Si algún día se decide actualizar un conector, se cambia su versión en
+`requirements.txt`, se anota el cambio, y **se repiten todas las
+mediciones** con la versión nueva, para que todos los resultados se hayan
+obtenido en las mismas condiciones.
 
 #### 3.7 Comprobar que el entorno está bien
 

@@ -1,0 +1,15 @@
+# Python packages this project needs (install inside the .venv virtual environment):
+#     python -m pip install -r requirements.txt
+#
+# Versions are pinned (==) on purpose: this project benchmarks two databases
+# against each other, so every condition must stay the same across all
+# measurements - including the connectors each query goes through. Never
+# upgrade one without noting it and re-running every measurement.
+# Their own dependencies (psycopg-binary, tzdata, pytz) are installed
+# automatically.
+
+# PostgreSQL connector ([binary] = precompiled, nothing else to install on Windows)
+psycopg[binary]==3.3.6
+
+# Official Neo4j connector
+neo4j==6.4.1

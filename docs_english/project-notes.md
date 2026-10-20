@@ -1612,13 +1612,16 @@ What each part means:
 packages they need), so you'll see more names in the output than the ones
 you asked for. That's normal.
 
-**Record the dependencies.** In the project's root folder, create a
-`requirements.txt` file with these two lines:
+**Record the dependencies.** In the project's root folder there's a
+`requirements.txt` file with both packages and **their exact version**:
 
 ```
-psycopg[binary]
-neo4j
+psycopg[binary]==3.3.6
+neo4j==6.4.1
 ```
+
+(Lines starting with `#` in the real file are comments, and `pip` ignores
+them.)
 
 It's the project's "shopping list": it says which packages it needs. This
 file **does** get pushed to GitHub. On another computer (or if you ever
@@ -1628,16 +1631,47 @@ recreate the environment), all it takes is:
 python -m pip install -r requirements.txt
 ```
 
-For the benchmark, you also want the **exact versions**. This command shows
-all of them, dependencies included:
+These two packages' dependencies (`psycopg-binary`, `tzdata` and `pytz`)
+don't need to be listed: `pip` installs them automatically.
+
+**Why `==`: in a benchmark, the conditions always have to be the same.**
+`==` means "exactly this version". Without it, `pip` installs the **latest**
+version available at install time, so the same `requirements.txt` would
+give different versions today and six months from now.
+
+In an ordinary project that usually doesn't matter. In this one it does,
+because the goal is to **compare two tools**, and a comparison is only fair
+if the only thing that changes is what's being measured (see "What
+'benchmark' means, for this project"). The connectors are part of the path
+every query takes: Python → connector → database → connector → Python. If a
+new connector version is faster or slower, the times change, and not
+because of PostgreSQL or Neo4j. Pinning the versions avoids three
+problems:
+
+1. **Contaminated comparisons.** If the Neo4j connector gets updated
+   halfway through the project but the PostgreSQL one doesn't, the later
+   measurements no longer compare the same thing as the earlier ones.
+2. **Results that can't be repeated.** Anyone wanting to check the
+   results, or you yourself a few months from now, needs to rebuild
+   exactly the same environment. With `==`, `pip install -r
+   requirements.txt` always does that.
+3. **Changes that go unnoticed.** If a time changes from one measurement
+   to the next, you need to be able to rule out an update as the cause.
+   With pinned versions, you know it wasn't.
+
+For the same reason, you need to write down **every** version involved, not
+just the Python ones: PostgreSQL's, Neo4j's, Python's (3.14), and the
+connectors'. This command shows the exact versions of every package in the
+environment, dependencies included:
 
 ```bash
 python -m pip freeze
 ```
 
-Write down the versions of `psycopg` and `neo4j` together with the
-PostgreSQL and Neo4j versions: together they make up the experiment's
-technical conditions.
+If you ever decide to update a connector, change its version in
+`requirements.txt`, note the change, and **repeat every measurement** with
+the new version, so all the results were obtained under the same
+conditions.
 
 #### 3.7 Check that the environment is fine
 
