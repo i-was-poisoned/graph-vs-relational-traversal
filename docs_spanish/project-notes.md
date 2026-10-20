@@ -2053,13 +2053,21 @@ muestra la versión de cada servidor.
 ./run.sh scripts/check_connections.py
 ```
 
-**Si todo va bien**, verás algo así:
+**Si todo va bien**, verás algo así (esta es la salida real de este
+proyecto):
 
 ```
-PostgreSQL OK: PostgreSQL 18.6 on x86_64-windows, ...
+PostgreSQL OK: PostgreSQL 18.6 on x86_64-windows, compiled by msvc-19.44.35229, 64-bit
 Neo4j OK: Neo4j Kernel 2026.10.0 (enterprise edition)
+Neo4j OK: Cypher 5 ( edition)
 Both databases are reachable.
 ```
+
+Neo4j muestra **dos líneas** porque, en sus versiones recientes, la
+consulta de versión devuelve dos componentes: el motor de la base de datos
+(*Neo4j Kernel*) y la versión del lenguaje de consultas (*Cypher 5*). Esta
+segunda no tiene edición, y por eso aparece el paréntesis vacío. No es un
+error.
 
 **Cómo funciona el script, en resumen:**
 

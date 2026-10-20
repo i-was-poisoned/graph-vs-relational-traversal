@@ -1984,13 +1984,20 @@ already filled in:
 ./run.sh scripts/check_connections.py
 ```
 
-**If all goes well**, you'll see something like:
+**If all goes well**, you'll see something like this (this is the real
+output on this project):
 
 ```
-PostgreSQL OK: PostgreSQL 18.6 on x86_64-windows, ...
+PostgreSQL OK: PostgreSQL 18.6 on x86_64-windows, compiled by msvc-19.44.35229, 64-bit
 Neo4j OK: Neo4j Kernel 2026.10.0 (enterprise edition)
+Neo4j OK: Cypher 5 ( edition)
 Both databases are reachable.
 ```
+
+Neo4j shows **two lines** because, in recent versions, the version query
+returns two components: the database engine (*Neo4j Kernel*) and the query
+language version (*Cypher 5*). The second has no edition, which is why the
+brackets are empty. It isn't an error.
 
 **How the script works, in short:**
 

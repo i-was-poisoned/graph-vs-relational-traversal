@@ -2135,13 +2135,21 @@ déjà rempli :
 ./run.sh scripts/check_connections.py
 ```
 
-**Si tout va bien**, vous verrez quelque chose comme :
+**Si tout va bien**, vous verrez quelque chose comme ceci (c'est la
+sortie réelle de ce projet) :
 
 ```
-PostgreSQL OK: PostgreSQL 18.6 on x86_64-windows, ...
+PostgreSQL OK: PostgreSQL 18.6 on x86_64-windows, compiled by msvc-19.44.35229, 64-bit
 Neo4j OK: Neo4j Kernel 2026.10.0 (enterprise edition)
+Neo4j OK: Cypher 5 ( edition)
 Both databases are reachable.
 ```
+
+Neo4j affiche **deux lignes** car, dans ses versions récentes, la requête
+de version renvoie deux composants : le moteur de la base de données
+(*Neo4j Kernel*) et la version du langage de requêtes (*Cypher 5*). Ce
+second n'a pas d'édition, d'où les parenthèses vides. Ce n'est pas une
+erreur.
 
 **Comment fonctionne le script, en bref :**
 
