@@ -1226,3 +1226,213 @@ volumen y la conectividad, luego perfilar la forma del payload y localizar
 referencias a un segundo actor, antes de pasar a extraer y cargar
 realmente los registros en los modelos relacional y de grafo que se están
 comparando.
+
+
+## Instalación del software (PostgreSQL, Neo4j y los conectores de Python)
+
+Con el esquema mínimo decidido (tablas `actor`, `repo` y `actor_repo` en
+la base de datos relacional; nodos `Actor` y `Repo` con una arista entre
+ellos en la de grafo), el siguiente paso es instalar las dos bases de datos
+y lo necesario para que Python hable con ellas.
+
+### Antes de empezar
+
+**Qué vamos a instalar** (todo gratuito):
+
+| Software | Para qué sirve | Coste |
+|---|---|---|
+| **PostgreSQL** (con **pgAdmin**) | La base de datos relacional. pgAdmin es una interfaz gráfica para verla y hacer consultas | Gratis, software libre |
+| **Neo4j Desktop** | Gestiona bases de datos de grafo Neo4j en tu ordenador, con interfaz gráfica | Gratis para uso local de desarrollo |
+| **`psycopg`** (paquete de Python) | El conector para que Python se comunique con PostgreSQL | Gratis |
+| **`neo4j`** (paquete de Python) | El conector oficial para que Python se comunique con Neo4j | Gratis |
+
+**Las dos bases de datos van en el mismo ordenador.** Así ninguna tiene
+ventaja por estar en otra máquina o detrás de una red: es parte de
+controlarlo todo salvo lo que se mide (ver la sección sobre qué es un
+benchmark).
+
+**Si usas un portátil de empresa:** instalar software puede necesitar
+permiso de IT o estar limitado por las políticas de la empresa.
+Compruébalo antes de empezar.
+
+**Las contraseñas nunca van al repositorio.** Durante la instalación
+elegirás dos contraseñas: una para PostgreSQL y otra para Neo4j. Guárdalas
+en un gestor de contraseñas. No las escribas en el código, en estas notas
+ni en ningún archivo que se suba a GitHub. Más abajo se explica cómo
+pasárselas a Python de forma segura.
+
+### Paso 1: instalar PostgreSQL
+
+1. **Descargar el instalador.** Ve a
+   <https://www.postgresql.org/download/windows/> y pulsa *Download the
+   installer*. Elige la **versión más reciente** para **Windows x86-64**.
+2. **Ejecutar el instalador** y aceptar las opciones por defecto, con
+   estos detalles:
+   - **Componentes:** deja marcados *PostgreSQL Server*, *pgAdmin 4* y
+     *Command Line Tools*. *Stack Builder* no hace falta (puedes
+     desmarcarlo).
+   - **Contraseña:** te pedirá una contraseña para el superusuario
+     `postgres`. Elígela y guárdala en tu gestor de contraseñas.
+   - **Puerto:** deja el que viene, **5432**.
+   - **Locale:** deja el que viene por defecto.
+   - Al terminar, si te ofrece abrir *Stack Builder*, desmárcalo.
+3. **Añadir `psql` al PATH** (para poder usarlo desde Git Bash). `psql` es
+   el programa de línea de comandos de PostgreSQL. El instalador no lo
+   añade al PATH, así que:
+   - Busca en Windows *"Editar las variables de entorno de esta cuenta"*.
+   - En *Path*, pulsa *Editar* → *Nuevo* y añade
+     `C:\Program Files\PostgreSQL\<versión>\bin` (cambia `<versión>` por
+     el número de carpeta que se haya creado, por ejemplo `18`).
+   - Cierra y vuelve a abrir Git Bash para que lo vea.
+   - Si prefieres no tocar el PATH, puedes usar *SQL Shell (psql)* desde el
+     menú Inicio, que hace lo mismo.
+4. **Comprobar que funciona:**
+
+   ```bash
+   psql -U postgres -c "SELECT version();"
+   ```
+
+   Te pedirá la contraseña de `postgres` y debería mostrar la versión
+   instalada.
+5. **Crear la base de datos del proyecto:**
+
+   ```bash
+   psql -U postgres -c "CREATE DATABASE gharchive;"
+   psql -U postgres -d gharchive -c "SELECT 1;"
+   ```
+
+   El segundo comando comprueba que puedes conectarte a la base nueva:
+   debería mostrar una pequeña tabla con un `1`.
+
+PostgreSQL se instala como un **servicio de Windows**: arranca solo al
+encender el ordenador y se queda funcionando en segundo plano. Si quieres
+pararlo cuando no lo uses, busca *Servicios* en Windows y detén el
+servicio `postgresql-x64-<versión>`.
+
+### Paso 2: instalar Neo4j Desktop
+
+1. **Descargar Neo4j Desktop.** Ve a <https://neo4j.com/download/>. Te
+   pedirá algunos datos en un formulario antes de la descarga. Si en la
+   página aparece una **clave de activación**, cópiala: Neo4j Desktop te la
+   pedirá la primera vez que lo abras.
+2. **Instalarlo y abrirlo.**
+3. **Crear una base de datos local** (Neo4j Desktop la llama *instance* o
+   *DBMS*, según la versión):
+   - **Nombre:** `gharchive`.
+   - **Versión:** la más reciente que ofrezca.
+   - **Contraseña:** elige una para el usuario `neo4j` y guárdala en tu
+     gestor de contraseñas.
+4. **Arrancarla** con el botón *Start*. Neo4j escucha en dos puertos:
+   - **7474**, para el navegador (Neo4j Browser);
+   - **7687**, para los programas, entre ellos Python (protocolo *Bolt*).
+5. **Comprobar que funciona.** Abre Neo4j Browser (botón *Open*, o
+   <http://localhost:7474> en el navegador), conéctate con el usuario
+   `neo4j` y tu contraseña, y ejecuta:
+
+   ```cypher
+   RETURN 1;
+   ```
+
+   Debería devolver `1`.
+
+A diferencia de PostgreSQL, la base de datos de Neo4j **solo funciona
+mientras esté arrancada** en Neo4j Desktop. Antes de trabajar con ella,
+abre Neo4j Desktop y comprueba que está en marcha.
+
+### Paso 3: preparar Python
+
+1. **Crear un entorno virtual.** Un entorno virtual es una carpeta
+   (`.venv`) con una copia de Python solo para este proyecto. Lo que
+   instales dentro no afecta al resto del ordenador, y cada proyecto puede
+   tener sus propias versiones de paquetes. La carpeta `.venv` ya está en
+   el `.gitignore`, así que no se sube a GitHub.
+
+   ```bash
+   cd /c/dev/Research
+   python -m venv .venv
+   source .venv/Scripts/activate
+   ```
+
+   Cuando el entorno está activo, la línea de Git Bash empieza por
+   `(.venv)`. Hay que activarlo (la última línea) cada vez que abras una
+   terminal nueva para trabajar en el proyecto.
+2. **Instalar los dos conectores:**
+
+   ```bash
+   python -m pip install "psycopg[binary]" neo4j
+   ```
+
+   `psycopg[binary]` incluye todo lo necesario para conectarse a
+   PostgreSQL sin instalar nada más.
+3. **Anotar las dependencias.** Crea en la raíz del proyecto un archivo
+   `requirements.txt` con estas dos líneas:
+
+   ```
+   psycopg[binary]
+   neo4j
+   ```
+
+   Así cualquiera (o tú en otro ordenador) puede instalar lo mismo con
+   `python -m pip install -r requirements.txt`. Este archivo **sí** se sube
+   a GitHub.
+
+### Paso 4: pasar las contraseñas a Python sin escribirlas en el código
+
+Las contraseñas se guardan en **variables de entorno**: valores que viven
+en la terminal mientras está abierta, fuera de cualquier archivo. En Git
+Bash:
+
+```bash
+export PGPASSWORD='la-contraseña-de-postgres'
+export NEO4J_PASSWORD='la-contraseña-de-neo4j'
+```
+
+- `PGPASSWORD` es un nombre estándar: PostgreSQL (y `psycopg`) lo leen
+  automáticamente, así que ni siquiera hay que mencionarlo en el código.
+- `NEO4J_PASSWORD` lo leeremos nosotros desde Python con
+  `os.environ["NEO4J_PASSWORD"]`.
+- Estas variables desaparecen al cerrar la terminal. Hay que volver a
+  definirlas cada vez, igual que se activa el entorno virtual.
+
+### Paso 5: comprobar que Python llega a las dos bases de datos
+
+Con el entorno virtual activo, las dos bases de datos en marcha y las
+variables de entorno definidas, este código debería mostrar la versión de
+PostgreSQL y un `1` de Neo4j:
+
+```python
+import os
+
+import psycopg
+from neo4j import GraphDatabase
+
+# PostgreSQL: la contraseña se lee sola de PGPASSWORD
+with psycopg.connect(host="localhost", dbname="gharchive", user="postgres") as conn:
+    print(conn.execute("SELECT version();").fetchone()[0])
+
+# Neo4j: la contraseña se lee de NEO4J_PASSWORD
+driver = GraphDatabase.driver("neo4j://localhost:7687",
+                              auth=("neo4j", os.environ["NEO4J_PASSWORD"]))
+with driver.session() as session:
+    print(session.run("RETURN 1 AS ok").single()["ok"])
+driver.close()
+```
+
+Este código se puede guardar como `scripts/check_connections.py` y
+ejecutarse con `python scripts/check_connections.py`.
+
+### Lista de comprobación
+
+| Comprobación | Cómo | Resultado esperado |
+|---|---|---|
+| PostgreSQL instalado | `psql -U postgres -c "SELECT version();"` | La versión de PostgreSQL |
+| Base `gharchive` creada | `psql -U postgres -d gharchive -c "SELECT 1;"` | Una tabla con un `1` |
+| Neo4j en marcha | `RETURN 1;` en Neo4j Browser | `1` |
+| Entorno virtual activo | La línea de Git Bash empieza por `(.venv)` | — |
+| Conectores instalados | `python -m pip show psycopg neo4j` | Información de los dos paquetes |
+| Python llega a las dos | `python scripts/check_connections.py` | La versión de PostgreSQL y un `1` |
+
+**Anota las versiones instaladas** (de PostgreSQL, de Neo4j y de los dos
+paquetes de Python). Forman parte de las condiciones del benchmark: para
+que alguien pueda repetir el experimento, tiene que saber con qué versiones
+se hizo.
