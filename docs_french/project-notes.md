@@ -1450,7 +1450,8 @@ et d'exécuter des requêtes.
 4. **La démarrer** avec le bouton *Start*. Neo4j écoute sur deux ports :
    - **7474**, pour le navigateur (Neo4j Browser) ;
    - **7687**, pour les programmes, dont Python (le protocole *Bolt*).
-5. **Vérifier que cela fonctionne.** Ouvrez Neo4j Browser (bouton *Open*,
+5. **Vérifier que cela fonctionne** (vérification rapide ; la complète
+   est dans la partie suivante). Ouvrez Neo4j Browser (bouton *Open*,
    ou <http://localhost:7474> dans votre navigateur), connectez-vous avec
    l'utilisateur `neo4j` et votre mot de passe, et exécutez :
 
@@ -1464,43 +1465,355 @@ Contrairement à PostgreSQL, la base Neo4j **ne fonctionne que tant qu'elle
 est démarrée** dans Neo4j Desktop. Avant de travailler avec, ouvrez Neo4j
 Desktop et vérifiez qu'elle est en marche.
 
-### Étape 3 : préparer Python
+### Vérifier que Neo4j fonctionne depuis l'interface
 
-1. **Créer un environnement virtuel.** Un environnement virtuel est un
-   dossier (`.venv`) contenant une copie de Python rien que pour ce projet.
-   Ce que vous y installez n'affecte pas le reste de l'ordinateur, et
-   chaque projet peut avoir ses propres versions de paquets. Le dossier
-   `.venv` est déjà dans le `.gitignore`, il n'est donc pas envoyé sur
-   GitHub.
+Neo4j se manipule presque toujours avec une interface graphique, donc pour
+le vérifier **Git Bash n'est pas nécessaire**. Il y a deux outils
+visuels :
 
-   ```bash
-   cd /c/dev/Research
-   python -m venv .venv
-   source .venv/Scripts/activate
+| Outil | À quoi il sert | Équivalent dans PostgreSQL |
+|---|---|---|
+| **Neo4j Desktop** | Créer, démarrer et arrêter les bases de données | Le panneau **Servers** de pgAdmin |
+| **Neo4j Browser** | Écrire des requêtes et voir les résultats, même dessinés sous forme de nœuds et d'arêtes | Le **Query Tool** de pgAdmin |
+
+**Pas à pas :**
+
+1. **Ouvrir Neo4j Desktop** et trouver la base de données `gharchive`.
+   Selon la version de Desktop, elle apparaît dans la liste des
+   *Instances* ou dans un *Project*.
+
+   ✅ **Première vérification :** son état indique **Running** ou
+   **Active** (en général avec un point vert). Si elle indique *Stopped*,
+   cliquez sur **Start** et attendez quelques secondes.
+2. **Ouvrir Neo4j Browser :** cliquez sur **Open** (ou *Query*, selon la
+   version) à côté de la base, ou allez sur <http://localhost:7474> dans
+   votre navigateur. S'il demande de se connecter :
+   - **Connect URL :** `neo4j://localhost:7687`
+   - **Username :** `neo4j`
+   - **Password :** celui choisi à la création de la base
+
+   ✅ **Deuxième vérification :** la connexion est acceptée et une barre
+   pour taper des requêtes apparaît en haut, avec l'invite `neo4j$`.
+3. **Vérifier la version.** Tapez ceci dans la barre du haut et appuyez sur
+   **Ctrl + Entrée** (ou le bouton ▶) :
+
+   ```cypher
+   CALL dbms.components() YIELD name, versions, edition
+   RETURN name, versions, edition;
    ```
 
-   Quand l'environnement est actif, la ligne de Git Bash commence par
-   `(.venv)`. Il faut l'activer (la dernière ligne) chaque fois que vous
-   ouvrez un nouveau terminal pour travailler sur le projet.
-2. **Installer les deux connecteurs :**
+   ✅ **Troisième vérification :** une ligne apparaît avec
+   `Neo4j Kernel`, le numéro de version et l'édition.
+4. **Essayer d'écrire et de lire**, pour confirmer qu'elle peut vraiment
+   enregistrer des données :
 
-   ```bash
-   python -m pip install "psycopg[binary]" neo4j
+   ```cypher
+   CREATE (p:Test {message: "bonjour"}) RETURN p;
    ```
 
-   `psycopg[binary]` contient tout le nécessaire pour se connecter à
-   PostgreSQL sans rien installer d'autre.
-3. **Noter les dépendances.** À la racine du projet, créez un fichier
-   `requirements.txt` avec ces deux lignes :
+   ✅ **Quatrième vérification :** un **cercle** apparaît dans le
+   résultat : c'est un nœud, dans la vue graphe de Neo4j. Si vous cliquez
+   dessus, vous verrez sa propriété `message: "bonjour"`.
 
-   ```
-   psycopg[binary]
-   neo4j
+   Supprimez-le ensuite, pour laisser la base vide :
+
+   ```cypher
+   MATCH (p:Test) DELETE p;
    ```
 
-   Ainsi, n'importe qui (ou vous, sur un autre ordinateur) peut installer
-   la même chose avec `python -m pip install -r requirements.txt`. Ce
-   fichier, lui, **est** envoyé sur GitHub.
+   Cela devrait afficher *Deleted 1 node*.
+
+**Le nom de la base de données.** Dans Neo4j Desktop, `gharchive` est le
+nom de l'**instance** (le « serveur »). À l'intérieur, la base de données
+dans laquelle on travaille s'appelle **`neo4j`** : c'est celle fournie par
+défaut, et c'est celle que nous utiliserons. Inutile d'en créer une
+autre ; le `neo4j$` de la barre de requêtes indique justement que vous y
+êtes.
+
+**Si quelque chose ne va pas :**
+
+| Problème | Cause probable | Solution |
+|---|---|---|
+| La base ne passe pas à *Running* | Un autre programme utilise le port 7474 ou 7687 | Lisez le message d'erreur dans Desktop ; fermez l'autre programme ou changez le port dans la configuration |
+| *Authentication failure* | Mauvais mot de passe | Utilisez celui choisi à la **création de la base** dans Neo4j Desktop (pas celui de PostgreSQL) |
+| Neo4j Browser ne se connecte pas | La base est arrêtée | Revenez dans Desktop et cliquez sur **Start** |
+| La vue graphe n'affiche rien | La requête ne renvoie aucun nœud | C'est normal pour des requêtes comme `RETURN 1` ; essayez celle du point 4 |
+
+**Et depuis le terminal ?** Neo4j fournit **`cypher-shell`**, l'équivalent
+de `psql`, et Neo4j Desktop peut ouvrir un terminal déjà prêt à l'utiliser.
+Pour ce projet, Neo4j Browser suffit.
+
+### Point d'étape : les deux bases de données sont prêtes
+
+À ce stade, les deux bases de données du projet sont **installées,
+démarrées et vérifiées** :
+
+| Base de données | Où on la gère | Ce qu'elle contient maintenant | Comment on l'a vérifiée |
+|---|---|---|---|
+| **PostgreSQL** (relationnelle) | pgAdmin 4 ou `psql` | La base `gharchive`, vide : pas encore de tables | Connexion acceptée, version visible et `SELECT 1;` dans `gharchive` |
+| **Neo4j** (graphe) | Neo4j Desktop et Neo4j Browser | L'instance `gharchive`, avec sa base `neo4j` vide : pas encore de nœuds | État *Running*, connexion acceptée, version visible et test d'écriture et de lecture |
+
+Les deux sont **vides exprès**. Les tables (`actor`, `repo`, `actor_repo`)
+et les nœuds (`Actor`, `Repo`) seront créés plus tard, depuis des scripts
+Python, à partir des mêmes fichiers de données pour les deux côtés. Pour
+cela, il faut d'abord préparer l'endroit où ces scripts vont fonctionner :
+un petit environnement Python propre au projet.
+
+### Étape 3 : préparer Python (un environnement virtuel pour le projet)
+
+#### 3.1 Le problème que résout un environnement virtuel
+
+Jusqu'ici, les scripts du projet (`download_gharchive.py`, `peek_data.py`,
+`summarize_data.py`, `profile_schema.py`) n'utilisaient que la
+**bibliothèque standard** de Python : des modules comme `json`, `argparse`
+ou `collections`, fournis avec Python. C'est pour cela qu'ils
+fonctionnaient sans rien installer.
+
+Désormais, Python doit communiquer avec PostgreSQL et Neo4j, et pour cela
+il a besoin de deux **paquets externes**, qui ne sont pas fournis avec
+Python et qu'il faut installer : `psycopg` et `neo4j`. La question est
+*où* les installer.
+
+Si on les installe « dans le Python de l'ordinateur » (l'installation
+générale, partagée par tous les projets), trois problèmes apparaissent :
+
+1. **Des conflits entre projets.** Si un autre projet a besoin d'une
+   version différente du même paquet, une seule peut être installée à la
+   fois, et l'un des deux projets ne marche plus.
+2. **On ne sait plus ce dont le projet a besoin.** Avec le temps,
+   l'installation générale accumule des paquets de nombreux projets, et on
+   ne sait plus lesquels sont nécessaires à celui-ci.
+3. **Ce n'est pas reproductible.** Pour refaire l'expérience sur un autre
+   ordinateur, il faut savoir exactement quels paquets et quelles versions
+   ont été utilisés. Dans un benchmark, cela fait partie des conditions de
+   l'expérience, tout comme les versions des bases de données.
+
+Un **environnement virtuel** résout les trois : c'est un **Python isolé
+rien que pour ce projet**, avec ses propres paquets.
+
+#### 3.2 Ce qu'est, concrètement, un environnement virtuel
+
+C'est simplement un **dossier** dans le projet, que nous appellerons
+`.venv`. Il contient :
+
+```
+.venv/
+├── Scripts/
+│   ├── python.exe        ← un Python qui n'utilise que les paquets de .venv
+│   ├── pip.exe           ← l'installateur de paquets de cet environnement
+│   └── activate          ← le script qui « active » l'environnement dans Git Bash
+└── Lib/
+    └── site-packages/    ← là où sont rangés les paquets installés
+```
+
+Une analogie : le Python général de l'ordinateur est la **cuisine commune**
+d'une colocation, où chacun laisse ses affaires et où tout finit par se
+mélanger. L'environnement virtuel est **une boîte à votre nom** dans cette
+cuisine : ce que vous y mettez n'est qu'à vous, vous savez exactement ce
+qu'il y a dedans, et si un jour vous voulez repartir de zéro, vous jetez la
+boîte et en faites une autre.
+
+Quelques détails importants :
+
+- **Il ne contient pas une copie complète de Python.** Il utilise le
+  Python 3.14 déjà installé, mais avec son propre dossier de paquets.
+- **Il ne contient pas votre code.** Les scripts restent dans `scripts/`,
+  comme toujours ; l'environnement fournit seulement le Python et les
+  paquets avec lesquels ils s'exécutent.
+- **Il n'est pas envoyé sur GitHub.** Le dossier `.venv` est déjà dans le
+  `.gitignore`. Ce qui est envoyé, c'est la *liste* des paquets
+  (`requirements.txt`, au point 3.6), pour que n'importe qui puisse
+  recréer l'environnement.
+- **On peut le supprimer sans crainte.** Si quelque chose ne va pas, on
+  supprime le dossier `.venv` et on le recrée en une minute.
+
+#### 3.3 Créer l'environnement (une seule fois)
+
+```bash
+cd /c/dev/Research
+python -m venv .venv
+```
+
+- `cd /c/dev/Research` vous place dans le dossier du projet.
+  L'environnement est créé dans le dossier où vous vous trouvez.
+- `python -m venv .venv` signifie : « Python, exécute ton module `venv` et
+  crée un environnement virtuel dans un dossier appelé `.venv` ». Le point
+  au début du nom est une convention : sur beaucoup de systèmes, les
+  dossiers qui commencent par un point sont considérés comme des dossiers
+  « de configuration ».
+
+Cela prend quelques secondes et n'affiche rien si tout va bien. Vous pouvez
+vérifier qu'il a été créé avec `ls -a`, qui devrait lister `.venv` parmi
+les dossiers.
+
+**Cela ne se fait qu'une fois.** L'environnement reste enregistré dans le
+dossier et sert pour toujours (ou jusqu'à ce que vous le supprimiez).
+
+#### 3.4 Activer l'environnement (à chaque fois que vous ouvrez un terminal)
+
+```bash
+source .venv/Scripts/activate
+```
+
+**Ce que fait « activer » :** cela change, dans ce terminal seulement, le
+Python désigné par le mot `python`. Avant l'activation, `python` est le
+Python général de l'ordinateur ; après, c'est celui de `.venv`. Même chose
+pour `pip`. Ainsi, tout ce que vous installez ou exécutez va dans
+l'environnement du projet.
+
+**Comment savoir qu'il est actif :**
+
+- La ligne de Git Bash commence par `(.venv)` :
+
+  ```
+  (.venv) NB30006@LT301102 MINGW64 /c/dev/Research (main)
+  ```
+
+- Et cette commande affiche le chemin du Python utilisé, qui doit se
+  trouver dans `.venv` :
+
+  ```bash
+  which python
+  # → /c/dev/Research/.venv/Scripts/python
+  ```
+
+**L'activation ne dure que le temps du terminal.** Si vous fermez Git Bash
+et en ouvrez un autre, l'environnement n'est plus actif et il faut relancer
+`source .venv/Scripts/activate`. L'environnement existe toujours (le
+dossier n'est pas supprimé) ; il faut juste « y rentrer » à nouveau.
+
+**Désactiver :** pour revenir au Python général sans fermer le terminal,
+tapez `deactivate`.
+
+**Si vous utilisez un autre terminal** (la commande dépend du type) :
+
+| Terminal | Commande pour activer |
+|---|---|
+| Git Bash | `source .venv/Scripts/activate` |
+| PowerShell | `.venv\Scripts\Activate.ps1` |
+| Invite de commandes (CMD) | `.venv\Scripts\activate.bat` |
+
+Dans PowerShell, Windows peut bloquer l'activation à cause de sa politique
+d'exécution des scripts, et sur un ordinateur d'entreprise vous n'aurez
+peut-être pas le droit de la modifier. Cela n'arrive pas avec Git Bash,
+qui est donc l'option recommandée.
+
+#### 3.5 Faire utiliser l'environnement par VS Code
+
+VS Code doit aussi savoir quel Python utiliser, pour que son terminal et sa
+détection d'erreurs travaillent avec les paquets de l'environnement :
+
+1. Ouvrez le dossier `c:\dev\Research` dans VS Code.
+2. Appuyez sur **Ctrl + Maj + P**, tapez **Python: Select Interpreter** et
+   choisissez-le.
+3. Dans la liste, choisissez celui dont le chemin est
+   `.\.venv\Scripts\python.exe` (il est en général marqué *Recommended*).
+
+À partir de là, les nouveaux terminaux ouverts dans VS Code activent en
+général l'environnement tout seuls : vous verrez `(.venv)` au début de la
+ligne. S'il n'apparaît pas, activez-le à la main avec la commande du
+point 3.4.
+
+#### 3.6 Installer les paquets du projet
+
+Avec l'environnement **actif** (vérifiez le `(.venv)`) :
+
+```bash
+python -m pip install "psycopg[binary]" neo4j
+```
+
+Ce que signifie chaque partie :
+
+- `python -m pip` utilise le `pip` du Python actif, c'est-à-dire celui de
+  l'environnement. C'est plus sûr que de taper seulement `pip`, car cela
+  garantit que les paquets vont dans le même Python que celui qui
+  exécutera les scripts.
+- `install` télécharge les paquets depuis **PyPI** (le dépôt public de
+  paquets Python) et les range dans `.venv/Lib/site-packages`.
+- `psycopg` est le connecteur pour **PostgreSQL**. Le `[binary]` est un
+  *extra* : il demande la version qui inclut déjà les éléments compilés
+  nécessaires, pour ne rien avoir à installer d'autre sous Windows. Il est
+  entre guillemets car Git Bash pourrait sinon interpréter les crochets.
+- `neo4j` est le connecteur officiel pour **Neo4j**.
+
+`pip` installe aussi automatiquement les **dépendances** de ces paquets
+(d'autres paquets dont ils ont besoin) ; vous verrez donc plus de noms dans
+la sortie que ceux que vous avez demandés. C'est normal.
+
+**Noter les dépendances.** À la racine du projet, créez un fichier
+`requirements.txt` avec ces deux lignes :
+
+```
+psycopg[binary]
+neo4j
+```
+
+C'est la « liste de courses » du projet : elle indique les paquets dont il
+a besoin. Ce fichier, lui, **est** envoyé sur GitHub. Sur un autre
+ordinateur (ou si un jour vous recréez l'environnement), il suffit de :
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Pour le benchmark, il faut aussi connaître les **versions exactes**. Cette
+commande les affiche toutes, dépendances comprises :
+
+```bash
+python -m pip freeze
+```
+
+Notez celles de `psycopg` et `neo4j` avec les versions de PostgreSQL et de
+Neo4j : ensemble, elles forment les conditions techniques de l'expérience.
+
+#### 3.7 Vérifier que l'environnement est correct
+
+```bash
+python -m pip list
+```
+
+devrait afficher `psycopg`, `psycopg-binary` et `neo4j` (entre autres). Et
+cette commande confirme que Python peut les **importer** et affiche leurs
+versions :
+
+```bash
+python -c "import psycopg, neo4j; print('psycopg', psycopg.__version__); print('neo4j', neo4j.__version__)"
+```
+
+Si les deux versions s'affichent, l'environnement est prêt.
+
+#### 3.8 Si quelque chose ne va pas
+
+| Problème | Cause probable | Solution |
+|---|---|---|
+| `bash: .venv/Scripts/activate: No such file or directory` | Vous n'êtes pas dans le dossier du projet, ou l'environnement n'a pas été créé | Lancez `cd /c/dev/Research` et vérifiez avec `ls -a` que `.venv` existe ; sinon, créez-le (point 3.3) |
+| `ModuleNotFoundError: No module named 'psycopg'` (ou `'neo4j'`) | L'environnement n'est pas actif, ou les paquets ont été installés dans un autre Python | Activez l'environnement (point 3.4), vérifiez avec `which python`, et réinstallez (point 3.6) |
+| Pas de `(.venv)` dans VS Code | VS Code n'utilise pas l'environnement | Choisissez l'interpréteur de `.venv` (point 3.5) et ouvrez un nouveau terminal |
+| PowerShell refuse d'activer l'environnement | La politique d'exécution des scripts de Windows | Utilisez Git Bash (point 3.4) |
+| L'environnement est abîmé | Des paquets en mauvais état ou mélangés | Désactivez-le (`deactivate`), supprimez le dossier (`rm -rf .venv`) et recommencez au point 3.3 |
+
+#### 3.9 Résumé : la routine de chaque jour
+
+**Une seule fois** (déjà fait si vous avez suivi les points précédents) :
+
+```bash
+cd /c/dev/Research
+python -m venv .venv
+source .venv/Scripts/activate
+python -m pip install -r requirements.txt
+```
+
+**Chaque fois que vous ouvrez un terminal pour travailler sur le projet :**
+
+```bash
+cd /c/dev/Research
+source .venv/Scripts/activate
+```
+
+Et vérifiez que la ligne commence par `(.venv)` avant de lancer un script.
+Les anciens scripts, qui n'utilisent que la bibliothèque standard,
+fonctionnent de la même façon dans l'environnement ; vous pouvez donc
+toujours travailler avec lui actif.
 
 ### Étape 4 : transmettre les mots de passe à Python sans les écrire dans le code
 
