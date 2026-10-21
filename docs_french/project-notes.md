@@ -2438,3 +2438,67 @@ L'explication ligne par ligne se trouve dans la
 `csv`, les tuples dans des ensembles et des dictionnaires, comment garder
 la valeur la plus récente pendant la lecture, et pourquoi la sortie est
 triée.
+
+### Nouveau concept : les tuples, et comment ils se combinent avec les dictionnaires et les ensembles
+
+`extract_csv.py` utilise pour la première fois des **tuples**, et les met
+dans des dictionnaires, des ensembles et un autre tuple. Son annotation de
+type (`tuple[dict[int, tuple[str, str]], ...]`) ressemble à un casse-tête,
+mais ce ne sont que trois petites pièces.
+
+**Ce qu'est un tuple.** Un groupe fixe de valeurs qui vont ensemble, entre
+parenthèses. On peut le voir comme une **fiche à cases** : le nombre de
+cases ne change pas, et chaque case a un sens selon sa **position** :
+
+```python
+fiche = ("2026-08-27T15:35:35Z", "peitongshi")
+fiche[0]    # "2026-08-27T15:35:35Z"  ← la date
+fiche[1]    # "peitongshi"            ← le nom
+```
+
+Cela ressemble à une liste, mais on **ne peut plus le modifier** une fois
+créé.
+
+**Les trois structures du script, avec des données réelles :**
+
+| Structure | Ce que c'est | Exemple | Annotation de type |
+|---|---|---|---|
+| `actors` | Dictionnaire : `id` → fiche *(date, nom)* | `{321725054: ("2026-08-27T15:35:35Z", "peitongshi"), ...}` | `dict[int, tuple[str, str]]` |
+| `repos` | Pareil qu'`actors`, pour les dépôts | `{1348625135: ("...", "peitongshi/niulai-chinese"), ...}` | `dict[int, tuple[str, str]]` |
+| `pairs` | Ensemble de fiches *(actor_id, repo_id)* : **une fiche = une connexion** | `{(321725054, 1348625135), (19, 1310070394), ...}` | `set[tuple[int, int]]` |
+
+- Dans `actors` et `repos`, la **date** est gardée à côté du nom pour
+  pouvoir choisir le nom le plus récent.
+- Dans `pairs`, c'est l'**ensemble** qui empêche de répéter les
+  connexions : si on ajoute dix fois la même fiche, elle n'est gardée
+  qu'une fois.
+- Pourquoi des fiches-tuples et pas des listes dans l'ensemble ? Un
+  ensemble n'accepte que des éléments qui **ne peuvent pas changer** (s'ils
+  changeaient après y être entrés, il ne saurait plus dire s'ils sont en
+  double). Les tuples ne changent pas ; les listes, si. C'est pour cela
+  que `(19, 1310070394)` fonctionne et pas `[19, 1310070394]`.
+
+**La grande fiche.** Une fonction ne peut renvoyer qu'**une** chose. Pour
+en renvoyer quatre, `extract()` les met dans un tuple à quatre cases, et
+`main()` l'ouvre et répartit les cases dans quatre variables :
+
+```python
+return actors, repos, pairs, skipped_bot_events                    # dans extract()
+actors, repos, pairs, skipped_bot_events = extract(args.file)      # dans main()
+```
+
+**L'annotation de type, lue morceau par morceau :**
+
+```python
+-> tuple[                               # renvoie une fiche à 4 cases :
+    dict[int, tuple[str, str]],         #   1. actors : id → (date, nom)
+    dict[int, tuple[str, str]],         #   2. repos :  id → (date, nom)
+    set[tuple[int, int]],               #   3. pairs :  ensemble de (actor_id, repo_id)
+    int,                                #   4. skipped_bot_events : un nombre
+]
+```
+
+En résumé : il n'y a que **deux sortes de petites fiches**, *(date, nom)*
+et *(acteur, dépôt)*, et **une grande fiche** qui regroupe les quatre
+choses pour les renvoyer ensemble. La [copie annotée](extract_csv.py)
+contient le même schéma juste au-dessus d'`extract()`.

@@ -131,16 +131,64 @@ def remember_latest(names: dict[int, tuple[str, str]], key: int, created_at: str
 # ---------------------------------------------------------------------
 # def extract(file_path) -> tuple[...]:
 #
-# Lee el archivo una vez y devuelve CUATRO cosas a la vez, empaquetadas
-# en una tupla (main() las desempaqueta en cuatro variables):
+# Lee el archivo una vez y devuelve CUATRO cosas a la vez. La anotación
+# de tipo parece un trabalenguas, pero son solo dos tipos de TUPLA
+# pequeña y una grande. Vamos de dentro afuera, con datos reales.
 #
-#   actors   diccionario  id -> (created_at, login)
-#   repos    diccionario  id -> (created_at, name)
-#   pairs    conjunto     de tuplas (actor_id, repo_id)
-#   skipped_bot_events  int
+# 1. QUÉ ES UNA TUPLA
+#    Un grupo fijo de valores que van juntos, entre paréntesis. Piénsala
+#    como una FICHA CON CASILLAS: el número de casillas no cambia, y cada
+#    casilla significa algo por su POSICIÓN. [0] lee la primera casilla,
+#    [1] la segunda:
 #
-# La larga anotación de tipo `-> tuple[...]` solo describe esos cuatro
-# tipos.
+#        ficha = ("2026-08-27T15:35:35Z", "peitongshi")
+#        ficha[0]   # "2026-08-27T15:35:35Z"  <- la fecha
+#        ficha[1]   # "peitongshi"            <- el nombre
+#
+#    Se parece a una lista, pero NO se puede cambiar después de crearla.
+#
+# 2. LAS DOS FICHAS PEQUEÑAS
+#    (fecha, nombre)       se usa en actors y repos
+#    (actor_id, repo_id)   se usa en pairs = UNA conexión
+#
+# 3. DÓNDE VAN
+#    actors: un diccionario cuyos VALORES son fichas (fecha, nombre)
+#        actors = {321725054: ("2026-08-27T15:35:35Z", "peitongshi"),
+#                  19:        ("2026-08-27T15:02:11Z", "brynary"), ...}
+#        -> dict[int, tuple[str, str]]  "número -> ficha de dos textos"
+#    repos: exactamente igual, con repos.
+#    pairs: un CONJUNTO de fichas (actor_id, repo_id)
+#        pairs = {(321725054, 1348625135), (19, 1310070394), ...}
+#        -> set[tuple[int, int]]  "conjunto de fichas de dos números"
+#
+# 4. LA FICHA GRANDE: LO QUE DEVUELVE extract()
+#    Una función solo puede devolver UNA cosa. Para devolver cuatro, se
+#    meten en una ficha de CUATRO casillas:
+#
+#        return actors, repos, pairs, skipped_bot_events
+#
+#    y main() la abre y reparte las cuatro casillas en cuatro variables:
+#
+#        actors, repos, pairs, skipped_bot_events = extract(args.file)
+#
+# EL DIBUJO COMPLETO
+#
+#    extract() devuelve UNA tupla de 4 casillas:
+#    |-- casilla 1: actors   diccionario   321725054 -> ("2026-08-27T15:35:35Z", "peitongshi")
+#    |                                                   '-- ficha pequeña: fecha, nombre --'
+#    |-- casilla 2: repos    diccionario   (igual que actors, con repos)
+#    |-- casilla 3: pairs    conjunto      {(321725054, 1348625135), (19, 1310070394), ...}
+#    |                                       '-- ficha pequeña: actor, repo = 1 conexión --'
+#    '-- casilla 4: skipped_bot_events     un número: 1970
+#
+# LA ANOTACIÓN DE TIPO, LEÍDA POR PARTES
+#
+#    -> tuple[                          una ficha de 4 casillas:
+#        dict[int, tuple[str, str]],      1. actors: id -> (fecha, nombre)
+#        dict[int, tuple[str, str]],      2. repos:  id -> (fecha, nombre)
+#        set[tuple[int, int]],            3. pairs:  conjunto de (actor_id, repo_id)
+#        int,                             4. skipped_bot_events: un número
+#    ]
 # ---------------------------------------------------------------------
 def extract(file_path: Path) -> tuple[dict[int, tuple[str, str]], dict[int, tuple[str, str]], set[tuple[int, int]], int]:
     actors: dict[int, tuple[str, str]] = {}

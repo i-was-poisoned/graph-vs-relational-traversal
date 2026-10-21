@@ -126,15 +126,64 @@ def remember_latest(names: dict[int, tuple[str, str]], key: int, created_at: str
 # ---------------------------------------------------------------------
 # def extract(file_path) -> tuple[...]:
 #
-# Reads the file once and returns FOUR things at the same time, packed in
-# a tuple (main() unpacks them into four variables):
+# Reads the file once and returns FOUR things at the same time. The type
+# hint looks like a tongue-twister, but it's only two small kinds of
+# TUPLE plus one big one. Let's go from the inside out, with real data.
 #
-#   actors   dict  id -> (created_at, login)
-#   repos    dict  id -> (created_at, name)
-#   pairs    set   of (actor_id, repo_id) tuples
-#   skipped_bot_events  int
+# 1. WHAT A TUPLE IS
+#    A fixed group of values that belong together, in brackets. Think of
+#    a CARD WITH BOXES: the number of boxes never changes, and each box
+#    means something by its POSITION. [0] reads the first box, [1] the
+#    second:
 #
-# The long `-> tuple[...]` type hint just describes those four types.
+#        card = ("2026-08-27T15:35:35Z", "peitongshi")
+#        card[0]   # "2026-08-27T15:35:35Z"  <- the time
+#        card[1]   # "peitongshi"            <- the name
+#
+#    Like a list, but it can NEVER be changed once created.
+#
+# 2. THE TWO SMALL CARDS
+#    (time, name)          used in actors and repos
+#    (actor_id, repo_id)   used in pairs = ONE connection
+#
+# 3. WHERE THEY GO
+#    actors: a dict whose VALUES are (time, name) cards
+#        actors = {321725054: ("2026-08-27T15:35:35Z", "peitongshi"),
+#                  19:        ("2026-08-27T15:02:11Z", "brynary"), ...}
+#        -> dict[int, tuple[str, str]]  "number -> card of two texts"
+#    repos: exactly the same, for repos.
+#    pairs: a SET of (actor_id, repo_id) cards
+#        pairs = {(321725054, 1348625135), (19, 1310070394), ...}
+#        -> set[tuple[int, int]]  "set of cards of two numbers"
+#
+# 4. THE BIG CARD: WHAT extract() RETURNS
+#    A function can only return ONE thing. To return four, they're put in
+#    a card with FOUR boxes:
+#
+#        return actors, repos, pairs, skipped_bot_events
+#
+#    and main() opens it and spreads the four boxes into four variables:
+#
+#        actors, repos, pairs, skipped_bot_events = extract(args.file)
+#
+# THE WHOLE PICTURE
+#
+#    extract() returns ONE tuple with 4 boxes:
+#    |-- box 1: actors   dict   321725054 -> ("2026-08-27T15:35:35Z", "peitongshi")
+#    |                                        '---- small card: time, name ----'
+#    |-- box 2: repos    dict   (same as actors, for repos)
+#    |-- box 3: pairs    set    {(321725054, 1348625135), (19, 1310070394), ...}
+#    |                            '-- small card: actor, repo = 1 connection --'
+#    '-- box 4: skipped_bot_events   a number: 1970
+#
+# THE TYPE HINT, READ PIECE BY PIECE
+#
+#    -> tuple[                          a card with 4 boxes:
+#        dict[int, tuple[str, str]],      1. actors: id -> (time, name)
+#        dict[int, tuple[str, str]],      2. repos:  id -> (time, name)
+#        set[tuple[int, int]],            3. pairs:  set of (actor_id, repo_id)
+#        int,                             4. skipped_bot_events: a number
+#    ]
 # ---------------------------------------------------------------------
 def extract(file_path: Path) -> tuple[dict[int, tuple[str, str]], dict[int, tuple[str, str]], set[tuple[int, int]], int]:
     actors: dict[int, tuple[str, str]] = {}

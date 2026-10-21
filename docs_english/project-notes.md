@@ -2271,3 +2271,64 @@ folder.
 The line-by-line explanation is in the [annotated copy](extract_csv.py).
 New in this script: the `csv` module, tuples inside sets and dicts, keeping
 the most recent value while reading, and why the output is sorted.
+
+### New concept: tuples, and how they combine with dicts and sets
+
+`extract_csv.py` uses **tuples** for the first time, and puts them inside
+dicts, sets and another tuple. Its type hint
+(`tuple[dict[int, tuple[str, str]], ...]`) looks like a tongue-twister, but
+it's only three small pieces.
+
+**What a tuple is.** A fixed group of values that belong together, in
+brackets. Think of it as a **card with boxes**: the number of boxes never
+changes, and each box means something by its **position**:
+
+```python
+card = ("2026-08-27T15:35:35Z", "peitongshi")
+card[0]    # "2026-08-27T15:35:35Z"  ← the time
+card[1]    # "peitongshi"            ← the name
+```
+
+It's like a list, but it **can't be changed** once created.
+
+**The script's three structures, with real data:**
+
+| Structure | What it is | Example | Type hint |
+|---|---|---|---|
+| `actors` | Dict: `id` → *(time, name)* card | `{321725054: ("2026-08-27T15:35:35Z", "peitongshi"), ...}` | `dict[int, tuple[str, str]]` |
+| `repos` | Same as `actors`, for repos | `{1348625135: ("...", "peitongshi/niulai-chinese"), ...}` | `dict[int, tuple[str, str]]` |
+| `pairs` | Set of *(actor_id, repo_id)* cards: **one card = one connection** | `{(321725054, 1348625135), (19, 1310070394), ...}` | `set[tuple[int, int]]` |
+
+- In `actors` and `repos`, the **time** is kept next to the name so the
+  most recent name can be chosen.
+- In `pairs`, the **set** is what stops connections from repeating: if the
+  same card is added ten times, it's kept only once.
+- Why tuple-cards and not lists inside the set? A set only accepts items
+  that **can't change** (if they changed after going in, it couldn't tell
+  whether they're duplicates). Tuples don't change; lists do. That's why
+  `(19, 1310070394)` works and `[19, 1310070394]` doesn't.
+
+**The big card.** A function can only return **one** thing. To return
+four, `extract()` puts them in a four-box tuple, and `main()` opens it and
+spreads the boxes into four variables:
+
+```python
+return actors, repos, pairs, skipped_bot_events                    # in extract()
+actors, repos, pairs, skipped_bot_events = extract(args.file)      # in main()
+```
+
+**The type hint, read piece by piece:**
+
+```python
+-> tuple[                               # returns a card with 4 boxes:
+    dict[int, tuple[str, str]],         #   1. actors: id → (time, name)
+    dict[int, tuple[str, str]],         #   2. repos:  id → (time, name)
+    set[tuple[int, int]],               #   3. pairs:  set of (actor_id, repo_id)
+    int,                                #   4. skipped_bot_events: a number
+]
+```
+
+In short: there are only **two kinds of small card**, *(time, name)* and
+*(actor, repo)*, and **one big card** that groups the four things so they
+can be returned together. The [annotated copy](extract_csv.py) has the same
+picture right above `extract()`.

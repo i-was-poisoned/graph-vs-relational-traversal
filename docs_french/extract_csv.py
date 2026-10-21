@@ -132,16 +132,67 @@ def remember_latest(names: dict[int, tuple[str, str]], key: int, created_at: str
 # ---------------------------------------------------------------------
 # def extract(file_path) -> tuple[...]:
 #
-# Lit le fichier une seule fois et renvoie QUATRE choses en même temps,
-# regroupées dans un tuple (main() les décompose en quatre variables) :
+# Lit le fichier une fois et renvoie QUATRE choses à la fois.
+# L'annotation de type ressemble à un casse-tête, mais ce ne sont que
+# deux sortes de petits TUPLES et un grand. Allons de l'intérieur vers
+# l'extérieur, avec des données réelles.
 #
-#   actors   dict  id -> (created_at, login)
-#   repos    dict  id -> (created_at, name)
-#   pairs    set   de tuples (actor_id, repo_id)
-#   skipped_bot_events  int
+# 1. CE QU'EST UN TUPLE
+#    Un groupe fixe de valeurs qui vont ensemble, entre parenthèses.
+#    Voyez-le comme une FICHE À CASES : le nombre de cases ne change pas,
+#    et chaque case a un sens selon sa POSITION. [0] lit la première
+#    case, [1] la deuxième :
 #
-# La longue annotation de type `-> tuple[...]` décrit simplement ces
-# quatre types.
+#        fiche = ("2026-08-27T15:35:35Z", "peitongshi")
+#        fiche[0]   # "2026-08-27T15:35:35Z"  <- la date
+#        fiche[1]   # "peitongshi"            <- le nom
+#
+#    Cela ressemble à une liste, mais on ne peut PLUS le modifier une
+#    fois créé.
+#
+# 2. LES DEUX PETITES FICHES
+#    (date, nom)           utilisée dans actors et repos
+#    (actor_id, repo_id)   utilisée dans pairs = UNE connexion
+#
+# 3. OÙ ELLES VONT
+#    actors : un dictionnaire dont les VALEURS sont des fiches (date, nom)
+#        actors = {321725054: ("2026-08-27T15:35:35Z", "peitongshi"),
+#                  19:        ("2026-08-27T15:02:11Z", "brynary"), ...}
+#        -> dict[int, tuple[str, str]]  « nombre -> fiche de deux textes »
+#    repos : exactement pareil, pour les dépôts.
+#    pairs : un ENSEMBLE de fiches (actor_id, repo_id)
+#        pairs = {(321725054, 1348625135), (19, 1310070394), ...}
+#        -> set[tuple[int, int]]  « ensemble de fiches de deux nombres »
+#
+# 4. LA GRANDE FICHE : CE QUE RENVOIE extract()
+#    Une fonction ne peut renvoyer qu'UNE chose. Pour en renvoyer quatre,
+#    on les met dans une fiche à QUATRE cases :
+#
+#        return actors, repos, pairs, skipped_bot_events
+#
+#    et main() l'ouvre et répartit les quatre cases dans quatre
+#    variables :
+#
+#        actors, repos, pairs, skipped_bot_events = extract(args.file)
+#
+# LE SCHÉMA COMPLET
+#
+#    extract() renvoie UN tuple à 4 cases :
+#    |-- case 1 : actors   dictionnaire   321725054 -> ("2026-08-27T15:35:35Z", "peitongshi")
+#    |                                                  '-- petite fiche : date, nom --'
+#    |-- case 2 : repos    dictionnaire   (pareil qu'actors, pour les dépôts)
+#    |-- case 3 : pairs    ensemble       {(321725054, 1348625135), (19, 1310070394), ...}
+#    |                                      '-- petite fiche : acteur, dépôt = 1 connexion --'
+#    '-- case 4 : skipped_bot_events      un nombre : 1970
+#
+# L'ANNOTATION DE TYPE, LUE MORCEAU PAR MORCEAU
+#
+#    -> tuple[                          une fiche à 4 cases :
+#        dict[int, tuple[str, str]],      1. actors : id -> (date, nom)
+#        dict[int, tuple[str, str]],      2. repos :  id -> (date, nom)
+#        set[tuple[int, int]],            3. pairs :  ensemble de (actor_id, repo_id)
+#        int,                             4. skipped_bot_events : un nombre
+#    ]
 # ---------------------------------------------------------------------
 def extract(file_path: Path) -> tuple[dict[int, tuple[str, str]], dict[int, tuple[str, str]], set[tuple[int, int]], int]:
     actors: dict[int, tuple[str, str]] = {}

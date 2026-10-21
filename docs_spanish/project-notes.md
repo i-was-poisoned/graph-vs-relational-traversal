@@ -2348,3 +2348,64 @@ La explicación línea a línea está en la
 [copia anotada](extract_csv.py). Lo nuevo en este script: el módulo `csv`,
 las tuplas dentro de conjuntos y diccionarios, cómo quedarse con el valor
 más reciente mientras se lee, y por qué se ordena la salida.
+
+### Concepto nuevo: las tuplas, y cómo se combinan con diccionarios y conjuntos
+
+`extract_csv.py` usa por primera vez **tuplas**, y además metidas dentro
+de diccionarios, de conjuntos y de otra tupla. Su anotación de tipo
+(`tuple[dict[int, tuple[str, str]], ...]`) parece un trabalenguas, pero
+son solo tres piezas pequeñas.
+
+**Qué es una tupla.** Un grupo fijo de valores que van juntos, entre
+paréntesis. Se puede pensar como una **ficha con casillas**: el número de
+casillas no cambia, y cada casilla significa algo por su **posición**:
+
+```python
+ficha = ("2026-08-27T15:35:35Z", "peitongshi")
+ficha[0]    # "2026-08-27T15:35:35Z"  ← la fecha
+ficha[1]    # "peitongshi"            ← el nombre
+```
+
+Se parece a una lista, pero **no se puede cambiar** después de crearla.
+
+**Las tres estructuras del script, con datos reales:**
+
+| Estructura | Qué es | Ejemplo | Anotación de tipo |
+|---|---|---|---|
+| `actors` | Diccionario: `id` → ficha *(fecha, nombre)* | `{321725054: ("2026-08-27T15:35:35Z", "peitongshi"), ...}` | `dict[int, tuple[str, str]]` |
+| `repos` | Igual que `actors`, con repos | `{1348625135: ("...", "peitongshi/niulai-chinese"), ...}` | `dict[int, tuple[str, str]]` |
+| `pairs` | Conjunto de fichas *(actor_id, repo_id)*: **una ficha = una conexión** | `{(321725054, 1348625135), (19, 1310070394), ...}` | `set[tuple[int, int]]` |
+
+- En `actors` y `repos` se guarda la **fecha** junto al nombre para poder
+  quedarse con el nombre más reciente.
+- En `pairs`, el **conjunto** es lo que impide repetir conexiones: si se
+  añade diez veces la misma ficha, se guarda una sola vez.
+- ¿Por qué fichas-tupla y no listas dentro del conjunto? Un conjunto solo
+  acepta elementos que **no pueden cambiar** (si cambiaran después de
+  entrar, ya no podría saber si están repetidos). Las tuplas no cambian;
+  las listas sí. Por eso `(19, 1310070394)` vale y `[19, 1310070394]` no.
+
+**La ficha grande.** Una función solo puede devolver **una** cosa. Para
+devolver cuatro, `extract()` las mete en una tupla de cuatro casillas, y
+`main()` la abre y reparte las casillas en cuatro variables:
+
+```python
+return actors, repos, pairs, skipped_bot_events                    # en extract()
+actors, repos, pairs, skipped_bot_events = extract(args.file)      # en main()
+```
+
+**La anotación de tipo, leída por partes:**
+
+```python
+-> tuple[                               # devuelve una ficha de 4 casillas:
+    dict[int, tuple[str, str]],         #   1. actors: id → (fecha, nombre)
+    dict[int, tuple[str, str]],         #   2. repos:  id → (fecha, nombre)
+    set[tuple[int, int]],               #   3. pairs:  conjunto de (actor_id, repo_id)
+    int,                                #   4. skipped_bot_events: un número
+]
+```
+
+En resumen: solo hay **dos tipos de ficha pequeña**, *(fecha, nombre)* y
+*(actor, repo)*, y **una ficha grande** que agrupa las cuatro cosas para
+devolverlas juntas. La [copia anotada](extract_csv.py) tiene el mismo
+dibujo justo encima de `extract()`.
