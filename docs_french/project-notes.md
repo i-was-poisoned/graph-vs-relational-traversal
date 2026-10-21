@@ -2292,3 +2292,149 @@ Desktop.
 paquets Python). Elles font partie des conditions du benchmark : pour que
 quelqu'un puisse refaire l'expérience, il doit savoir avec quelles
 versions elle a été faite.
+
+
+## Étape d'extraction (extract_csv.py)
+
+Avec les deux bases de données installées et vérifiées, l'étape suivante
+est de les remplir. Avant de charger quoi que ce soit, il faut préparer les
+données qu'elles vont recevoir.
+
+### Deux décisions prises avant de commencer
+
+1. **Les deux bases de données s'appellent `gharchive` :** la base
+   PostgreSQL et, dans l'instance Neo4j, la base `gharchive` (pas la base
+   `neo4j` fournie par défaut). Ainsi, on sait toujours où se trouvent les
+   données du projet, des deux côtés.
+2. **Une seule connexion par paire acteur–dépôt, sans répétition.** Si ana
+   fait 10 push vers le même dépôt, la table des connexions contient **une
+   seule ligne** avec l'`id` d'ana et celui du dépôt. Ce qui compte pour
+   parcourir le graphe, c'est *si* ana est reliée à ce dépôt, pas *combien
+   de fois*. Cette décision s'applique de la même façon des deux côtés
+   (voir le principe de conception « la requête d'abord »).
+
+### Pourquoi une étape d'extraction à part : une seule source pour les deux côtés
+
+Le travail se répartit en trois scripts :
+
+| Script | Ce qu'il fait |
+|---|---|
+| `extract_csv.py` (celui-ci) | Lit le JSON **une seule fois** et écrit trois fichiers CSV |
+| `load_postgres.py` (suivant) | Charge ces CSV dans PostgreSQL |
+| `load_neo4j.py` (suivant) | Charge **les mêmes** CSV dans Neo4j |
+
+L'extraction est à part parce que c'est elle qui garantit une comparaison
+équitable : **les deux bases sont chargées à partir des mêmes fichiers**,
+donc aucune ne peut se retrouver avec des données différentes de l'autre.
+Si chaque chargement lisait le JSON de son côté, la moindre différence
+entre les deux scripts (un autre filtre de bots, un cas particulier traité
+autrement) changerait les données d'un seul côté.
+
+### Ce qu'est un fichier CSV
+
+**CSV** (*comma-separated values*, « valeurs séparées par des virgules »)
+est un tableau en texte brut : chaque ligne est une ligne du tableau, les
+virgules séparent les colonnes, et la première ligne (l'**en-tête**) donne
+le nom des colonnes :
+
+```
+id,login
+19,brynary
+452,yrashk
+```
+
+C'est le format le plus simple pour faire passer des tableaux d'un
+programme à l'autre, et PostgreSQL (avec `COPY`) comme Neo4j (avec
+`LOAD CSV`) le chargent directement.
+
+### Les trois fichiers
+
+| Fichier | Colonnes | Une ligne par | Deviendra |
+|---|---|---|---|
+| `actors.csv` | `id`, `login` | acteur | la table `actor` / les nœuds `:Actor` |
+| `repos.csv` | `id`, `name` | dépôt | la table `repo` / les nœuds `:Repo` |
+| `actor_repo.csv` | `actor_id`, `repo_id` | paire acteur–dépôt, sans répétition | la table `actor_repo` / les arêtes entre `:Actor` et `:Repo` |
+
+Ils sont enregistrés dans `data/csv/`. Comme tout ce qui se trouve dans
+`data/`, ils **ne sont pas envoyés sur GitHub** (`data/` est dans le
+`.gitignore`) : on peut les régénérer à tout moment en relançant le script.
+
+### Ce que fait le script
+
+1. **Il lit chaque événement** du fichier JSON, une ligne à la fois.
+2. **Il écarte les bots** (logins qui finissent par `[bot]`), avec la même
+   règle que `summarize_data.py`.
+3. **Il garde chaque acteur et chaque dépôt une seule fois, par son
+   `id`**, avec son nom le plus récent (voir plus bas).
+4. **Il garde chaque paire `(actor_id, repo_id)` dans un ensemble
+   (`set`)**. Un ensemble n'accepte pas de doublons ; la même paire
+   ajoutée dix fois n'est donc gardée qu'une fois : c'est ainsi qu'on
+   respecte la décision de ne pas répéter les connexions.
+5. **Il écrit les trois CSV triés par `id`**, pour que le même JSON
+   produise toujours exactement les mêmes fichiers.
+
+### Ce que l'on a trouvé dans les données : pourquoi les `id` et pas les noms
+
+Avant d'écrire le script, on a vérifié si un `id` apparaissait avec plus
+d'un nom. Cela arrive dans trois cas, et un même nom apparaît avec deux
+`id` :
+
+| Cas | Ce qui se passe | Ce que fait le script |
+|---|---|---|
+| Acteur `321725054` | A changé de login pendant cette heure : `lucky521-png` → `peitongshi` | Une seule ligne, avec le nom le plus récent : `peitongshi` |
+| Dépôt `1348625135` | Renommé en même temps que son propriétaire : `lucky521-png/niulai-chinese` → `peitongshi/niulai-chinese` | Une seule ligne : `peitongshi/niulai-chinese` |
+| Dépôt `1348068959` | Renommé : `xuange520/HyperArmor` → `xuange520/HyperArmor-skill` | Une seule ligne : `xuange520/HyperArmor-skill` |
+| Login `Copilot` | Deux comptes différents avec le même nom (`175728472` et `198982749`) | Deux lignes, une par `id` |
+
+Si on utilisait les noms comme clés, le premier cas compterait pour deux
+personnes, chaque dépôt renommé pour deux dépôts, et les deux comptes
+`Copilot` seraient fusionnés en un seul. Avec les `id`, les quatre cas sont
+traités correctement. Pour la même raison, **le `login` ne peut pas être
+unique** dans la table `actor` : deux lignes peuvent le partager.
+
+### Comment le lancer
+
+```bash
+./run.sh scripts/extract_csv.py
+```
+
+(Ce script n'utilise ni les bases de données ni les mots de passe ;
+`python scripts/extract_csv.py` avec l'environnement virtuel actif
+fonctionne donc aussi. Passer par `run.sh` est le plus simple : toujours
+pareil.)
+
+Résultat pour l'heure fixe du projet :
+
+```
+Skipped 1970 bot events. Writing to C:\dev\Research\data\csv:
+  actors.csv         14515 rows
+  repos.csv          14995 rows
+  actor_repo.csv     15053 rows
+```
+
+### Ce que disent ces chiffres
+
+- **Les acteurs (14 515) et les dépôts (14 995) correspondent exactement**
+  à l'« analyse sans bots » de `summarize_data.py`. C'est une bonne
+  vérification : les deux scripts appliquent la même règle et arrivent au
+  même résultat.
+- **67 459 événements sans bots deviennent seulement 15 053 connexions.**
+  La plupart des événements sont la même personne qui pousse plusieurs
+  fois vers son propre dépôt ; comme on ne répète pas les connexions, tous
+  ces événements comptent pour un seul. Ce sont les données dont le
+  benchmark a vraiment besoin.
+- **Il y a à peine plus de connexions que d'acteurs** (15 053 contre
+  14 515) : presque chaque acteur est relié à un seul dépôt. C'est la
+  fragmentation déjà vue dans « Résultats de connectivité », maintenant
+  sous forme de données prêtes à charger.
+
+**Vérifications faites :** les chiffres ci-dessus ; les noms les plus
+récents pour les cas particuliers ; les deux lignes `Copilot` ; que lancer
+le script deux fois produit des fichiers **identiques octet par octet** ;
+et que git ignore le dossier `data/csv/`.
+
+L'explication ligne par ligne se trouve dans la
+[copie annotée](extract_csv.py). Nouveautés de ce script : le module
+`csv`, les tuples dans des ensembles et des dictionnaires, comment garder
+la valeur la plus récente pendant la lecture, et pourquoi la sortie est
+triée.

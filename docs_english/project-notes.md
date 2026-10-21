@@ -2135,3 +2135,139 @@ shows the version of the instance you have running in Neo4j Desktop.
 Python packages). They're part of the benchmark's conditions: for someone
 to repeat the experiment, they need to know which versions it was run
 with.
+
+
+## Extraction Stage (extract_csv.py)
+
+With both databases installed and checked, the next step is to fill them.
+Before loading anything, the data they'll receive has to be prepared.
+
+### Two decisions made before starting
+
+1. **Both databases are called `gharchive`:** the PostgreSQL database and,
+   inside the Neo4j instance, the `gharchive` database (not the default
+   `neo4j` one). That way it's always clear where the project's data is,
+   on both sides.
+2. **One connection per actor–repo pair, no repeats.** If ana pushes 10
+   times to the same repo, the connections table has **a single row** with
+   ana's `id` and the repo's. What matters for walking the graph is
+   *whether* ana is connected to that repo, not *how many times*. This
+   decision applies identically on both sides (see the "query-first" design
+   principle).
+
+### Why a separate extraction step: one source for both sides
+
+The work is split across three scripts:
+
+| Script | What it does |
+|---|---|
+| `extract_csv.py` (this one) | Reads the JSON **once** and writes three CSV files |
+| `load_postgres.py` (next) | Loads those CSVs into PostgreSQL |
+| `load_neo4j.py` (next) | Loads **the same** CSVs into Neo4j |
+
+Extraction is separate because it's what guarantees a fair comparison:
+**both databases are loaded from the same files**, so neither can end up
+with different data from the other. If each load read the JSON on its own,
+any difference between the two scripts (a different bot filter, an edge
+case handled another way) would change the data on one side only.
+
+### What a CSV file is
+
+**CSV** (*comma-separated values*) is a table in plain text: each line is a
+row, commas separate the columns, and the first line (the **header**) gives
+the column names:
+
+```
+id,login
+19,brynary
+452,yrashk
+```
+
+It's the simplest format for passing tables between programs, and both
+PostgreSQL (with `COPY`) and Neo4j (with `LOAD CSV`) load it directly.
+
+### The three files
+
+| File | Columns | One row per | Will become |
+|---|---|---|---|
+| `actors.csv` | `id`, `login` | actor | the `actor` table / the `:Actor` nodes |
+| `repos.csv` | `id`, `name` | repo | the `repo` table / the `:Repo` nodes |
+| `actor_repo.csv` | `actor_id`, `repo_id` | actor–repo pair, no repeats | the `actor_repo` table / the edges between `:Actor` and `:Repo` |
+
+They're saved in `data/csv/`. Like everything in `data/`, they **aren't
+pushed to GitHub** (`data/` is in `.gitignore`): they can be regenerated at
+any time by running the script.
+
+### What the script does
+
+1. **Reads each event** from the JSON file, one line at a time.
+2. **Drops bots** (logins ending in `[bot]`), with the same rule as
+   `summarize_data.py`.
+3. **Keeps each actor and each repo once, by `id`**, with its most recent
+   name (see below).
+4. **Keeps each `(actor_id, repo_id)` pair in a `set`**. A set doesn't
+   allow duplicates, so the same pair added ten times is kept only once:
+   that's how the no-repeated-connections decision is enforced.
+5. **Writes the three CSVs sorted by `id`**, so the same JSON always
+   produces exactly the same files.
+
+### What we found in the data: why ids and not names
+
+Before writing the script we checked whether any `id` appeared with more
+than one name. It happens in three cases, and one name appears with two
+`id`s:
+
+| Case | What happens | What the script does |
+|---|---|---|
+| Actor `321725054` | Changed their login during that hour: `lucky521-png` → `peitongshi` | One row, with the most recent name: `peitongshi` |
+| Repo `1348625135` | Renamed along with its owner: `lucky521-png/niulai-chinese` → `peitongshi/niulai-chinese` | One row: `peitongshi/niulai-chinese` |
+| Repo `1348068959` | Renamed: `xuange520/HyperArmor` → `xuange520/HyperArmor-skill` | One row: `xuange520/HyperArmor-skill` |
+| Login `Copilot` | Two different accounts with the same name (`175728472` and `198982749`) | Two rows, one per `id` |
+
+If names were used as keys, the first case would count as two people, the
+renamed repos as two repos each, and the two `Copilot` accounts would be
+merged into one. With `id`s, all four cases come out right. For the same
+reason, **`login` can't be unique** in the `actor` table: two rows can
+share it.
+
+### How to run it
+
+```bash
+./run.sh scripts/extract_csv.py
+```
+
+(This script doesn't use the databases or the passwords, so
+`python scripts/extract_csv.py` with the virtual environment active works
+too. Going through `run.sh` is simplest: always the same.)
+
+Result for the project's fixed hour:
+
+```
+Skipped 1970 bot events. Writing to C:\dev\Research\data\csv:
+  actors.csv         14515 rows
+  repos.csv          14995 rows
+  actor_repo.csv     15053 rows
+```
+
+### What these numbers say
+
+- **The actors (14,515) and repos (14,995) match exactly** the "analysis
+  without bots" from `summarize_data.py`. That's a good check: both
+  scripts apply the same rule and reach the same result.
+- **67,459 non-bot events become only 15,053 connections.** Most events are
+  the same person pushing several times to their own repo; since
+  connections aren't repeated, all those events count as one. That's the
+  data the benchmark actually needs.
+- **There are barely more connections than actors** (15,053 vs 14,515):
+  almost every actor is connected to a single repo. It's the
+  fragmentation already seen in "Connectivity findings", now as data ready
+  to load.
+
+**Checks done:** the numbers above; the most recent names for the special
+cases; the two `Copilot` rows; that running the script twice produces
+**byte-for-byte identical** files; and that git ignores the `data/csv/`
+folder.
+
+The line-by-line explanation is in the [annotated copy](extract_csv.py).
+New in this script: the `csv` module, tuples inside sets and dicts, keeping
+the most recent value while reading, and why the output is sorted.
