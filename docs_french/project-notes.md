@@ -2502,3 +2502,237 @@ En résumé : il n'y a que **deux sortes de petites fiches**, *(date, nom)*
 et *(acteur, dépôt)*, et **une grande fiche** qui regroupe les quatre
 choses pour les renvoyer ensemble. La [copie annotée](extract_csv.py)
 contient le même schéma juste au-dessus d'`extract()`.
+
+
+## Étape de chargement (load_postgres.py et load_neo4j.py)
+
+Avec les trois CSV préparés par `extract_csv.py`, l'étape suivante est de
+**remplir les deux bases de données** avec eux. Deux scripts s'en
+chargent, un par base, qui lisent **exactement les mêmes fichiers** :
+
+| Script | Charge les CSV dans | Avec quel langage |
+|---|---|---|
+| `load_postgres.py` | PostgreSQL, base `gharchive` | SQL |
+| `load_neo4j.py` | Neo4j, base `gharchive` | Cypher |
+
+Ils sont séparés car chaque base de données a son propre langage et sa
+propre façon de charger des données, et pour que, si un chargement échoue,
+on puisse ne refaire que celui-là.
+
+### Ce qui est créé dans chaque base de données
+
+| Concept | PostgreSQL | Neo4j |
+|---|---|---|
+| Acteur | table `actor` (`id` BIGINT, `login` TEXT) | nœuds `:Actor` (`id`, `login`) |
+| Dépôt | table `repo` (`id` BIGINT, `name` TEXT) | nœuds `:Repo` (`id`, `name`) |
+| Connexion | table `actor_repo` (`actor_id`, `repo_id`) | arêtes `(:Actor)-[:INTERACTED_WITH]->(:Repo)` |
+| Identifiant unique | `PRIMARY KEY` sur `actor.id` et `repo.id` | contrainte `UNIQUE` sur `Actor.id` et `Repo.id` |
+| Pas de connexions répétées | `PRIMARY KEY (actor_id, repo_id)` | Garanti par le CSV, qui n'a déjà plus de paires répétées |
+| Les connexions pointent vers quelque chose qui existe | `REFERENCES` (clés étrangères) | Chaque arête est créée en **cherchant** d'abord ses deux nœuds |
+
+Quelques détails :
+
+- **Les `id` sont des nombres des deux côtés :** `BIGINT` dans PostgreSQL
+  et des entiers dans Neo4j. Un CSV est du texte ; `load_neo4j.py`
+  convertit donc les `id` en nombres avant de les envoyer. Si un côté les
+  stockait en texte et l'autre en nombres, les données ne seraient pas
+  vraiment identiques.
+- **`BIGINT` et pas `INTEGER` :** un `INTEGER` va jusqu'à environ 2 100
+  millions, et certains `id` de GitHub dépassent déjà ce chiffre.
+- **Le `login` n'est pas unique**, à cause des deux comptes `Copilot` vus
+  à l'étape d'extraction.
+- **Pourquoi l'arête s'appelle `INTERACTED_WITH`** (« a interagi avec ») et
+  pas quelque chose comme « a contribué à » : les connexions viennent de
+  tous les types d'événements (push, commentaires, étoiles...), et mettre
+  une étoile ou commenter n'est pas contribuer. Un nom neutre est plus
+  exact.
+
+### Les index : les « aides normales » de chaque côté
+
+Un **index**, c'est comme l'index alphabétique à la fin d'un livre : au
+lieu de lire toutes les pages pour trouver un mot, on le cherche dans
+l'index et on va directement à la bonne page. Sans index, une base
+relationnelle devrait lire toute la table à chaque recherche.
+
+Le principe de conception (« la requête d'abord ») a fixé une règle :
+donner à chaque côté **ses aides normales, ni plus ni moins**. Pour
+PostgreSQL, ce sont ces index :
+
+| Index | Comment il est créé | À quoi il sert dans le parcours |
+|---|---|---|
+| `actor.id` | Automatiquement, par la `PRIMARY KEY` | Trouver un acteur par son `id` instantanément |
+| `repo.id` | Automatiquement, par la `PRIMARY KEY` | Trouver un dépôt par son `id` instantanément |
+| `(actor_id, repo_id)` | Automatiquement, par la `PRIMARY KEY` d'`actor_repo` | **Acteur → ses dépôts** : comme `actor_id` vient en premier, il sert à chercher par acteur |
+| `repo_id` | À la main : `CREATE INDEX actor_repo_repo_id_idx` | **Dépôt → ses acteurs** : le sens inverse, que l'index précédent ne couvre pas |
+
+Les deux derniers sont les plus importants. Le parcours du benchmark
+(`acteur → dépôt → acteur → dépôt`) utilise la table `actor_repo` **dans
+les deux sens** à chaque saut : d'un acteur vers ses dépôts, et d'un dépôt
+vers ses acteurs. Chaque sens a besoin de son propre index ; sans celui de
+`repo_id`, chaque saut « en arrière » obligerait à lire toute la table, et
+la comparaison serait injuste pour PostgreSQL.
+
+**Dans Neo4j**, les contraintes d'unicité sur `Actor.id` et `Repo.id`
+créent leur index, comme les clés primaires. Les arêtes, elles, **n'ont pas
+besoin d'index** : dans un graphe, chaque nœud garde déjà des liens directs
+vers ses propres arêtes (*index-free adjacency*, « adjacence sans index »).
+Cette différence — des index pour joindre des tables contre des liens
+directs entre nœuds — est exactement ce que le benchmark veut mesurer.
+
+**`ANALYZE`.** À la fin du chargement, `load_postgres.py` exécute `ANALYZE`
+sur les trois tables. Avant d'exécuter chaque requête, PostgreSQL décide
+*comment* la faire (utiliser un index ou lire toute la table ? quelle
+table d'abord ?), et pour bien décider il utilise des statistiques sur les
+données. Juste après un chargement massif, ces statistiques ne sont pas à
+jour, et `ANALYZE` les rafraîchit. Cela fait aussi partie des aides
+normales du côté relationnel.
+
+### Comment chaque script charge
+
+**`load_postgres.py` :**
+
+1. **Il supprime et recrée les tables** (`DROP TABLE IF EXISTS` et
+   `CREATE TABLE`). Ainsi chaque exécution part de zéro, et le lancer deux
+   fois donne le même résultat. L'ordre compte : `actor_repo` est supprimée
+   en premier et créée en dernier, car elle dépend des deux autres.
+2. **Il charge chaque CSV avec `COPY`**, le mécanisme de **chargement
+   massif** de PostgreSQL : bien plus rapide que d'insérer ligne par ligne,
+   car les données entrent comme un flux continu. Avec
+   `COPY ... FROM STDIN`, Python envoie le contenu du fichier par la
+   connexion ; le serveur n'a donc pas besoin d'accéder à vos fichiers.
+   D'abord `actor` et `repo`, puis `actor_repo`, à cause des clés
+   étrangères.
+3. **Il exécute `ANALYZE`** (voir plus haut).
+4. **Il enregistre tout avec `COMMIT`.** Tout ce qui précède forme une
+   seule **transaction** : un groupe de modifications appliquées toutes
+   ensemble ou pas du tout. Si le script échouait en cours de route,
+   PostgreSQL annulerait tout ; un chargement à moitié fait ne peut donc
+   jamais rester.
+5. **Il vérifie les décomptes** : il compte les lignes de chaque table et
+   les compare à celles du CSV.
+
+**`load_neo4j.py` :**
+
+1. **Il lit les trois CSV dans Python** et convertit les `id` en nombres.
+2. **Il vide la base de données** (`MATCH (n) DETACH DELETE n` : supprime
+   chaque nœud avec ses arêtes) et crée les **contraintes d'unicité**, si
+   elles n'existent pas.
+3. **Il crée les nœuds, puis les arêtes, par lots de 5 000 lignes.** Au
+   lieu d'envoyer les 15 053 connexions en une seule énorme requête, il
+   les envoie par morceaux. Chaque lot utilise `UNWIND`, qui transforme la
+   liste en une ligne par élément dans la base elle-même, comme une boucle
+   `for`. Pour chaque arête, Neo4j **cherche** l'acteur et le dépôt par
+   leur `id` (rapide, grâce aux contraintes) et crée l'arête entre eux.
+   C'est pourquoi les nœuds doivent exister avant les arêtes.
+4. **Il vérifie les décomptes** de nœuds et d'arêtes par rapport aux CSV.
+
+Les explications ligne par ligne se trouvent dans les copies annotées :
+[load_postgres.py](load_postgres.py) et [load_neo4j.py](load_neo4j.py).
+
+### Comment les lancer
+
+Avec les deux bases démarrées et après `extract_csv.py` :
+
+```bash
+./run.sh scripts/extract_csv.py      # si les CSV n'existent pas encore
+./run.sh scripts/load_postgres.py
+./run.sh scripts/load_neo4j.py
+```
+
+Les deux passent par `run.sh`, car ils ont besoin des mots de passe.
+
+### Résultat
+
+Les deux chargements ont fonctionné du premier coup, et **les six
+vérifications indiquent OK** :
+
+```
+Rows loaded (database vs. CSV file):
+  actor          14515   actors.csv         14515   OK
+  repo           14995   repos.csv          14995   OK
+  actor_repo     15053   actor_repo.csv     15053   OK
+
+Loaded (database vs. CSV file):
+  Actor nodes              14515   actors.csv         14515   OK
+  Repo nodes               14995   repos.csv          14995   OK
+  INTERACTED_WITH edges    15053   actor_repo.csv     15053   OK
+```
+
+Les deux bases contiennent maintenant **exactement les mêmes données** :
+14 515 acteurs, 14 995 dépôts et 15 053 connexions. C'est la condition
+nécessaire pour commencer à comparer des requêtes.
+
+### Le chronomètre du chargement
+
+Les deux scripts affichent combien de temps prend **chaque étape** et le
+**total du chargement**, mesurés avec `time.perf_counter()` : l'horloge de
+Python faite pour mesurer des durées, la plus précise, et qui n'est pas
+affectée si l'heure de l'ordinateur change.
+
+- **Compté dans le total :** tout ce qui écrit dans la base, de la création
+  ou du vidage jusqu'à l'enregistrement (dans PostgreSQL, le `COMMIT` est
+  fait juste avant d'arrêter l'horloge).
+- **Pas compté :** la connexion, la vérification finale des décomptes et,
+  dans Neo4j, la lecture des CSV dans Python (affichée à part).
+
+**Important : ces temps ne comparent pas les deux bases de données.** Ils
+indiquent combien de temps prend le processus (par exemple, combien
+attendre quand on chargera plus d'heures de données), mais ce **ne sont
+pas des résultats du benchmark**, pour trois raisons :
+
+1. **Chacune charge différemment :** PostgreSQL avec `COPY`, son mécanisme
+   de chargement massif ; Neo4j par lots via le driver, en cherchant les
+   deux nœuds de chaque arête.
+2. **C'est une seule exécution.** Un benchmark sérieux répète chaque mesure
+   plusieurs fois et écarte la première, car au début la base n'a encore
+   rien en mémoire.
+3. **Ce n'est pas la question du projet.** La question de recherche porte
+   sur les **parcours multi-sauts**, pas sur la durée du chargement.
+
+### Voir les données chargées
+
+**Dans pgAdmin 4**, les tables se trouvent dans : **gharchive** →
+**Schemas** → **public** → **Tables**. (`public` est le schéma par défaut :
+une sorte de dossier dans la base où les tables sont créées si on n'en
+indique pas d'autre.) Les **Catalogs** affichés plus haut sont les tables
+internes de PostgreSQL, pas les données du projet.
+
+- Si les tables n'apparaissent pas, c'est qu'elles ont été créées après
+  l'ouverture de pgAdmin : clic droit sur **Tables** → **Refresh**.
+- **Voir les données :** clic droit sur une table → **View/Edit Data** →
+  **First 100 Rows**, ou une requête dans le Query Tool. L'en-tête de la
+  colonne `id` affiche **`[PK] bigint`** : `[PK]` indique que c'est la clé
+  primaire.
+- **Voir les index :** dans chaque table, **Indexes**. `actor_repo` en a
+  deux : `actor_repo_pkey` (celui de la clé primaire) et
+  `actor_repo_repo_id_idx`.
+
+Requêtes utiles dans le Query Tool :
+
+```sql
+-- Combien de lignes contient chaque table
+SELECT (SELECT count(*) FROM actor)      AS actors,
+       (SELECT count(*) FROM repo)       AS repos,
+       (SELECT count(*) FROM actor_repo) AS connections;
+
+-- Les dépôts d'un acteur : un « saut » du parcours
+SELECT a.login, r.name
+FROM actor a
+JOIN actor_repo ar ON ar.actor_id = a.id
+JOIN repo r        ON r.id = ar.repo_id
+WHERE a.login = 'peitongshi';
+```
+
+**Dans Neo4j**, depuis **Query** dans Neo4j Desktop, dans la base
+`gharchive` (avec le sélecteur de base ou `:use gharchive`) :
+
+```cypher
+MATCH (a:Actor {login: 'peitongshi'})-[e:INTERACTED_WITH]->(r:Repo)
+RETURN a, e, r;
+```
+
+Le résultat apparaît **dessiné** : un cercle pour l'acteur, un autre pour
+son dépôt et une flèche entre les deux. C'est la même requête que la
+seconde de PostgreSQL, écrite dans le langage du graphe : en SQL, il faut
+deux `JOIN` pour aller de l'acteur au dépôt en passant par `actor_repo` ;
+en Cypher, la flèche *est* la connexion.

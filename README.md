@@ -42,17 +42,30 @@ Stage) for the full analysis.
 |---|---|---|
 | Actor | table `actor` (`id`, `login`) | node `:Actor` (`id`, `login`) |
 | Repo | table `repo` (`id`, `name`) | node `:Repo` (`id`, `name`) |
-| Connection | table `actor_repo` (`actor_id`, `repo_id`) | edge `(:Actor)-[...]->(:Repo)` |
+| Connection | table `actor_repo` (`actor_id`, `repo_id`) | edge `(:Actor)-[:INTERACTED_WITH]->(:Repo)` |
+| Unique keys / indexes | primary keys on `actor.id`, `repo.id`, `(actor_id, repo_id)`, plus an index on `actor_repo.repo_id` | uniqueness constraints on `Actor.id`, `Repo.id` |
 
+- Both sides use a database called `gharchive`.
 - Keys use GitHub's numeric ids (`event["actor"]["id"]`, `event["repo"]["id"]`),
   not names: a user can change their login, but their id never changes.
-- Bot accounts (logins ending in `[bot]`) will be excluded from the
-  benchmark data, since they act as artificial hubs between unrelated repos.
-- Both databases will be loaded from the same extracted files, and their
-  counts (actors, repos, connections) checked to match before any query is
-  timed.
-- Still to decide (and to be applied identically on both sides): whether a
-  connection is stored once per event or once per actor–repo pair.
+- **One connection per actor–repo pair**, never repeated: ten pushes by the
+  same actor to the same repo are a single connection.
+- Bot accounts (logins ending in `[bot]`) are excluded, since they act as
+  artificial hubs between unrelated repos.
+- Both databases are loaded from the same extracted CSV files, and their
+  counts are checked to match:
+
+| | Actors | Repos | Connections |
+|---|---|---|---|
+| PostgreSQL and Neo4j (2026-08-27, 15:00 UTC, no bots) | 14,515 | 14,995 | 15,053 |
+
+The pipeline that builds them:
+
+```bash
+./run.sh scripts/extract_csv.py      # JSON -> data/csv/{actors,repos,actor_repo}.csv
+./run.sh scripts/load_postgres.py    # CSVs -> PostgreSQL (tables, keys, index, ANALYZE)
+./run.sh scripts/load_neo4j.py       # same CSVs -> Neo4j (nodes, edges, constraints)
+```
 
 ## Tools and versions
 

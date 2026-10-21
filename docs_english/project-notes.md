@@ -2332,3 +2332,228 @@ In short: there are only **two kinds of small card**, *(time, name)* and
 *(actor, repo)*, and **one big card** that groups the four things so they
 can be returned together. The [annotated copy](extract_csv.py) has the same
 picture right above `extract()`.
+
+
+## Loading Stage (load_postgres.py and load_neo4j.py)
+
+With the three CSVs prepared by `extract_csv.py`, the next step is to **fill
+both databases** with them. Two scripts do it, one per database, reading
+**exactly the same files**:
+
+| Script | Loads the CSVs into | In which language |
+|---|---|---|
+| `load_postgres.py` | PostgreSQL, `gharchive` database | SQL |
+| `load_neo4j.py` | Neo4j, `gharchive` database | Cypher |
+
+They're separate because each database has its own language and its own
+way of loading data, and so that if one load fails, just that one can be
+repeated.
+
+### What gets created in each database
+
+| Concept | PostgreSQL | Neo4j |
+|---|---|---|
+| Actor | `actor` table (`id` BIGINT, `login` TEXT) | `:Actor` nodes (`id`, `login`) |
+| Repo | `repo` table (`id` BIGINT, `name` TEXT) | `:Repo` nodes (`id`, `name`) |
+| Connection | `actor_repo` table (`actor_id`, `repo_id`) | `(:Actor)-[:INTERACTED_WITH]->(:Repo)` edges |
+| Unique identifier | `PRIMARY KEY` on `actor.id` and `repo.id` | `UNIQUE` constraint on `Actor.id` and `Repo.id` |
+| No repeated connections | `PRIMARY KEY (actor_id, repo_id)` | Guaranteed by the CSV, which already has no repeated pairs |
+| Connections point at something that exists | `REFERENCES` (foreign keys) | Each edge is created by first **finding** its two nodes |
+
+A few details:
+
+- **Ids are numbers on both sides:** `BIGINT` in PostgreSQL and integers in
+  Neo4j. A CSV is text, so `load_neo4j.py` converts the ids to numbers
+  before sending them. If one side stored them as text and the other as
+  numbers, the data wouldn't be truly identical.
+- **`BIGINT`, not `INTEGER`:** an `INTEGER` goes up to about 2,100 million,
+  and some GitHub ids already go beyond that.
+- **`login` isn't unique**, because of the two `Copilot` accounts seen in
+  the Extraction Stage.
+- **Why the edge is called `INTERACTED_WITH`** and not something like
+  "contributed to": connections come from every kind of event (pushes,
+  comments, stars...), and starring or commenting isn't contributing. A
+  neutral name is more accurate.
+
+### Indexes: each side's "normal aids"
+
+An **index** is like the alphabetical index at the back of a book: instead
+of reading every page to find a word, you look it up and go straight to the
+page. Without indexes, a relational database would have to read the whole
+table on every lookup.
+
+The design principle ("query-first") set a rule: give each side **its
+normal aids, no more and no less**. For PostgreSQL, that means these
+indexes:
+
+| Index | How it's created | What it's for in the walk |
+|---|---|---|
+| `actor.id` | Automatically, by the `PRIMARY KEY` | Finding an actor by id instantly |
+| `repo.id` | Automatically, by the `PRIMARY KEY` | Finding a repo by id instantly |
+| `(actor_id, repo_id)` | Automatically, by `actor_repo`'s `PRIMARY KEY` | **Actor → their repos**: since `actor_id` comes first, it works for looking up by actor |
+| `repo_id` | By hand: `CREATE INDEX actor_repo_repo_id_idx` | **Repo → its actors**: the opposite direction, which the previous index doesn't cover |
+
+The last two are the important ones. The benchmark walk
+(`actor → repo → actor → repo`) uses the `actor_repo` table **in both
+directions** at every hop: from an actor to their repos, and from a repo to
+its actors. Each direction needs its own index; without the `repo_id` one,
+every "backwards" hop would mean reading the whole table, and the
+comparison would be unfair to PostgreSQL.
+
+**In Neo4j**, the uniqueness constraints on `Actor.id` and `Repo.id` build
+their index, just like primary keys. The edges, on the other hand, **don't
+need an index**: in a graph, every node already stores direct links to its
+own edges (*index-free adjacency*). That difference — indexes to join
+tables versus direct links between nodes — is exactly what the benchmark
+wants to measure.
+
+**`ANALYZE`.** At the end of the load, `load_postgres.py` runs `ANALYZE` on
+the three tables. Before running each query, PostgreSQL decides *how* to do
+it (use an index or read the whole table? which table first?), and to
+decide well it uses statistics about the data. Right after a bulk load
+those statistics are out of date, and `ANALYZE` refreshes them. It's also
+part of the relational side's normal aids.
+
+### How each script loads
+
+**`load_postgres.py`:**
+
+1. **Drops and re-creates the tables** (`DROP TABLE IF EXISTS` and
+   `CREATE TABLE`). That way every run starts from scratch, and running it
+   twice gives the same result. Order matters: `actor_repo` is dropped
+   first and created last, because it depends on the other two.
+2. **Loads each CSV with `COPY`**, PostgreSQL's **bulk-loading** mechanism:
+   much faster than inserting row by row, because the data goes in as one
+   continuous stream. With `COPY ... FROM STDIN`, Python sends the file's
+   contents over the connection, so the server doesn't need access to your
+   files. First `actor` and `repo`, then `actor_repo`, because of the
+   foreign keys.
+3. **Runs `ANALYZE`** (see above).
+4. **Saves everything with `COMMIT`.** Everything above forms a single
+   **transaction**: a group of changes that are applied all together or
+   not at all. If the script failed halfway, PostgreSQL would undo
+   everything, so a half-finished load can never be left behind.
+5. **Checks the counts**: counts each table's rows and compares them with
+   the CSV's.
+
+**`load_neo4j.py`:**
+
+1. **Reads the three CSVs into Python** and converts the ids to numbers.
+2. **Empties the database** (`MATCH (n) DETACH DELETE n`: deletes every
+   node along with its edges) and creates the **uniqueness constraints**,
+   if they don't exist.
+3. **Creates the nodes and then the edges, in batches of 5,000 rows.**
+   Instead of sending all 15,053 connections in one huge request, it sends
+   them in parts. Each batch uses `UNWIND`, which turns the list into one
+   row per element inside the database itself, like a `for` loop. For each
+   edge, Neo4j **finds** the actor and the repo by id (fast, thanks to the
+   constraints) and creates the edge between them. That's why the nodes
+   have to exist before the edges.
+4. **Checks the node and edge counts** against the CSVs.
+
+The line-by-line explanations are in the annotated copies:
+[load_postgres.py](load_postgres.py) and [load_neo4j.py](load_neo4j.py).
+
+### How to run them
+
+With both databases running and after `extract_csv.py`:
+
+```bash
+./run.sh scripts/extract_csv.py      # if the CSVs don't exist yet
+./run.sh scripts/load_postgres.py
+./run.sh scripts/load_neo4j.py
+```
+
+Both go through `run.sh`, because they need the passwords.
+
+### Result
+
+Both loads worked first time, and **all six checks say OK**:
+
+```
+Rows loaded (database vs. CSV file):
+  actor          14515   actors.csv         14515   OK
+  repo           14995   repos.csv          14995   OK
+  actor_repo     15053   actor_repo.csv     15053   OK
+
+Loaded (database vs. CSV file):
+  Actor nodes              14515   actors.csv         14515   OK
+  Repo nodes               14995   repos.csv          14995   OK
+  INTERACTED_WITH edges    15053   actor_repo.csv     15053   OK
+```
+
+Both databases now hold **exactly the same data**: 14,515 actors, 14,995
+repos and 15,053 connections. That's the precondition for starting to
+compare queries.
+
+### The load timer
+
+Both scripts show how long **each step** takes and the **total load
+time**, measured with `time.perf_counter()`: Python's clock for measuring
+durations, the most precise one, and unaffected if the computer's time of
+day changes.
+
+- **Included in the total:** everything that writes to the database, from
+  creating or emptying through to saving (in PostgreSQL, the `COMMIT` is
+  done just before stopping the clock).
+- **Not included:** connecting, the final count check and, in Neo4j,
+  reading the CSVs into Python (shown separately).
+
+**Important: these times don't compare the two databases.** They tell you
+how long the process takes (e.g. how long to expect once more hours of data
+are loaded), but they're **not a benchmark result**, for three reasons:
+
+1. **Each one loads differently:** PostgreSQL with `COPY`, its bulk-loading
+   mechanism; Neo4j in batches through the driver, finding both nodes of
+   every edge.
+2. **It's a single run.** A serious benchmark repeats each measurement
+   several times and discards the first, because at first the database has
+   nothing in memory yet.
+3. **It isn't what the project asks.** The research question is about
+   **multi-hop traversals**, not about how long loading takes.
+
+### Seeing the loaded data
+
+**In pgAdmin 4**, the tables are under: **gharchive** → **Schemas** →
+**public** → **Tables**. (`public` is the default schema: a kind of folder
+inside the database where tables are created unless told otherwise.) The
+**Catalogs** further up are PostgreSQL's internal tables, not the project's
+data.
+
+- If the tables don't show up, it's because they were created after pgAdmin
+  was opened: right-click **Tables** → **Refresh**.
+- **Seeing the data:** right-click a table → **View/Edit Data** → **First
+  100 Rows**, or a query in the Query Tool. The `id` column's header shows
+  **`[PK] bigint`**: `[PK]` means it's the primary key.
+- **Seeing the indexes:** inside each table, **Indexes**. `actor_repo` has
+  two: `actor_repo_pkey` (the primary key's) and `actor_repo_repo_id_idx`.
+
+Useful queries in the Query Tool:
+
+```sql
+-- How many rows each table has
+SELECT (SELECT count(*) FROM actor)      AS actors,
+       (SELECT count(*) FROM repo)       AS repos,
+       (SELECT count(*) FROM actor_repo) AS connections;
+
+-- An actor's repos: one "hop" of the walk
+SELECT a.login, r.name
+FROM actor a
+JOIN actor_repo ar ON ar.actor_id = a.id
+JOIN repo r        ON r.id = ar.repo_id
+WHERE a.login = 'peitongshi';
+```
+
+**In Neo4j**, from **Query** in Neo4j Desktop, in the `gharchive` database
+(with the database selector or `:use gharchive`):
+
+```cypher
+MATCH (a:Actor {login: 'peitongshi'})-[e:INTERACTED_WITH]->(r:Repo)
+RETURN a, e, r;
+```
+
+The result is **drawn**: a circle for the actor, another for their repo,
+and an arrow between them. It's the same query as PostgreSQL's second one,
+written in the graph's language: in SQL it takes two `JOIN`s to go from the
+actor to the repo through `actor_repo`; in Cypher, the arrow *is* the
+connection.
