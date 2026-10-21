@@ -28,6 +28,11 @@ def is_bot(login: str) -> bool:
     return login.endswith(BOT_SUFFIX)
 
 
+# Example: the same actor (id 7) renamed from "ana" to "ana-dev"; events arrive out of order.
+#   names = {}
+#   remember_latest(names, 7, "2026-08-27T15:10:00Z", "ana")      # first time  -> {7: ("...15:10...", "ana")}
+#   remember_latest(names, 7, "2026-08-27T15:30:00Z", "ana-dev")  # newer       -> {7: ("...15:30...", "ana-dev")}
+#   remember_latest(names, 7, "2026-08-27T15:20:00Z", "ana")      # older: kept -> {7: ("...15:30...", "ana-dev")}
 def remember_latest(names: dict[int, tuple[str, str]], key: int, created_at: str, name: str) -> None:
     # Keep the name from the most recent event: logins and repo names can change.
     # created_at is ISO 8601 text, so comparing the strings compares the times.
