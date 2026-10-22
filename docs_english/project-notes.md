@@ -2416,35 +2416,143 @@ indexes:
 | `(actor_id, repo_id)` | Automatically, by `actor_repo`'s `PRIMARY KEY` | **Actor → their repos**: since `actor_id` comes first, it works for looking up by actor |
 | `repo_id` | By hand: `CREATE INDEX actor_repo_repo_id_idx` | **Repo → its actors**: the opposite direction, which the previous index doesn't cover |
 
-**The last two are the important ones, and both are needed.** The
-benchmark walk, `actor → repo → actor → repo`, uses the `actor_repo` table
-in **two different directions**, alternating them at every hop:
+**Why the primary key's index doesn't work in both directions, and a
+second index is needed: step by step**
 
-| Hop | Question | Lookup in `actor_repo` | Index that makes it fast |
-|---|---|---|---|
-| actor → repo | "Which repos has **this actor** made events in?" | Rows with `actor_id = X` | `(actor_id, repo_id)`, the primary key's |
-| repo → actor | "Which actors have made events in **this repo**?" | Rows with `repo_id = Y` | `repo_id`, the one created by hand |
+**1. The traversal uses `actor_repo` in two different directions.** The
+benchmark's traversal, `actor → repo → actor → repo`, alternates two
+different questions at each hop:
 
-The second hop goes along the connection **the opposite way** from how it
-was stored: the connection goes from actor to repo (Neo4j's arrow points
-from `Actor` to `Repo`), and here the walk goes from the repo to its
-actors.
+| Hop | Question | Lookup in `actor_repo` |
+|---|---|---|
+| actor → repo | "Which repos has **this actor** made events in?" | The rows with `actor_id = X` |
+| repo → actor | "Which actors have made events in **this repo**?" | The rows with `repo_id = Y` |
 
-**Why one index can't serve both directions.** The primary key's index is
-sorted **by `actor_id` first**, like a phone book sorted by surname.
-Finding all of an actor's rows is fast, because they're together (like all
-the "Smiths" in the phone book). But finding all of a repo's rows with that
-index is like finding everyone called "Ana" in a phone book sorted by
-surname: they're **spread across the whole book**, and you'd have to read
-all of it. That's why a **second index, sorted by `repo_id`**, is needed.
+They're two lookups **by different columns** of the same table. The first
+searches by `actor_id`; the second, by `repo_id`.
 
-**What would happen without it:** at every repo → actor hop, PostgreSQL
-would have to read **the whole** `actor_repo` table (15,053 rows in the
-benchmark), and do it **once for every repo** coming from the previous hop.
-Neo4j doesn't have that problem, because every `Repo` node already knows
-which edges point to it. Measuring like that would compare a PostgreSQL
-without its normal aid against a complete Neo4j: the comparison would be
-**unfair** to PostgreSQL.
+**2. An index is a sorted list, and it's only sorted one way.**
+As explained further down ("What an index is, in more depth"), an index is
+a **sorted** copy of the values, and thanks to that order you can search
+"by halving", in very few steps. The primary key's index,
+`(actor_id, repo_id)`, stores **pairs** sorted **first by
+`actor_id`** and, when the `actor_id` is the same, by `repo_id`. Seen with
+real data from the benchmark, the index looks like this (each line is a
+row of `actor_repo`, in the index's order):
+
+```
+position   actor_id     repo_id
+     1           19     1310070394
+     2           19     1347511170
+   ...
+   384      1247371      444497690   ← LedgerHQ/ledger-live
+   ...
+  1884     33897120      444497690   ← LedgerHQ/ledger-live
+   ...
+  4652    175728472      ...         ← Copilot: its 1st row
+  4653    175728472      ...         ← Copilot
+   ...                                  (24 consecutive rows)
+  4655    175728472      444497690   ← Copilot, in LedgerHQ/ledger-live
+   ...
+  4675    175728472      ...         ← Copilot: its last row
+   ...
+  5653    224024782      444497690   ← LedgerHQ/ledger-live
+   ...
+ 15053          ...      ...
+```
+
+**3. Searching by actor: the rows are together.** For "which repos has
+`Copilot` (`actor_id` 175728472) made events in?", PostgreSQL searches the
+index "by halving" until it reaches that actor's **first** row (number
+4,652) and, from there, **reads straight through** until the `actor_id`
+changes (number 4,675). Since the index is sorted by `actor_id`, all the
+rows of the same actor are **together**: 24 consecutive rows. Going down
+the tree once and reading one continuous chunk: very fast.
+
+**4. Searching by repo: the rows are scattered everywhere.** For
+"which actors have made events in `LedgerHQ/ledger-live` (`repo_id`
+444497690)?", the rows you're after are at positions **384, 1,884,
+4,655 and 5,653**: scattered across the whole table, each one next to other
+repos of its actor. The index is sorted by `actor_id`, **not** by
+`repo_id`, so:
+
+- **you can't search "by halving"**: if you open the index in the middle and
+  find `repo_id` 1347511170, that doesn't tell you whether 444497690 is
+  before or after, because the `repo_id`s don't follow any order along
+  the index;
+- **you don't know when to stop**: even if you find one row of the repo,
+  there may be others anywhere else.
+
+The only way to find them all is to **read all 15,053 rows** and keep
+the ones with that `repo_id`. It's the difference between looking up in a
+phone book everyone with the surname "Smith" (they're together) and
+everyone named "Ana" (they're scattered throughout the book, and you
+have to read the whole thing).
+
+**5. The leftmost-prefix rule.** This is a general rule of
+composite indexes: an index on `(A, B)` works for searching by `A`, or
+by `A` and `B` together, but **not** for searching by `B` alone. It only
+works if the search starts with the index's **first column** (its "leftmost
+prefix"). That's why the order of the columns in a composite index
+matters.
+
+**6. The solution: a second index, sorted by `repo_id`.** The index
+`actor_repo_repo_id_idx` is another sorted list of the same table, this
+time by `repo_id`. In it, the 4 rows of `LedgerHQ/ledger-live` are
+**together**, just as the rows of `Copilot` were together in the first one:
+
+```
+index actor_repo_repo_id_idx (sorted by repo_id)
+   ...
+   444497690   → row with actor_id 1247371     ┐
+   444497690   → row with actor_id 33897120    │ the 4 rows of LedgerHQ/ledger-live,
+   444497690   → row with actor_id 175728472   │ now together
+   444497690   → row with actor_id 224024782   ┘
+   ...
+```
+
+With the two indexes, **each direction of the traversal has its own sorted
+list**, and both hops are equally fast. It's like having two phone
+books for the same city: one sorted by surname and the other by first
+name.
+
+**7. How to see it with your own eyes.** With `EXPLAIN` in front of a
+query, PostgreSQL shows which index it uses:
+
+```sql
+-- An actor's repos: uses the primary key's index
+EXPLAIN SELECT repo_id FROM actor_repo WHERE actor_id = 175728472;
+--   ... Index ... using actor_repo_pkey on actor_repo ...
+
+-- A repo's actors: uses the index created by hand
+EXPLAIN SELECT actor_id FROM actor_repo WHERE repo_id = 444497690;
+--   ... Index ... using actor_repo_repo_id_idx on actor_repo ...
+```
+
+Without the second index, the second query would show `Seq Scan on
+actor_repo`: a sequential scan, that is, reading the whole table.
+
+**8. Why it matters so much in the benchmark.** In a multi-hop
+traversal, the repo → actor lookup isn't done once, but **once for
+each repo** coming from the previous hop. Without the second index, each
+of those lookups would read the whole table: with 100 repos in a hop, that
+would be 100 reads of the 15,053 rows (or of the 424,098 rows of the 24-hour
+pipeline). PostgreSQL would come off far, far worse, but not because the
+relational model is worse, but because **it would be missing a normal aid**
+that any sensible design would have.
+
+**What about Neo4j?** It doesn't have this problem, and it doesn't need an
+index for either direction: each edge is stored **next to its two nodes**,
+so a `Repo` node already knows which edges come into it, just as an `Actor`
+node knows which ones go out of it. Following an edge "forwards" or
+"backwards" costs the same. Giving PostgreSQL its second index is what makes
+the comparison **fair**: each database, with its normal tools.
+
+**Why not a single index on `repo_id`, instead of the primary key's
+one?** Because then the problem would be the reverse: an actor's rows
+would be scattered, and the actor → repo hop would be the slow one. Besides,
+the primary key is needed anyway, to prevent repeated pairs. With one index
+for each direction, both hops are covered.
 
 **In Neo4j**, the uniqueness constraints on `Actor.id` and `Repo.id` build
 their index, just like primary keys. The edges, on the other hand, **don't

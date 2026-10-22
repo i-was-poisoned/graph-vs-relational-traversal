@@ -2496,34 +2496,145 @@ son estos índices:
 | `(actor_id, repo_id)` | Automáticamente, por la `PRIMARY KEY` de `actor_repo` | **Actor → sus repos**: como `actor_id` va primero, sirve para buscar por actor |
 | `repo_id` | A mano: `CREATE INDEX actor_repo_repo_id_idx` | **Repo → sus actores**: el sentido contrario, que el índice anterior no cubre |
 
-**Los dos últimos son los importantes, y hacen falta los dos.** El
-recorrido del benchmark, `actor → repo → actor → repo`, usa la tabla
-`actor_repo` en **dos sentidos distintos**, alternándolos en cada salto:
+**Por qué el índice de la clave primaria no sirve para los dos sentidos, y
+hace falta un segundo índice: paso a paso**
 
-| Salto | Pregunta | Búsqueda en `actor_repo` | Índice que la hace rápida |
-|---|---|---|---|
-| actor → repo | "¿En qué repos ha hecho eventos **este actor**?" | Filas con `actor_id = X` | `(actor_id, repo_id)`, el de la clave primaria |
-| repo → actor | "¿Qué actores han hecho eventos en **este repo**?" | Filas con `repo_id = Y` | `repo_id`, el creado a mano |
+**1. El recorrido usa `actor_repo` en dos sentidos distintos.** El recorrido
+del benchmark, `actor → repo → actor → repo`, alterna dos preguntas
+diferentes en cada salto:
 
-El segundo salto recorre la conexión **al revés** de como se guardó: la
-conexión va de actor a repo (la flecha de Neo4j apunta de `Actor` a
-`Repo`), y aquí se va del repo a sus actores.
+| Salto | Pregunta | Búsqueda en `actor_repo` |
+|---|---|---|
+| actor → repo | "¿En qué repos ha hecho eventos **este actor**?" | Las filas con `actor_id = X` |
+| repo → actor | "¿Qué actores han hecho eventos en **este repo**?" | Las filas con `repo_id = Y` |
 
-**Por qué un solo índice no sirve para los dos sentidos.** El índice de la
-clave primaria está ordenado **primero por `actor_id`**, como una guía
-telefónica ordenada por apellido. Buscar todas las filas de un actor es
-rápido, porque están juntas (como todos los "García" de la guía). Pero
-buscar todas las filas de un repo con ese índice es como buscar a todos los
-que se llaman "Ana" en una guía ordenada por apellido: están **repartidas
-por toda la guía**, y habría que leerla entera. Por eso hace falta un
-**segundo índice, ordenado por `repo_id`**.
+Son dos búsquedas **por columnas distintas** de la misma tabla. La primera
+busca por `actor_id`; la segunda, por `repo_id`.
 
-**Qué pasaría sin él:** en cada salto repo → actor, PostgreSQL tendría que
-leer **toda** la tabla `actor_repo` (15.053 filas en el benchmark), y
-hacerlo **una vez por cada repo** que llega del salto anterior. Neo4j no
-tiene ese problema, porque cada nodo `Repo` ya sabe qué aristas le llegan.
-Medir así sería comparar un PostgreSQL sin su ayuda normal con un Neo4j
-completo: la comparación sería **injusta** para PostgreSQL.
+**2. Un índice es una lista ordenada, y solo está ordenada de una forma.**
+Como se explica más abajo ("Qué es un índice, más a fondo"), un índice es
+una copia **ordenada** de los valores, y gracias a ese orden se puede
+buscar "por la mitad", en muy pocos pasos. El índice de la clave primaria,
+`(actor_id, repo_id)`, guarda **parejas** ordenadas **primero por
+`actor_id`** y, cuando el `actor_id` es igual, por `repo_id`. Visto con
+datos reales del benchmark, el índice se parece a esto (cada línea es una
+fila de `actor_repo`, en el orden del índice):
+
+```
+posición   actor_id     repo_id
+     1           19     1310070394
+     2           19     1347511170
+   ...
+   384      1247371      444497690   ← LedgerHQ/ledger-live
+   ...
+  1884     33897120      444497690   ← LedgerHQ/ledger-live
+   ...
+  4652    175728472      ...         ← Copilot: su 1.ª fila
+  4653    175728472      ...         ← Copilot
+   ...                                  (24 filas seguidas)
+  4655    175728472      444497690   ← Copilot, en LedgerHQ/ledger-live
+   ...
+  4675    175728472      ...         ← Copilot: su última fila
+   ...
+  5653    224024782      444497690   ← LedgerHQ/ledger-live
+   ...
+ 15053          ...      ...
+```
+
+**3. Buscar por actor: las filas están juntas.** Para "¿en qué repos ha
+hecho eventos `Copilot` (`actor_id` 175728472)?", PostgreSQL busca en el
+índice "por la mitad" hasta llegar a la **primera** fila de ese actor (la
+4.652) y, a partir de ahí, **lee seguido** hasta que el `actor_id` cambia
+(la 4.675). Como el índice está ordenado por `actor_id`, todas las filas
+de un mismo actor están **juntas**: son 24 filas consecutivas. Bajar por el
+árbol una vez y leer un trozo seguido: muy rápido.
+
+**4. Buscar por repo: las filas están repartidas por todas partes.** Para
+"¿qué actores han hecho eventos en `LedgerHQ/ledger-live` (`repo_id`
+444497690)?", las filas buscadas están en las posiciones **384, 1.884,
+4.655 y 5.653**: repartidas por toda la tabla, cada una al lado de otros
+repos de su actor. El índice está ordenado por `actor_id`, **no** por
+`repo_id`, así que:
+
+- **no se puede buscar "por la mitad"**: si abres el índice por el medio y
+  encuentras el `repo_id` 1347511170, eso no te dice si el 444497690 está
+  antes o después, porque los `repo_id` no siguen ningún orden a lo largo
+  del índice;
+- **no se sabe cuándo parar**: aunque encuentres una fila del repo, puede
+  haber otras en cualquier otra parte.
+
+La única forma de encontrarlas todas es **leer las 15.053 filas** y quedarse
+con las que tienen ese `repo_id`. Es la diferencia entre buscar en una
+guía telefónica a todos los que se apellidan "García" (están juntos) y a
+todos los que se llaman "Ana" (están repartidos por toda la guía, y hay
+que leerla entera).
+
+**5. La regla del prefijo izquierdo.** Esto es una regla general de los
+índices compuestos: un índice sobre `(A, B)` sirve para buscar por `A`, o
+por `A` y `B` juntos, pero **no** para buscar solo por `B`. Solo sirve si
+la búsqueda empieza por la **primera columna** del índice (su "prefijo
+izquierdo"). Por eso el orden de las columnas de un índice compuesto
+importa.
+
+**6. La solución: un segundo índice, ordenado por `repo_id`.** El índice
+`actor_repo_repo_id_idx` es otra lista ordenada de la misma tabla, esta
+vez por `repo_id`. En él, las 4 filas de `LedgerHQ/ledger-live` están
+**juntas**, igual que estaban juntas las de `Copilot` en el primero:
+
+```
+índice actor_repo_repo_id_idx (ordenado por repo_id)
+   ...
+   444497690   → fila con actor_id 1247371     ┐
+   444497690   → fila con actor_id 33897120    │ las 4 filas de LedgerHQ/ledger-live,
+   444497690   → fila con actor_id 175728472   │ ahora juntas
+   444497690   → fila con actor_id 224024782   ┘
+   ...
+```
+
+Con los dos índices, **cada sentido del recorrido tiene su propia lista
+ordenada**, y los dos saltos son igual de rápidos. Es como tener dos guías
+telefónicas de la misma ciudad: una ordenada por apellido y otra por
+nombre.
+
+**7. Cómo verlo con tus propios ojos.** Con `EXPLAIN` delante de una
+consulta, PostgreSQL muestra qué índice usa:
+
+```sql
+-- Los repos de un actor: usa el índice de la clave primaria
+EXPLAIN SELECT repo_id FROM actor_repo WHERE actor_id = 175728472;
+--   ... Index ... using actor_repo_pkey on actor_repo ...
+
+-- Los actores de un repo: usa el índice creado a mano
+EXPLAIN SELECT actor_id FROM actor_repo WHERE repo_id = 444497690;
+--   ... Index ... using actor_repo_repo_id_idx on actor_repo ...
+```
+
+Sin el segundo índice, la segunda consulta mostraría `Seq Scan on
+actor_repo`: un recorrido secuencial, es decir, leer la tabla entera.
+
+**8. Por qué importa tanto en el benchmark.** En un recorrido de varios
+saltos, la búsqueda repo → actor no se hace una vez, sino **una vez por
+cada repo** que llega del salto anterior. Sin el segundo índice, cada una
+de esas búsquedas leería la tabla entera: con 100 repos en un salto, serían
+100 lecturas de las 15.053 filas (o de las 424.098 de la pipeline de 24
+horas). PostgreSQL saldría muchísimo peor parado, pero no porque el
+modelo relacional sea peor, sino porque **le faltaría una ayuda normal**
+que cualquier diseño sensato tendría.
+
+**¿Y Neo4j?** No tiene este problema, y no necesita un índice para ningún
+sentido: cada arista está guardada **junto a sus dos nodos**, así que un
+nodo `Repo` ya sabe qué aristas le llegan, igual que un nodo `Actor` sabe
+cuáles salen de él. Seguir una arista "hacia delante" o "hacia atrás"
+cuesta lo mismo. Dar a PostgreSQL su segundo índice es lo que hace que la
+comparación sea **justa**: cada base de datos, con sus herramientas
+normales.
+
+**¿Por qué no un solo índice sobre `repo_id`, en lugar del de la clave
+primaria?** Porque entonces el problema sería el contrario: las filas de un
+actor quedarían repartidas, y el salto actor → repo sería el lento. Además,
+la clave primaria hace falta de todas formas, para impedir pares
+repetidos. Con un índice para cada sentido, los dos saltos quedan
+cubiertos.
 
 **En Neo4j**, las restricciones de unicidad sobre `Actor.id` y `Repo.id`
 crean su índice, igual que las claves primarias. Las aristas, en cambio,

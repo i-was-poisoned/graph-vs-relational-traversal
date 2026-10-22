@@ -2593,38 +2593,147 @@ PostgreSQL, ce sont ces index :
 | `(actor_id, repo_id)` | Automatiquement, par la `PRIMARY KEY` d'`actor_repo` | **Acteur → ses dépôts** : comme `actor_id` vient en premier, il sert à chercher par acteur |
 | `repo_id` | À la main : `CREATE INDEX actor_repo_repo_id_idx` | **Dépôt → ses acteurs** : le sens inverse, que l'index précédent ne couvre pas |
 
-**Les deux derniers sont les plus importants, et il faut les deux.** Le
-parcours du benchmark, `acteur → dépôt → acteur → dépôt`, utilise la table
-`actor_repo` dans **deux sens différents**, en les alternant à chaque
-saut :
+**Pourquoi l'index de la clé primaire ne sert pas dans les deux sens, et
+pourquoi il faut un second index : pas à pas**
 
-| Saut | Question | Recherche dans `actor_repo` | Index qui la rend rapide |
-|---|---|---|---|
-| acteur → dépôt | « Dans quels dépôts **cet acteur** a-t-il fait des événements ? » | Lignes avec `actor_id = X` | `(actor_id, repo_id)`, celui de la clé primaire |
-| dépôt → acteur | « Quels acteurs ont fait des événements dans **ce dépôt** ? » | Lignes avec `repo_id = Y` | `repo_id`, celui créé à la main |
+**1. Le parcours utilise `actor_repo` dans deux sens différents.** Le
+parcours du benchmark, `actor → repo → actor → repo`, alterne deux
+questions différentes à chaque saut :
 
-Le second saut parcourt la connexion **dans le sens inverse** de celui où
-elle a été enregistrée : la connexion va de l'acteur au dépôt (la flèche de
-Neo4j pointe d'`Actor` vers `Repo`), et ici on va du dépôt vers ses
-acteurs.
+| Saut | Question | Recherche dans `actor_repo` |
+|---|---|---|
+| actor → repo | « Dans quels dépôts **cet acteur** a-t-il fait des événements ? » | Les lignes avec `actor_id = X` |
+| repo → actor | « Quels acteurs ont fait des événements dans **ce dépôt** ? » | Les lignes avec `repo_id = Y` |
 
-**Pourquoi un seul index ne suffit pas pour les deux sens.** L'index de la
-clé primaire est trié **d'abord par `actor_id`**, comme un annuaire trié
-par nom de famille. Trouver toutes les lignes d'un acteur est rapide, car
-elles sont regroupées (comme tous les « García » de l'annuaire). Mais
-trouver toutes les lignes d'un dépôt avec cet index, c'est comme chercher
-toutes les personnes prénommées « Ana » dans un annuaire trié par nom de
-famille : elles sont **éparpillées dans tout l'annuaire**, et il faudrait
-le lire en entier. C'est pourquoi il faut un **second index, trié par
-`repo_id`**.
+Ce sont deux recherches **par des colonnes différentes** de la même table.
+La première cherche par `actor_id` ; la seconde, par `repo_id`.
 
-**Ce qui se passerait sans lui :** à chaque saut dépôt → acteur, PostgreSQL
-devrait lire **toute** la table `actor_repo` (15 053 lignes dans le
-benchmark), et le faire **une fois pour chaque dépôt** venant du saut
-précédent. Neo4j n'a pas ce problème, car chaque nœud `Repo` sait déjà
-quelles arêtes arrivent jusqu'à lui. Mesurer ainsi reviendrait à comparer
-un PostgreSQL privé de son aide normale à un Neo4j complet : la
-comparaison serait **injuste** pour PostgreSQL.
+**2. Un index est une liste triée, et elle n'est triée que d'une façon.**
+Comme on l'explique plus bas (« Ce qu'est un index, plus en détail »), un
+index est une copie **triée** des valeurs, et grâce à cet ordre on peut
+chercher « par le milieu », en très peu d'étapes. L'index de la clé
+primaire, `(actor_id, repo_id)`, garde des **paires** triées **d'abord par
+`actor_id`** et, quand l'`actor_id` est le même, par `repo_id`. Vu avec
+des données réelles du benchmark, l'index ressemble à ceci (chaque ligne
+est une ligne de `actor_repo`, dans l'ordre de l'index) :
+
+```
+position   actor_id     repo_id
+     1           19     1310070394
+     2           19     1347511170
+   ...
+   384      1247371      444497690   ← LedgerHQ/ledger-live
+   ...
+  1884     33897120      444497690   ← LedgerHQ/ledger-live
+   ...
+  4652    175728472      ...         ← Copilot : sa 1re ligne
+  4653    175728472      ...         ← Copilot
+   ...                                  (24 lignes à la suite)
+  4655    175728472      444497690   ← Copilot, dans LedgerHQ/ledger-live
+   ...
+  4675    175728472      ...         ← Copilot : sa dernière ligne
+   ...
+  5653    224024782      444497690   ← LedgerHQ/ledger-live
+   ...
+ 15053          ...      ...
+```
+
+**3. Chercher par acteur : les lignes sont regroupées.** Pour « dans quels
+dépôts `Copilot` (`actor_id` 175728472) a-t-il fait des événements ? »,
+PostgreSQL cherche dans l'index « par le milieu » jusqu'à arriver à la
+**première** ligne de cet acteur (la 4 652) et, à partir de là, **lit à la
+suite** jusqu'à ce que l'`actor_id` change (la 4 675). Comme l'index est
+trié par `actor_id`, toutes les lignes d'un même acteur sont **regroupées** :
+ce sont 24 lignes consécutives. Descendre dans l'arbre une fois et lire un
+morceau d'un seul tenant : très rapide.
+
+**4. Chercher par dépôt : les lignes sont éparpillées partout.** Pour
+« quels acteurs ont fait des événements dans `LedgerHQ/ledger-live`
+(`repo_id` 444497690) ? », les lignes cherchées sont aux positions **384,
+1 884, 4 655 et 5 653** : éparpillées dans toute la table, chacune à côté
+d'autres dépôts de son acteur. L'index est trié par `actor_id`, **pas** par
+`repo_id`, donc :
+
+- **on ne peut pas chercher « par le milieu »** : si vous ouvrez l'index au
+  milieu et tombez sur le `repo_id` 1347511170, cela ne vous dit pas si le
+  444497690 est avant ou après, car les `repo_id` ne suivent aucun ordre
+  le long de l'index ;
+- **on ne sait pas quand s'arrêter** : même si vous trouvez une ligne du
+  dépôt, il peut y en avoir d'autres n'importe où ailleurs.
+
+La seule façon de toutes les trouver est de **lire les 15 053 lignes** et de
+garder celles qui ont ce `repo_id`. C'est la différence entre chercher dans
+un annuaire tous ceux dont le nom de famille est « García » (ils sont
+regroupés) et tous ceux dont le prénom est « Ana » (ils sont éparpillés
+dans tout l'annuaire, et il faut le lire en entier).
+
+**5. La règle du préfixe gauche.** C'est une règle générale des index
+composés : un index sur `(A, B)` sert à chercher par `A`, ou par `A` et
+`B` ensemble, mais **pas** à chercher seulement par `B`. Il ne sert que si
+la recherche commence par la **première colonne** de l'index (son « préfixe
+gauche »). C'est pourquoi l'ordre des colonnes d'un index composé
+compte.
+
+**6. La solution : un second index, trié par `repo_id`.** L'index
+`actor_repo_repo_id_idx` est une autre liste triée de la même table, cette
+fois par `repo_id`. Dans celui-ci, les 4 lignes de `LedgerHQ/ledger-live`
+sont **regroupées**, tout comme celles de `Copilot` l'étaient dans le
+premier :
+
+```
+index actor_repo_repo_id_idx (trié par repo_id)
+   ...
+   444497690   → ligne avec actor_id 1247371     ┐
+   444497690   → ligne avec actor_id 33897120    │ les 4 lignes de LedgerHQ/ledger-live,
+   444497690   → ligne avec actor_id 175728472   │ maintenant regroupées
+   444497690   → ligne avec actor_id 224024782   ┘
+   ...
+```
+
+Avec les deux index, **chaque sens du parcours a sa propre liste triée**,
+et les deux sauts sont aussi rapides l'un que l'autre. C'est comme avoir
+deux annuaires de la même ville : l'un trié par nom de famille et l'autre
+par prénom.
+
+**7. Comment le voir de vos propres yeux.** Avec `EXPLAIN` devant une
+requête, PostgreSQL montre quel index il utilise :
+
+```sql
+-- Les dépôts d'un acteur : utilise l'index de la clé primaire
+EXPLAIN SELECT repo_id FROM actor_repo WHERE actor_id = 175728472;
+--   ... Index ... using actor_repo_pkey on actor_repo ...
+
+-- Les acteurs d'un dépôt : utilise l'index créé à la main
+EXPLAIN SELECT actor_id FROM actor_repo WHERE repo_id = 444497690;
+--   ... Index ... using actor_repo_repo_id_idx on actor_repo ...
+```
+
+Sans le second index, la seconde requête afficherait `Seq Scan on
+actor_repo` : un parcours séquentiel, c'est-à-dire lire la table entière.
+
+**8. Pourquoi cela compte autant dans le benchmark.** Dans un parcours de
+plusieurs sauts, la recherche dépôt → acteur ne se fait pas une fois, mais
+**une fois pour chaque dépôt** qui arrive du saut précédent. Sans le second
+index, chacune de ces recherches lirait la table entière : avec 100 dépôts
+dans un saut, ce seraient 100 lectures des 15 053 lignes (ou des 424 098 de
+la pipeline de 24 heures). PostgreSQL s'en sortirait bien plus mal, non pas
+parce que le modèle relationnel est moins bon, mais parce qu'**il lui
+manquerait une aide normale** que toute conception raisonnable aurait.
+
+**Et Neo4j ?** Il n'a pas ce problème, et n'a besoin d'un index pour aucun
+des deux sens : chaque arête est stockée **à côté de ses deux nœuds**, donc
+un nœud `Repo` sait déjà quelles arêtes lui arrivent, tout comme un nœud
+`Actor` sait lesquelles partent de lui. Suivre une arête « vers l'avant » ou
+« vers l'arrière » coûte la même chose. Donner à PostgreSQL son second index
+est ce qui rend la comparaison **équitable** : chaque base de données, avec
+ses outils normaux.
+
+**Pourquoi pas un seul index sur `repo_id`, à la place de celui de la clé
+primaire ?** Parce qu'alors le problème serait l'inverse : les lignes d'un
+acteur seraient éparpillées, et ce serait le saut acteur → dépôt qui serait
+lent. De plus, la clé primaire est nécessaire de toute façon, pour empêcher
+les paires répétées. Avec un index pour chaque sens, les deux sauts sont
+couverts.
 
 **Dans Neo4j**, les contraintes d'unicité sur `Actor.id` et `Repo.id`
 créent leur index, comme les clés primaires. Les arêtes, elles, **n'ont pas
