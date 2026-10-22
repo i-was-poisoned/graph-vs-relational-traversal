@@ -2736,3 +2736,199 @@ son dépôt et une flèche entre les deux. C'est la même requête que la
 seconde de PostgreSQL, écrite dans le langage du graphe : en SQL, il faut
 deux `JOIN` pour aller de l'acteur au dépôt en passant par `actor_repo` ;
 en Cypher, la flèche *est* la connexion.
+
+
+## Voir et interroger le graphe dans Neo4j Desktop (Query)
+
+PostgreSQL a pgAdmin pour regarder ses tables. L'équivalent pour Neo4j est
+l'outil **Query** de Neo4j Desktop : un éditeur où l'on écrit des requêtes
+Cypher et où l'on voit les résultats, même **dessinés** sous forme de
+nœuds et de flèches. Cette section explique comment l'utiliser avec la
+version installée dans ce projet (Neo4j Desktop 2.2.1), y compris les
+pièges rencontrés en chemin.
+
+### Étape 1 : vérifier que l'instance est démarrée
+
+Dans le menu de gauche, **Local instances**. La carte `gharchive` doit
+afficher **RUNNING** ; sinon, cliquez sur **Start**.
+
+En dessous apparaît la liste **Databases**, qui devrait en afficher
+trois : `gharchive`, `neo4j` et `system`.
+
+- **S'il est écrit *Databases (0)* et *Refreshing...* :** Neo4j Desktop
+  n'a pas pu lire la liste. Cela arrive souvent juste après le démarrage,
+  ou après avoir **changé le mot de passe** de Neo4j, si Desktop a gardé
+  l'ancien. Attendez quelques secondes ou cliquez sur le bouton de
+  rafraîchissement (⟳) ; si rien ne change, reconnectez-vous avec le
+  nouveau mot de passe. **Les données ne sont pas perdues** : c'est
+  seulement la liste qui ne s'est pas chargée.
+
+### Étape 2 : ouvrir Query et le connecter à l'instance
+
+1. Dans le menu de gauche, sous **Studio**, cliquez sur **Query**.
+2. S'il est écrit **No instance connected** en haut, cliquez sur **Connect
+   to instance** (au centre) ou sur le menu déroulant **No instance
+   connected ∨** (en haut à gauche), et choisissez l'instance
+   **`gharchive`**.
+3. S'il demande des identifiants : utilisateur **`neo4j`** et le mot de
+   passe de `secrets.sh` (`NEO4J_PASSWORD`).
+
+Trois indicateurs apparaissent en haut, à vérifier à chaque fois :
+
+| Indicateur | Ce qu'il doit afficher | Ce que cela signifie |
+|---|---|---|
+| **Instance** | `gharchive`, avec un point vert | L'instance (le « serveur ») à laquelle vous êtes connecté |
+| **Database** | **`gharchive`** | La base de données de l'instance où s'exécutent les requêtes |
+| **User** | `neo4j` | L'utilisateur avec lequel vous êtes connecté |
+
+### Étape 3 : choisir la base `gharchive` (le piège le plus fréquent)
+
+À la connexion, Query ouvre la base **`neo4j`**, celle par défaut. Cette
+base est **vide** : les données du projet ont été chargées dans
+`gharchive`. Le signe que vous êtes dans la mauvaise base, c'est que le
+panneau de gauche indique **Nodes (0)** et **Relationships (0)**.
+
+Pour changer de base, utilisez le menu déroulant **Database ∨** en haut,
+ou tapez ceci dans la barre de requêtes et appuyez sur **Ctrl + Entrée** :
+
+```cypher
+:use gharchive
+```
+
+La barre passe de `neo4j$` à **`gharchive$`**. Les commandes qui
+commencent par `:` (comme `:use`) ne sont pas du Cypher : ce sont des
+commandes de l'outil lui-même.
+
+### Étape 4 : le panneau « Database information »
+
+Avec `gharchive` sélectionnée, le panneau de gauche résume le contenu de la
+base, et c'est le moyen le plus rapide de vérifier le chargement :
+
+| Dans le panneau | Valeur | D'où cela vient |
+|---|---|---|
+| **Nodes** | 29 510 | 14 515 `Actor` + 14 995 `Repo` |
+| **Relationships** | 15 053 | Les connexions `INTERACTED_WITH` |
+| **Étiquettes** | `Actor`, `Repo` | Les deux types de nœuds |
+| **Type de relation** | `INTERACTED_WITH` | Le type d'arête |
+| **Property keys** | `id`, `login`, `name`... | Les propriétés des nœuds |
+
+Les chiffres correspondent exactement à ceux vérifiés par
+`load_neo4j.py`. Dans *Property keys* apparaissent aussi d'autres noms
+(`data`, `nodes`, `relationships`, `style`, `visualisation`) : ce sont des
+noms que Neo4j a enregistrés en interne, pas des propriétés de nos nœuds.
+
+**Si vous cliquez sur une étiquette** (par exemple `Actor`), Query exécute
+une requête qui affiche quelques nœuds de ce type.
+
+### Étape 5 : écrire des requêtes et lire le résultat
+
+Les requêtes s'écrivent dans la barre du haut (`gharchive$`) et s'exécutent
+avec **Ctrl + Entrée** ou le bouton ▶. Chaque résultat apparaît en dessous,
+dans son propre cadre, et les précédents restent plus bas.
+
+**La première requête du projet :** un acteur et son dépôt.
+
+```cypher
+MATCH (a:Actor {login: 'peitongshi'})-[e:INTERACTED_WITH]->(r:Repo)
+RETURN a, e, r;
+```
+
+Elle se lit presque comme un dessin : « cherche (`MATCH`) un nœud `Actor`
+avec le login `peitongshi`, relié par une flèche `INTERACTED_WITH` à un
+nœud `Repo`, et renvoie (`RETURN`) les trois ». `a`, `e` et `r` sont des
+noms qu'on leur donne pour pouvoir les renvoyer.
+
+**Ce que l'on voit :**
+
+- **Deux cercles :** l'acteur (vert) et le dépôt (bleu). Chaque étiquette
+  a sa couleur.
+- **Une flèche** de l'acteur vers le dépôt, avec le texte
+  `INTERACTED_WITH`. Le sens de la flèche est celui défini au chargement :
+  d'`Actor` vers `Repo`.
+- **Le texte dans chaque cercle** est l'une de ses propriétés, que Neo4j
+  choisit d'afficher. L'acteur montre son `id` (`321725054`) et le dépôt
+  son `name` (`peitongshi/niulai-chinese`). En cliquant sur un nœud, on
+  voit toutes ses propriétés.
+- **Results overview**, à droite : combien de nœuds et de relations
+  contient le résultat, par type (ici, 1 `Actor`, 1 `Repo` et 1
+  `INTERACTED_WITH`).
+
+Cet acteur est l'un des cas particuliers de l'étape d'extraction : celui
+qui a changé de login pendant cette heure (de `lucky521-png` à
+`peitongshi`). Comme le script a gardé le nom le plus récent, il apparaît
+ici sous le nom `peitongshi`.
+
+**Les trois onglets du résultat :**
+
+| Onglet | Ce qu'il affiche |
+|---|---|
+| **Graph** | Le dessin des nœuds et des flèches |
+| **Table** | Les mêmes résultats sous forme de tableau, ligne par ligne |
+| **Raw** | La réponse telle que le serveur l'envoie (texte JSON) |
+
+Sous le cadre se trouvent des commandes pour zoomer, recadrer le dessin et
+sélectionner ou déplacer des nœuds.
+
+**Le temps affiché en bas** (par exemple *Started streaming 1 record after
+388 ms and completed after 550 ms*) est la durée de cette requête. Comme
+pour les temps de chargement, **ce n'est pas une mesure du benchmark** :
+c'est une seule exécution, la première (rien encore en mémoire), et elle
+inclut le travail de l'outil. De plus, cette requête cherche par `login`,
+et `login` **n'a pas d'index** (seul `id` en a un) ; Neo4j a donc dû
+examiner les acteurs un par un pour le trouver. Les requêtes du benchmark
+chercheront toujours par `id`.
+
+### D'autres requêtes utiles
+
+```cypher
+// Combien de nœuds et de relations (14515, 14995 et 15053)
+MATCH (a:Actor) WITH count(a) AS actors
+MATCH (r:Repo)  WITH actors, count(r) AS repos
+MATCH ()-[e:INTERACTED_WITH]->() RETURN actors, repos, count(e) AS connections;
+```
+
+```cypher
+// Quelques dépôts (toujours avec LIMIT pour dessiner)
+MATCH (r:Repo) RETURN r LIMIT 25;
+```
+
+```cypher
+// Le dépôt avec le plus d'acteurs différents : un « point de rencontre » du graphe
+MATCH (a:Actor)-[:INTERACTED_WITH]->(r:Repo)
+WITH r, count(a) AS actors ORDER BY actors DESC LIMIT 1
+MATCH (a:Actor)-[e:INTERACTED_WITH]->(r)
+RETURN a, e, r;
+```
+
+Le dernier résultat vaut le coup d'œil : un dépôt au centre avec
+plusieurs flèches qui arrivent de ses acteurs. C'est justement l'un des
+rares points par lesquels un parcours multi-sauts peut passer d'un acteur
+à un autre.
+
+**Mettez toujours un `LIMIT` quand vous dessinez.** Dessiner les quelque
+30 000 nœuds d'un coup rendrait l'outil très lent, et on ne verrait rien.
+
+### Ce qu'il faut éviter dans Neo4j Desktop
+
+En cherchant comment ouvrir Query, on est tombé sur des menus avec des
+options dangereuses ou qui ne servent pas à cela :
+
+| Où | Option | Attention |
+|---|---|---|
+| `···` d'une **base de données** dans la liste *Databases* | **Delete** | **Supprime la base avec toutes ses données.** Ce menu sert seulement à gérer la base (l'exporter, la supprimer...), pas à la consulter |
+| `···` de l'**instance** (la carte) | **Upgrade** | Met Neo4j à jour vers une autre version : cela changerait les conditions du benchmark. **À ne pas utiliser** |
+| `···` de l'**instance** | **Open ›** | N'ouvre que des fichiers (le dossier de l'instance, le journal et la configuration), pas des outils de requête |
+
+**Si la base `gharchive` était un jour supprimée par erreur,** on la
+récupère en un instant : **Create database** avec le nom `gharchive`, puis
+`./run.sh scripts/load_neo4j.py`. C'est un autre avantage d'avoir les CSV
+et les scripts : les bases peuvent toujours être reconstruites à partir de
+zéro.
+
+### Résumé : les étapes à chaque fois
+
+1. **Local instances** → `gharchive` en **RUNNING**.
+2. **Query** → **Connect to instance** → `gharchive` → utilisateur `neo4j`.
+3. **Database** → **`gharchive`** (ou `:use gharchive`). Vérifier que le
+   panneau affiche **Nodes (29,510)**.
+4. Taper la requête dans la barre `gharchive$` → **Ctrl + Entrée**.

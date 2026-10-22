@@ -2557,3 +2557,191 @@ and an arrow between them. It's the same query as PostgreSQL's second one,
 written in the graph's language: in SQL it takes two `JOIN`s to go from the
 actor to the repo through `actor_repo`; in Cypher, the arrow *is* the
 connection.
+
+
+## Viewing and querying the graph in Neo4j Desktop (Query)
+
+PostgreSQL has pgAdmin for looking at its tables. Neo4j's equivalent is the
+**Query** tool in Neo4j Desktop: an editor where you write Cypher queries
+and see the results, even **drawn** as nodes and arrows. This section
+covers how to use it with the version installed in this project (Neo4j
+Desktop 2.2.1), including the stumbling blocks that came up along the way.
+
+### Step 1: check the instance is running
+
+In the left-hand menu, **Local instances**. The `gharchive` card must show
+**RUNNING**; if it doesn't, click **Start**.
+
+Below it is the **Databases** list, which should show three: `gharchive`,
+`neo4j` and `system`.
+
+- **If it says *Databases (0)* and *Refreshing...*:** Neo4j Desktop couldn't
+  read the list. It tends to happen right after starting, or after
+  **changing the Neo4j password**, if Desktop kept the old one. Wait a few
+  seconds or click the refresh button (⟳); if nothing changes, reconnect
+  with the new password. **The data isn't lost**: it's only the list that
+  hasn't loaded.
+
+### Step 2: open Query and connect it to the instance
+
+1. In the left-hand menu, under **Studio**, click **Query**.
+2. If the top says **No instance connected**, click **Connect to instance**
+   (in the middle) or the **No instance connected ∨** dropdown (top left),
+   and choose the **`gharchive`** instance.
+3. If it asks for credentials: user **`neo4j`** and the password from
+   `secrets.sh` (`NEO4J_PASSWORD`).
+
+Three indicators appear at the top, worth checking every time:
+
+| Indicator | What it should say | What it means |
+|---|---|---|
+| **Instance** | `gharchive`, with a green dot | The instance (the "server") you're connected to |
+| **Database** | **`gharchive`** | The database inside the instance where queries run |
+| **User** | `neo4j` | Which user you're connected as |
+
+### Step 3: choose the `gharchive` database (the most common stumble)
+
+On connecting, Query opens the **`neo4j`** database, the default one. That
+database is **empty**: the project's data was loaded into `gharchive`. The
+sign you're in the wrong database is that the left-hand panel says **Nodes
+(0)** and **Relationships (0)**.
+
+To switch, use the **Database ∨** dropdown at the top, or type this in the
+query bar and press **Ctrl + Enter**:
+
+```cypher
+:use gharchive
+```
+
+The bar changes from `neo4j$` to **`gharchive$`**. Commands starting with
+`:` (like `:use`) aren't Cypher: they're commands for the tool itself.
+
+### Step 4: the "Database information" panel
+
+With `gharchive` selected, the left-hand panel summarises what's in the
+database, and it's the quickest way to check the load:
+
+| In the panel | Value | Where it comes from |
+|---|---|---|
+| **Nodes** | 29,510 | 14,515 `Actor` + 14,995 `Repo` |
+| **Relationships** | 15,053 | The `INTERACTED_WITH` connections |
+| **Labels** | `Actor`, `Repo` | The two node types |
+| **Relationship type** | `INTERACTED_WITH` | The edge type |
+| **Property keys** | `id`, `login`, `name`... | The nodes' properties |
+
+The numbers match exactly what `load_neo4j.py` checked. *Property keys* also
+lists other names (`data`, `nodes`, `relationships`, `style`,
+`visualisation`): names Neo4j has registered internally, not properties of
+our nodes.
+
+**Clicking a label** (e.g. `Actor`) makes Query run a query that shows a
+few nodes of that type.
+
+### Step 5: writing queries and reading the result
+
+Queries are typed in the top bar (`gharchive$`) and run with **Ctrl +
+Enter** or the ▶ button. Each result appears below, in its own box, with
+earlier ones further down.
+
+**The project's first query:** an actor and their repo.
+
+```cypher
+MATCH (a:Actor {login: 'peitongshi'})-[e:INTERACTED_WITH]->(r:Repo)
+RETURN a, e, r;
+```
+
+It reads almost like a drawing: "find (`MATCH`) an `Actor` node with login
+`peitongshi`, connected by an `INTERACTED_WITH` arrow to a `Repo` node, and
+return (`RETURN`) all three". `a`, `e` and `r` are names we give them so
+they can be returned.
+
+**What you see:**
+
+- **Two circles:** the actor (green) and the repo (blue). Each label has
+  its own colour.
+- **An arrow** from the actor to the repo, labelled `INTERACTED_WITH`. The
+  arrow's direction is the one set during loading: from `Actor` to `Repo`.
+- **The text inside each circle** is one of its properties, which Neo4j
+  picks to display. The actor shows its `id` (`321725054`) and the repo its
+  `name` (`peitongshi/niulai-chinese`). Clicking a node shows all its
+  properties.
+- **Results overview**, on the right: how many nodes and relationships are
+  in the result, by type (here, 1 `Actor`, 1 `Repo` and 1
+  `INTERACTED_WITH`).
+
+This actor is one of the special cases from the Extraction Stage: the one
+who changed their login during that hour (from `lucky521-png` to
+`peitongshi`). Since the script kept the most recent name, they show up
+here as `peitongshi`.
+
+**The result's three tabs:**
+
+| Tab | What it shows |
+|---|---|
+| **Graph** | The drawing of nodes and arrows |
+| **Table** | The same results as a table, row by row |
+| **Raw** | The answer exactly as the server sends it (JSON text) |
+
+Below the box there are controls to zoom, fit the drawing, and select or
+move nodes.
+
+**The time shown at the bottom** (e.g. *Started streaming 1 record after
+388 ms and completed after 550 ms*) is how long that query took. As with
+the load times, **it isn't a benchmark measurement**: it's a single run,
+the first one (with nothing in memory yet), and it includes the tool's own
+work. Also, this query searches by `login`, and `login` **has no index**
+(only `id` does), so Neo4j had to check the actors one by one to find it.
+The benchmark queries will always search by `id`.
+
+### More useful queries
+
+```cypher
+// How many nodes and relationships there are (14515, 14995 and 15053)
+MATCH (a:Actor) WITH count(a) AS actors
+MATCH (r:Repo)  WITH actors, count(r) AS repos
+MATCH ()-[e:INTERACTED_WITH]->() RETURN actors, repos, count(e) AS connections;
+```
+
+```cypher
+// A few repos (always with LIMIT when drawing)
+MATCH (r:Repo) RETURN r LIMIT 25;
+```
+
+```cypher
+// The repo with the most different actors: a "meeting point" in the graph
+MATCH (a:Actor)-[:INTERACTED_WITH]->(r:Repo)
+WITH r, count(a) AS actors ORDER BY actors DESC LIMIT 1
+MATCH (a:Actor)-[e:INTERACTED_WITH]->(r)
+RETURN a, e, r;
+```
+
+The last result is worth seeing: a repo in the middle with several arrows
+coming in from its actors. It's exactly one of the few points through
+which a multi-hop walk can get from one actor to another.
+
+**Always use `LIMIT` when drawing.** Drawing all ~30,000 nodes at once
+would make the tool very slow, and nothing would be readable.
+
+### What to avoid in Neo4j Desktop
+
+While looking for how to open Query, some menus turned up with options that
+are dangerous or not meant for this:
+
+| Where | Option | Watch out |
+|---|---|---|
+| A **database's** `···` in the *Databases* list | **Delete** | **Deletes the database with all its data.** That menu is only for managing the database (exporting, deleting...), not for viewing it |
+| The **instance's** `···` (the card) | **Upgrade** | Upgrades Neo4j to another version: it would change the benchmark's conditions. **Don't use** |
+| The **instance's** `···` | **Open ›** | Only opens files (the instance folder, the log and the configuration), not query tools |
+
+**If the `gharchive` database is ever deleted by accident,** it's quick to
+recover: **Create database** named `gharchive`, then
+`./run.sh scripts/load_neo4j.py`. Another advantage of having the CSVs and
+the scripts: the databases can always be rebuilt from scratch.
+
+### Summary: the steps every time
+
+1. **Local instances** → `gharchive` **RUNNING**.
+2. **Query** → **Connect to instance** → `gharchive` → user `neo4j`.
+3. **Database** → **`gharchive`** (or `:use gharchive`). Check the panel
+   shows **Nodes (29,510)**.
+4. Type the query in the `gharchive$` bar → **Ctrl + Enter**.
