@@ -3117,3 +3117,372 @@ driver de Neo4j.
    (porque la carga es una sola transacción), pero Neo4j se ve a medio
    llenar durante un minuto y medio. En sistemas reales se carga en una
    base nueva y, al terminar, se cambia de una a otra de golpe.
+
+
+## Conceptos clave: índices, claves primarias, claves foráneas y por qué un grafo no las necesita
+
+Esta sección amplía la tabla **"Lo que se crea en cada base de datos"** de la
+etapa de carga, que mezclaba claves primarias, restricciones de unicidad y
+claves foráneas sin explicar del todo qué es cada cosa ni si hay índices.
+Son los conceptos centrales del proyecto, porque la pregunta de
+investigación es justamente **cómo encuentra cada base de datos las
+conexiones**.
+
+### Primero, la respuesta corta: ¿hay índices, o basta con las claves primarias?
+
+**Hay índices.** Una `PRIMARY KEY` no es una alternativa a un índice:
+**PostgreSQL crea automáticamente un índice** para cada clave primaria,
+porque lo necesita para comprobar en cada inserción que el valor no está
+repetido. Pero las claves primarias **no cubren todas las búsquedas**, y
+las claves foráneas **no crean ningún índice** en PostgreSQL. Por eso hay
+un índice más, creado a mano.
+
+Esto es todo lo que existe en cada base de datos (en `gharchive` y en
+`gharchive24h` es igual):
+
+| Estructura | Base | Cómo se crea | ¿Crea un índice? | Para qué sirve |
+|---|---|---|---|---|
+| `PRIMARY KEY` de `actor` (`id`) | PostgreSQL | `id BIGINT PRIMARY KEY` | **Sí, automático:** `actor_pkey` | Que no haya dos actores con el mismo `id`, y encontrar un actor por su `id` al instante |
+| `PRIMARY KEY` de `repo` (`id`) | PostgreSQL | `id BIGINT PRIMARY KEY` | **Sí, automático:** `repo_pkey` | Lo mismo, para los repos |
+| `PRIMARY KEY` de `actor_repo` (`actor_id`, `repo_id`) | PostgreSQL | `PRIMARY KEY (actor_id, repo_id)` | **Sí, automático:** `actor_repo_pkey` (compuesto, de dos columnas) | Que no se repita ningún par, y buscar **los repos de un actor** |
+| Clave foránea `actor_repo.actor_id` → `actor.id` | PostgreSQL | `REFERENCES actor (id)` | **No** | Que cada conexión apunte a un actor que existe |
+| Clave foránea `actor_repo.repo_id` → `repo.id` | PostgreSQL | `REFERENCES repo (id)` | **No** | Que cada conexión apunte a un repo que existe |
+| Índice sobre `actor_repo.repo_id` | PostgreSQL | `CREATE INDEX actor_repo_repo_id_idx` (a mano) | **Sí:** es el propio índice | Buscar **los actores de un repo**: el sentido que la clave primaria no cubre |
+| Restricción `UNIQUE` en `Actor.id` | Neo4j | `CREATE CONSTRAINT ... REQUIRE a.id IS UNIQUE` | **Sí, automático** | Que no haya dos actores con el mismo `id`, y encontrar un actor por su `id` al instante |
+| Restricción `UNIQUE` en `Repo.id` | Neo4j | `CREATE CONSTRAINT ... REQUIRE r.id IS UNIQUE` | **Sí, automático** | Lo mismo, para los repos |
+| Las aristas `INTERACTED_WITH` | Neo4j | `CREATE (a)-[:INTERACTED_WITH]->(r)` | **No necesitan índice** | Cada nodo guarda enlaces directos a sus aristas (ver más abajo) |
+
+**Resumen:** PostgreSQL tiene **4 índices** (tres automáticos por las
+claves primarias y uno a mano), y Neo4j tiene **2** (los de las
+restricciones). Las conexiones del grafo no tienen índice porque no lo
+necesitan: esa diferencia es el corazón del benchmark.
+
+**Cómo comprobarlo tú mismo:**
+
+```sql
+-- PostgreSQL (Query Tool de pgAdmin, base gharchive): los índices de las tres tablas
+SELECT tablename, indexname, indexdef
+FROM pg_indexes
+WHERE tablename IN ('actor', 'repo', 'actor_repo')
+ORDER BY tablename, indexname;
+```
+
+```cypher
+// Neo4j (Query, base gharchive): las restricciones y los índices
+SHOW CONSTRAINTS;
+SHOW INDEXES;
+```
+
+En pgAdmin también se ven en el árbol: dentro de cada tabla, **Indexes**
+(los índices) y **Constraints** (las claves primarias y foráneas). En
+Neo4j, `SHOW INDEXES` muestra además dos índices que Neo4j crea siempre por
+su cuenta (de tipo `LOOKUP`), que sirven para encontrar rápido "todos los
+nodos con una etiqueta" o "todas las aristas de un tipo".
+
+### Qué es un índice
+
+Un **índice** es una estructura extra que la base de datos guarda **junto
+a** una tabla para encontrar filas **sin tener que leerlas todas**.
+
+**La analogía del libro:** para encontrar la palabra "recursividad" en un
+libro de 800 páginas, puedes leer las 800 páginas, o ir al **índice
+alfabético** del final, buscarla (está ordenado, así que es rápido) y ver
+que está en la página 312. El índice no contiene el libro: contiene
+**cada palabra y dónde encontrarla**.
+
+En una base de datos es igual. El índice de `actor.id` guarda **cada `id`
+y dónde está su fila** en el disco, **ordenados**. Sin él, para encontrar
+el actor `321725054`, PostgreSQL tendría que leer las 14.515 filas una a
+una (un **recorrido secuencial**, *sequential scan*). Con él, va
+directamente a la fila (un **recorrido por índice**, *index scan*).
+
+**Cómo está hecho por dentro: el árbol B (*B-tree*).** El tipo de índice
+que PostgreSQL usa por defecto es un **árbol B**: los valores están
+ordenados y repartidos en niveles, como un árbol puesto boca abajo. Para
+buscar un valor se baja desde la raíz eligiendo en cada nivel la rama
+correcta, como cuando buscas una palabra en un diccionario abriéndolo por
+la mitad, luego por un cuarto, etc. Por eso el número de pasos crece muy
+despacio con el tamaño de la tabla:
+
+| Filas en la tabla | Leer todas (sin índice) | Pasos aproximados con un árbol B |
+|---|---|---|
+| 14.515 (benchmark) | 14.515 | unos 3 o 4 niveles |
+| 424.098 (24 horas) | 424.098 | unos 3 o 4 niveles |
+| 100 millones | 100 millones | unos 4 o 5 niveles |
+
+(Cada "nivel" del árbol cubre cientos de valores, así que incluso tablas
+enormes tienen muy pocos niveles.)
+
+**Lo que cuesta un índice.** No es gratis:
+
+- **Espacio:** es una estructura más, guardada en el disco.
+- **Escrituras más lentas:** cada vez que se inserta una fila, la base de
+  datos tiene que actualizar también todos los índices de esa tabla. Por
+  eso, en la pipeline de 24 horas, cargar `actor_repo` (con dos índices y
+  dos claves foráneas) tardó 27 segundos, y `actor` o `repo` (con un solo
+  índice) apenas uno.
+
+Por eso no se pone un índice en cada columna: solo en las que se usan para
+**buscar** o para **unir tablas**. Es el principio de "la consulta
+primero" aplicado a los índices: `login` y `name` no tienen índice porque
+las consultas del benchmark no buscan por ellos.
+
+**El planificador decide si usa el índice.** Que exista un índice no
+obliga a usarlo. Antes de ejecutar cada consulta, PostgreSQL calcula qué
+es más barato (de ahí la importancia de `ANALYZE`, que le da las
+estadísticas para calcularlo). Para ver qué ha decidido, se pone `EXPLAIN`
+delante de la consulta:
+
+```sql
+EXPLAIN SELECT * FROM actor WHERE id = 321725054;
+-- Index Scan using actor_pkey on actor ...     <- usa el índice de la clave primaria
+
+EXPLAIN SELECT * FROM actor WHERE login = 'peitongshi';
+-- Seq Scan on actor ... Filter: (login = ...)  <- no hay índice: lee la tabla entera
+```
+
+(En Neo4j, el equivalente es poner `EXPLAIN` o `PROFILE` delante de una
+consulta Cypher.)
+
+### Qué es una clave primaria (*primary key*)
+
+La **clave primaria** es la columna (o el grupo de columnas) que
+**identifica cada fila de forma única**, como el número del documento de
+identidad de una persona. Tiene tres reglas que la propia base de datos
+hace cumplir:
+
+1. **Única:** no puede haber dos filas con el mismo valor.
+2. **Nunca vacía** (`NOT NULL`): toda fila tiene que tenerla.
+3. **Solo una por tabla**, aunque puede estar formada por varias columnas.
+
+**En este proyecto:**
+
+- En `actor` y `repo`, la clave primaria es el `id` de GitHub. Es una
+  **clave natural**: un identificador que ya viene en los datos, no uno
+  inventado por nosotros (eso sería una *clave subrogada*, como un número
+  correlativo 1, 2, 3...). Se eligió el `id` y no el nombre porque el
+  nombre puede cambiar (el caso `lucky521-png` → `peitongshi`) y no es
+  único (las dos cuentas `Copilot`).
+- En `actor_repo`, la clave primaria es **compuesta**: el **par**
+  `(actor_id, repo_id)`. Ninguna de las dos columnas es única por
+  separado (un actor puede estar en muchos repos, y un repo puede tener
+  muchos actores), pero el par sí. Es la propia base de datos la que hace
+  cumplir la decisión de "una sola conexión por par actor–repo".
+
+**Por qué es importante:**
+
+- **Identidad:** cada fila se puede señalar sin ambigüedad.
+- **Sin duplicados:** la base de datos rechaza cualquier inserción que
+  repita una clave, aunque el error esté en nuestro código.
+- **Destino de las claves foráneas:** es el valor al que apuntan las
+  conexiones (ver abajo).
+- **Búsqueda rápida:** su índice automático permite encontrar una fila por
+  su clave al instante.
+
+**Un detalle del índice compuesto:** el índice `actor_repo_pkey` está
+ordenado **primero por `actor_id` y después por `repo_id`**, como una guía
+telefónica ordenada por apellido y luego por nombre. Sirve para buscar
+"todas las filas de un `actor_id`" (como buscar a todos los "García"),
+pero **no** para buscar "todas las filas de un `repo_id`" (como buscar a
+todos los que se llaman "Ana" en una guía ordenada por apellido: habría
+que leerla entera). Por eso hizo falta el índice extra sobre `repo_id`.
+
+### Qué es una clave foránea (*foreign key*)
+
+Una **clave foránea** es una columna que **apunta a la clave primaria de
+otra tabla**. En `actor_repo`:
+
+- `actor_id` apunta a `actor.id`;
+- `repo_id` apunta a `repo.id`.
+
+Así es como una base de datos relacional **representa las relaciones**:
+`actor_repo` no guarda el actor ni el repo, solo sus `id`, como
+"referencias". Es una **tabla de unión** (*junction table*), la forma
+estándar de representar una relación **muchos a muchos** (un actor puede
+tener muchos repos, y un repo muchos actores).
+
+**Para qué sirve: la integridad referencial.** La base de datos garantiza
+que **toda referencia apunta a algo que existe**:
+
+- No se puede insertar en `actor_repo` una conexión con un `actor_id` que no
+  está en `actor`: PostgreSQL la rechaza. (Por eso `load_postgres.py` carga
+  `actor` y `repo` **antes** que `actor_repo`.)
+- No se puede borrar un actor de `actor` mientras alguna conexión lo
+  señale, salvo que se diga explícitamente qué hacer con esas conexiones
+  (por ejemplo, `ON DELETE CASCADE`, que las borraría también). Por eso
+  `load_postgres.py` borra `actor_repo` **antes** que las otras dos.
+
+Sin claves foráneas, un error en el código podría dejar conexiones
+"huérfanas", que apuntan a actores o repos inexistentes, y los recorridos
+darían resultados falsos sin que nadie lo notara.
+
+**Lo que cuesta:** en cada inserción en `actor_repo`, PostgreSQL comprueba
+que el actor **y** el repo existen, es decir, **dos búsquedas por fila**.
+Es otra de las razones por las que esa tabla tarda más en cargarse.
+
+**Ojo: una clave foránea no crea un índice** (en PostgreSQL). Es un error
+muy común pensar que sí. La clave foránea comprueba que la referencia
+existe, pero **no** acelera las búsquedas por esa columna. Si una columna
+se usa para unir tablas, hay que indexarla aparte, como hicimos con
+`repo_id`. (`actor_id` no lo necesita porque ya va primero en el índice de
+la clave primaria compuesta.)
+
+### Cómo se recorre una relación en una base de datos relacional: el JOIN
+
+En una base relacional, las conexiones **no están guardadas como
+caminos**: se **calculan en el momento de la consulta**, con un **JOIN**
+("unión"), que empareja filas de dos tablas por un valor igual.
+
+Para un salto (los repos de un actor), la consulta es:
+
+```sql
+SELECT r.name
+FROM actor a
+JOIN actor_repo ar ON ar.actor_id = a.id     -- 1.ª unión
+JOIN repo r        ON r.id = ar.repo_id      -- 2.ª unión
+WHERE a.id = 321725054;
+```
+
+Lo que hace PostgreSQL, paso a paso (gracias a los índices):
+
+1. Busca el actor `321725054` en el índice `actor_pkey`.
+2. Busca en el índice `actor_repo_pkey` todas las filas con ese
+   `actor_id`: obtiene sus `repo_id`.
+3. Por cada `repo_id`, busca el repo en el índice `repo_pkey`.
+
+Cada flecha del recorrido es una **búsqueda en un índice**, y cada búsqueda
+tiene un coste que depende (aunque poco, gracias al árbol B) del tamaño
+total de la tabla. Para el recorrido del benchmark
+(`actor → repo → actor → repo`), cada salto añade **más JOIN**, y cada JOIN
+se hace para **todas** las filas que llegan del salto anterior. Si en cada
+salto el número de filas crece, el trabajo crece muy deprisa.
+
+### Por qué en un grafo no hay claves primarias ni foráneas
+
+Una base de datos de grafos guarda las cosas de otra manera:
+
+| Concepto relacional | Equivalente en el grafo de Neo4j |
+|---|---|
+| Tabla (`actor`, `repo`) | **Etiqueta** (*label*): `:Actor`, `:Repo`. Agrupa nodos del mismo tipo |
+| Fila | **Nodo** |
+| Columna | **Propiedad** (`id`, `login`, `name`) |
+| Tabla de unión + claves foráneas (`actor_repo`) | **Arista** (*relationship*): `-[:INTERACTED_WITH]->`, guardada como un objeto propio que une los dos nodos |
+| Clave primaria | No existe como tal. Se crea una **restricción de unicidad** sobre una propiedad (`id`) |
+| JOIN | **Seguir la arista**: ir de un nodo a sus vecinos |
+
+**Por qué no hacen falta claves foráneas:** en el grafo, la conexión **no
+es un valor que apunta a otro valor** (un `actor_id` que hay que buscar en
+otra tabla). **Es un objeto propio que une directamente los dos nodos**.
+Una arista no puede existir sin sus dos extremos: Neo4j no permite crear
+una arista "colgando" ni borrar un nodo que todavía tiene aristas (de ahí
+el `DETACH DELETE` de `load_neo4j.py`, que borra primero las aristas). Es
+decir, **la integridad referencial va incluida en la propia estructura**,
+sin necesidad de declararla.
+
+**Por qué no hay clave primaria "de verdad":** Neo4j identifica cada nodo
+internamente con su propio identificador (el *element id*), que **no** es
+un dato nuestro y no conviene usar como clave del negocio, porque puede
+reutilizarse si se borran nodos. Por eso añadimos la **restricción de
+unicidad** sobre nuestra propiedad `id`: hace el papel de la clave
+primaria (sin duplicados, búsqueda rápida por índice), pero es opcional y
+la decidimos nosotros.
+
+**Y lo más importante: en el grafo, el índice solo sirve para encontrar
+el punto de partida.** Una vez encontrado el primer nodo (por ejemplo, el
+actor `321725054`, gracias a la restricción de unicidad), **ya no se usa
+ningún índice**: el recorrido sigue las aristas directamente.
+
+### Qué hay en su lugar: la adyacencia sin índices (*index-free adjacency*)
+
+En Neo4j, **cada nodo guarda dónde están sus propias aristas**, y cada
+arista guarda **dónde están sus dos nodos**. Conceptualmente:
+
+- el registro de un nodo apunta a sus aristas;
+- el registro de una arista apunta a su nodo de inicio, a su nodo final y
+  a la siguiente arista de cada uno de ellos.
+
+(Las versiones recientes de Neo4j organizan físicamente los datos de otra
+forma, agrupando las aristas de cada nodo, pero la idea es la misma: las
+conexiones de un nodo están guardadas **con el nodo**.)
+
+Así, ir de un actor a sus repos no es "buscar en una tabla todas las filas
+cuyo `actor_id` es X", sino **"leer la lista de aristas que el nodo ya
+tiene"**. Es como la diferencia entre:
+
+- **Relacional:** buscar en la guía telefónica de toda la ciudad a los
+  amigos de Ana (una búsqueda, aunque sea rápida, en una lista de todos).
+- **Grafo:** abrir la agenda de Ana, que ya tiene apuntados a sus amigos
+  (seguir enlaces que ya están ahí).
+
+### Por qué eso optimiza (y por qué hay que medirlo)
+
+| | PostgreSQL (relacional) | Neo4j (grafo) |
+|---|---|---|
+| Encontrar el punto de partida | Búsqueda en un índice (árbol B) | Búsqueda en un índice (la restricción) |
+| Cada salto | Un JOIN: una **búsqueda en un índice** por cada fila que llega | **Seguir punteros** que el nodo ya tiene |
+| ¿El coste de un salto depende del tamaño **total** de la base? | Un poco: el índice crece con la tabla (aunque muy despacio) | No: depende solo de **cuántas aristas tiene ese nodo** |
+| Lo que crece al añadir saltos | El número de JOIN y de búsquedas en índices | El número de aristas que se siguen |
+
+**La teoría:** en recorridos **cortos** (uno o dos saltos), PostgreSQL es
+muy rápido, porque sus índices son muy eficientes y lleva décadas
+optimizando los JOIN. En recorridos **largos**, el grafo debería ganar,
+porque su coste depende solo de la parte del grafo que se recorre, no del
+tamaño total de las tablas.
+
+**Pero es solo una hipótesis.** El árbol B necesita muy pocos pasos
+incluso en tablas enormes, las dos bases guardan en memoria los datos que
+más se usan, y el planificador de PostgreSQL es muy bueno. **En qué número
+de saltos y con qué volumen de datos cambia el ganador** es exactamente lo
+que este proyecto quiere **medir**, en lugar de darlo por supuesto.
+
+### Otros conceptos que conviene conocer
+
+**Normalización.** Es la forma de organizar las tablas para no guardar el
+mismo dato dos veces. Por ejemplo, el `login` de un actor está **solo** en
+`actor`, no repetido en cada fila de `actor_repo`. Si cambiara, solo
+habría que cambiarlo en un sitio. Por eso la pregunta de investigación
+habla de un modelo relacional **normalizado**: es la forma "correcta" de
+diseñar el lado relacional, la que se usaría en la práctica.
+
+**Cardinalidad de una relación.** Cuántos elementos de un lado se pueden
+relacionar con cuántos del otro:
+
+| Tipo | Ejemplo | Cómo se guarda en relacional |
+|---|---|---|
+| Uno a uno | Una persona y su documento de identidad | Una clave foránea única |
+| Uno a muchos | Un repo y sus *issues* (cada issue es de un solo repo) | Una clave foránea en el lado "muchos" |
+| **Muchos a muchos** | **Actores y repos (este proyecto)** | **Una tabla de unión** (`actor_repo`) con dos claves foráneas |
+
+En el grafo, los tres tipos se guardan igual: con aristas.
+
+**Restricción frente a índice.** Una **restricción** (*constraint*) es una
+**regla** que la base de datos hace cumplir (único, no vacío, la
+referencia existe). Un **índice** es una **estructura para buscar rápido**.
+A menudo van juntos (una clave primaria o una restricción de unicidad
+crean un índice para poder comprobarse), pero son cosas distintas: una
+clave foránea es una restricción **sin** índice, y `actor_repo_repo_id_idx`
+es un índice **sin** restricción.
+
+**Transacciones y ACID.** Una **transacción** es un grupo de cambios que se
+aplican **todos o ninguno**. Las dos bases de datos cumplen las
+propiedades **ACID**: *Atomicidad* (todo o nada), *Consistencia* (las
+reglas se cumplen siempre), *Aislamiento* (las transacciones no se pisan
+entre sí) y *Durabilidad* (lo guardado no se pierde aunque se apague el
+ordenador). Por eso la carga de PostgreSQL, que es una sola transacción,
+nunca deja datos a medias.
+
+**El esquema en cada base de datos.** PostgreSQL exige definir las tablas,
+columnas y tipos **antes** de guardar datos (*schema-on-write*). Neo4j es
+más flexible: se pueden crear nodos con cualquier propiedad sin declararla
+antes; las restricciones son opcionales y las añadimos nosotros para
+garantizar la calidad de los datos y que las búsquedas sean rápidas.
+
+**`EXPLAIN` y `PROFILE`: ver cómo se ejecuta una consulta.** Serán
+importantes en el benchmark: no basta con saber **cuánto** tarda una
+consulta, también **por qué**.
+
+- PostgreSQL: `EXPLAIN` muestra el plan sin ejecutarlo; `EXPLAIN ANALYZE`
+  lo ejecuta y muestra el tiempo real de cada paso (por ejemplo, si usó un
+  `Index Scan` o un `Seq Scan`).
+- Neo4j: `EXPLAIN` muestra el plan; `PROFILE` lo ejecuta y cuenta, paso a
+  paso, cuántos datos se tocaron (*db hits*).
