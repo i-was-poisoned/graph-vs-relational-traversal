@@ -2893,6 +2893,82 @@ Chercher l'acteur 321725054 :
 chaque page, la recherche de la valeur exacte se fait « par le milieu »,
 comme dans le jeu.
 
+**Pages et feuilles : ce n'est pas la même chose.** Dans le dessin
+apparaissent « racine », « feuille 25 » et « page 93 », et il est facile de
+les confondre. Il y a un piège dans la langue : en français, « feuille »
+désigne aussi une feuille de papier, ce qui ressemble beaucoup à « page ».
+Mais ici, **« feuille » vient de la feuille d'un arbre** (en anglais,
+*leaf*, pas *sheet*). Ce sont deux idées différentes :
+
+- **Page = le contenant.** C'est la « boîte » de taille fixe (8 Ko) dans
+  laquelle PostgreSQL range **tout** sur le disque. C'est une unité de
+  **stockage**.
+- **Feuille = un rôle dans l'arbre.** C'est le nom que reçoit une page
+  **selon la place qu'elle occupe dans l'arbre B** : celles du niveau du
+  bas. C'est une **position** ou une **fonction**.
+
+**Toute feuille est une page, mais toute page n'est pas une feuille.** Une
+analogie : un classeur de bureau rempli de **dossiers, tous de la même
+taille** (les pages). Selon l'usage de chaque dossier, il reçoit un nom
+différent :
+
+| Type de page | Où elle se trouve | Ce qu'elle contient | Dans le classeur de bureau |
+|---|---|---|---|
+| **Racine** | En haut de l'arbre de l'index (il n'y en a qu'une) | Des panneaux : « jusqu'à 300 000 000 → feuille 24... » | Le dossier de l'index général : « clients A–F, tiroir 1 ; G–M, tiroir 2... » |
+| **Page intermédiaire** | Entre la racine et les feuilles (seulement dans les arbres de 3 niveaux ou plus) | D'autres panneaux, plus détaillés | Le dossier d'un tiroir : « clients García–Gómez, section 4... » |
+| **Feuille** | En bas de l'arbre de l'index | Chaque valeur, triée, avec l'adresse de sa ligne : « 321 725 054 → ligne dans la page 93 » | La fiche finale : « García, Ana : dossier sur l'étagère 93 » |
+| **Page de la table** | **Elle n'est pas dans l'arbre** : c'est la table elle-même | Les **lignes complètes** : `id = 321725054, login = 'peitongshi'` | Le **dossier** lui-même, sur l'étagère 93 |
+
+Les trois premières forment l'**index** ; la dernière, c'est la **table**.
+
+**Ce sont deux « fichiers » distincts.** PostgreSQL garde sur le disque
+deux choses séparées, et toutes deux sont faites de pages :
+
+```
+L'INDEX (actor_pkey)                               LA TABLE (actor)
+fait de pages, organisé en arbre                   fait de pages, avec les lignes
+                                                   (sans ordre particulier)
+  [ racine ]          ← page de l'index
+     │
+  [ feuille 24 ][ feuille 25 ][ feuille 26 ]...    [ page 1 ][ page 2 ]...[ page 93 ]...
+              ← pages de l'index                        ← pages de la table
+              (celles du niveau du bas)
+                      │                                                        ▲
+                      └── « 321 725 054 → ligne dans la page 93 » ─────────────┘
+```
+
+Ainsi, dans le dessin de la recherche :
+
+- **« Racine »** est une page **de l'index** (celle du haut).
+- **« Feuille 25 »** est une autre page **de l'index** : la numéro 25 de
+  celles du bas de l'arbre.
+- **« Page 93 »** est une page **de la table** : elle ne fait pas partie de
+  l'arbre, et c'est là que se trouve la vraie ligne.
+
+Toutes les trois sont des pages de 8 Ko, c'est pourquoi on les compte comme
+« trois pages lues ». Ce qui change, c'est **ce qu'il y a dans chacune et à
+quoi elle sert**.
+
+**Pourquoi l'index ne garde pas la ligne complète.** La feuille garde
+seulement la **valeur** (`321725054`) et **l'endroit où se trouve sa
+ligne**, pas la ligne entière (le `login` et le reste des colonnes), pour
+deux raisons : ainsi l'index reste **petit** (il tient environ 400 valeurs
+par feuille, et l'arbre a peu de niveaux), et la ligne est déjà dans la
+table, donc la répéter dupliquerait les données. C'est pourquoi, une fois
+arrivé à la feuille, il faut **une étape de plus** : aller chercher la
+ligne dans la page 93 de la table.
+
+**Quand cette dernière étape n'est pas nécessaire : `Index Only Scan`.** Si
+tout ce que demande la requête se trouve déjà **dans l'index**, PostgreSQL
+répond sans ouvrir aucune page de la table. Par exemple,
+`SELECT repo_id FROM actor_repo WHERE actor_id = 175728472` ne demande que
+`repo_id` et filtre par `actor_id`, et les deux colonnes sont déjà dans les
+feuilles de l'index `(actor_id, repo_id)`. Avec `EXPLAIN`, PostgreSQL
+l'affiche comme `Index Only Scan using actor_repo_pkey` : le « Only »
+signifie « seulement l'index ». Un index qui contient tout ce dont une
+requête a besoin s'appelle un **index couvrant** (*covering index*) : il
+**couvre la requête**.
+
 **Pourquoi le nombre d'étapes augmente si lentement.** C'est la partie la plus
 importante de l'arbre B, et on la comprend mieux avec un arbre en miniature.
 

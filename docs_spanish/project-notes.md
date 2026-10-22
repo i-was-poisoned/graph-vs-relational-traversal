@@ -2790,6 +2790,78 @@ Buscar el actor 321725054:
 (alrededor de un centenar para 14.515 filas) sin índice. Y dentro de cada página, la
 búsqueda del valor exacto se hace "por la mitad", como en el juego.
 
+**Páginas y hojas: no son lo mismo.** En el dibujo aparecen "raíz", "hoja
+25" y "página 93", y es fácil confundirlas. Hay una trampa en el idioma:
+en español, "hoja" también es una hoja de papel, que se parece mucho a
+"página". Pero aquí **"hoja" viene de la hoja de un árbol** (en inglés,
+*leaf*, no *sheet*). Son dos ideas distintas:
+
+- **Página = el contenedor.** Es la "caja" de tamaño fijo (8 KB) en la que
+  PostgreSQL guarda **todo** en el disco. Es una unidad de
+  **almacenamiento**.
+- **Hoja = un papel dentro del árbol.** Es el nombre que recibe una página
+  **según el lugar que ocupa en el árbol B**: las del nivel de abajo. Es
+  una **posición** o una **función**.
+
+**Toda hoja es una página, pero no toda página es una hoja.** Una
+analogía: un archivo de oficina lleno de **carpetas, todas del mismo
+tamaño** (las páginas). Según para qué se use cada carpeta, recibe un
+nombre distinto:
+
+| Tipo de página | Dónde está | Qué contiene | En el archivo de oficina |
+|---|---|---|---|
+| **Raíz** | Arriba del árbol del índice (solo hay una) | Señales: "hasta 300.000.000 → hoja 24..." | La carpeta del índice general: "clientes A–F, cajón 1; G–M, cajón 2..." |
+| **Página intermedia** | Entre la raíz y las hojas (solo en árboles de 3 o más niveles) | Más señales, más detalladas | La carpeta de un cajón: "clientes García–Gómez, sección 4..." |
+| **Hoja** | Abajo del árbol del índice | Cada valor, ordenado, con la dirección de su fila: "321.725.054 → fila en la página 93" | La ficha final: "García, Ana: expediente en la estantería 93" |
+| **Página de la tabla** | **No está en el árbol**: es la tabla en sí | Las **filas completas**: `id = 321725054, login = 'peitongshi'` | El **expediente** de verdad, en la estantería 93 |
+
+Las tres primeras forman el **índice**; la última es la **tabla**.
+
+**Son dos "archivos" distintos.** PostgreSQL guarda en el disco dos cosas
+separadas, y las dos están hechas de páginas:
+
+```
+EL ÍNDICE (actor_pkey)                       LA TABLA (actor)
+hecho de páginas, organizado como árbol      hecho de páginas, con las filas
+                                             (sin orden especial)
+  [ raíz ]            ← página del índice
+     │
+  [ hoja 24 ][ hoja 25 ][ hoja 26 ]...       [ página 1 ][ página 2 ]...[ página 93 ]...
+              ← páginas del índice                ← páginas de la tabla
+              (las del nivel de abajo)
+                   │                                              ▲
+                   └── "321.725.054 → fila en la página 93" ──────┘
+```
+
+Así que, en el dibujo de la búsqueda:
+
+- **"Raíz"** es una página **del índice** (la de arriba).
+- **"Hoja 25"** es otra página **del índice**: la número 25 de las de abajo
+  del árbol.
+- **"Página 93"** es una página **de la tabla**: no forma parte del árbol, y
+  es donde está la fila de verdad.
+
+Las tres son páginas de 8 KB, por eso se cuentan como "tres páginas
+leídas". Lo que cambia es **qué hay dentro de cada una y para qué sirve**.
+
+**Por qué el índice no guarda la fila completa.** La hoja solo guarda el
+**valor** (`321725054`) y **dónde está su fila**, no la fila entera (el
+`login` y el resto de columnas), por dos razones: así el índice es
+**pequeño** (caben unos 400 valores por hoja, y el árbol tiene pocos
+niveles), y la fila ya está en la tabla, así que repetirla duplicaría los
+datos. Por eso, después de llegar a la hoja, hace falta **un paso más**:
+ir a la página 93 de la tabla a por la fila.
+
+**Cuando ese último paso no hace falta: `Index Only Scan`.** Si todo lo que
+pide la consulta ya está **dentro del índice**, PostgreSQL responde sin
+abrir ninguna página de la tabla. Por ejemplo,
+`SELECT repo_id FROM actor_repo WHERE actor_id = 175728472` solo pide
+`repo_id` y filtra por `actor_id`, y las dos columnas ya están en las hojas
+del índice `(actor_id, repo_id)`. Con `EXPLAIN`, PostgreSQL lo muestra
+como `Index Only Scan using actor_repo_pkey`: el "Only" significa "solo el
+índice". A un índice que contiene todo lo que una consulta necesita se le
+llama **índice que cubre la consulta** (*covering index*).
+
 **Por qué el número de pasos crece tan despacio.** Esta es la parte más
 importante del árbol B, y se entiende mejor con un árbol en miniatura.
 

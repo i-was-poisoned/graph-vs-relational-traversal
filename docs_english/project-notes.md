@@ -2703,6 +2703,77 @@ Look up actor 321725054:
 (around a hundred for 14,515 rows) without an index. And inside each page, the
 search for the exact value is done by "halving", like in the game.
 
+**Pages and leaves: not the same thing.** The drawing shows "root", "leaf
+25" and "page 93", and it's easy to mix them up. Note that **"leaf" comes
+from the tree metaphor** (the pages at the bottom level of the tree), not
+from a leaf of paper. They're two different ideas:
+
+- **Page = the container.** It's the fixed-size "box" (8 KB) in which
+  PostgreSQL stores **everything** on disk. It's a unit of
+  **storage**.
+- **Leaf = a role within the tree.** It's the name a page gets
+  **based on where it sits in the B-tree**: the ones on the bottom level.
+  It's a **position** or a **function**.
+
+**Every leaf is a page, but not every page is a leaf.** An
+analogy: an office filing cabinet full of **folders, all the same
+size** (the pages). Depending on what each folder is used for, it gets a
+different name:
+
+| Type of page | Where it is | What it contains | In the office filing cabinet |
+|---|---|---|---|
+| **Root** | At the top of the index tree (there's only one) | Signposts: "up to 300,000,000 → leaf 24..." | The general index folder: "customers A–F, drawer 1; G–M, drawer 2..." |
+| **Intermediate page** | Between the root and the leaves (only in trees with 3 or more levels) | More signposts, more detailed | A drawer's folder: "customers Smith–Snow, section 4..." |
+| **Leaf** | At the bottom of the index tree | Each value, sorted, with the address of its row: "321,725,054 → row on page 93" | The final index card: "Smith, Ana: file on shelf 93" |
+| **Table page** | **Not in the tree**: it's the table itself | The **complete rows**: `id = 321725054, login = 'peitongshi'` | The actual **file**, on shelf 93 |
+
+The first three make up the **index**; the last one is the **table**.
+
+**They're two separate "files".** PostgreSQL stores two separate things
+on disk, and both are made of pages:
+
+```
+THE INDEX (actor_pkey)                       THE TABLE (actor)
+made of pages, organized as a tree           made of pages, with the rows
+                                             (in no particular order)
+  [ root ]            ← index page
+     │
+  [ leaf 24 ][ leaf 25 ][ leaf 26 ]...       [ page 1 ][ page 2 ]...[ page 93 ]...
+              ← index pages                       ← table pages
+              (the bottom-level ones)
+                   │                                                     ▲
+                   └── "321,725,054 → row on page 93" ───────────────────┘
+```
+
+So, in the lookup drawing:
+
+- **"Root"** is a page **of the index** (the top one).
+- **"Leaf 25"** is another page **of the index**: number 25 of the ones at
+  the bottom of the tree.
+- **"Page 93"** is a page **of the table**: it's not part of the tree, and
+  it's where the actual row is.
+
+All three are 8 KB pages, which is why they count as "three pages
+read". What changes is **what's inside each one and what it's for**.
+
+**Why the index doesn't store the complete row.** The leaf only stores the
+**value** (`321725054`) and **where its row is**, not the whole row (the
+`login` and the rest of the columns), for two reasons: that way the index
+is **small** (about 400 values fit per leaf, and the tree has few
+levels), and the row is already in the table, so repeating it would
+duplicate the data. That's why, after reaching the leaf, **one more step**
+is needed: going to page 93 of the table to fetch the row.
+
+**When that last step isn't needed: `Index Only Scan`.** If everything the
+query asks for is already **inside the index**, PostgreSQL answers without
+opening any page of the table. For example,
+`SELECT repo_id FROM actor_repo WHERE actor_id = 175728472` only asks for
+`repo_id` and filters by `actor_id`, and both columns are already in the
+leaves of the `(actor_id, repo_id)` index. With `EXPLAIN`, PostgreSQL shows
+it as `Index Only Scan using actor_repo_pkey`: the "Only" means "only the
+index". An index that contains everything a query needs is called a
+**covering index** (it **covers the query**).
+
 **Why the number of steps grows so slowly.** This is the most
 important part of the B-tree, and it's easiest to understand with a miniature tree.
 
