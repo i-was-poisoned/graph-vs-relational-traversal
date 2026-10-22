@@ -2739,8 +2739,13 @@ couverts.
 créent leur index, comme les clés primaires. Les arêtes, elles, **n'ont pas
 besoin d'index** : dans un graphe, chaque nœud garde déjà des liens directs
 vers ses propres arêtes (*index-free adjacency*, « adjacence sans index »).
-Cette différence — des index pour joindre des tables contre des liens
-directs entre nœuds — est exactement ce que le benchmark veut mesurer.
+
+> 🎯 **L'idée centrale de tout le projet :** cette différence — **des index
+> pour joindre des tables** (PostgreSQL) contre **des liens directs entre
+> nœuds** (Neo4j) — est **exactement ce que le benchmark veut mesurer**. Au
+> fond, la question de recherche est de savoir à partir de combien de sauts,
+> et avec quel volume de données, une façon de trouver les connexions
+> devient plus rapide que l'autre.
 
 **`ANALYZE`.** À la fin du chargement, `load_postgres.py` exécute `ANALYZE`
 sur les trois tables. Avant d'exécuter chaque requête, PostgreSQL décide
@@ -3046,6 +3051,65 @@ recherches sur cette colonne. Si une colonne sert à joindre des tables, il
 faut l'indexer à part, comme nous l'avons fait avec `repo_id`. (`actor_id`
 n'en a pas besoin, car elle vient déjà en premier dans l'index de la clé
 primaire composée.)
+
+#### Clé primaire, index normal et clé étrangère : trois outils, trois rôles
+
+En lisant le schéma de `load_postgres.py`, il est facile de confondre ces
+trois pièces, car elles apparaissent parfois sur la même colonne. Chacune
+joue **un rôle différent** :
+
+| | Clé primaire (`PRIMARY KEY`) | Index normal (`CREATE INDEX`) | Clé étrangère (`REFERENCES`) |
+|---|---|---|---|
+| Trouve-t-elle les lignes rapidement ? | ✅ Oui : elle crée un index automatiquement | ✅ Oui : **c'est sa raison d'être** | ❌ Non : **elle ne crée aucun index** |
+| Oblige-t-elle la valeur à être unique ? | ✅ Oui | ❌ Non : **il permet les valeurs répétées** | ❌ Non |
+| Oblige-t-elle la valeur à ne pas être vide ? | ✅ Oui (`NOT NULL` inclus) | ❌ Non | ❌ Non (sur nos colonnes, c'est le `NOT NULL` séparé qui s'en charge) |
+| Vérifie-t-elle que la valeur existe dans une autre table ? | ❌ Non | ❌ Non | ✅ Oui : **c'est sa raison d'être** |
+| Combien par table ? | Une **seule** (même si elle peut porter sur plusieurs colonnes) | Autant qu'il en faut | Autant qu'il en faut |
+
+En une phrase : **la clé primaire identifie et trouve ; l'index ne fait que
+trouver ; la clé étrangère ne fait que vérifier**.
+
+**Les trois dans `actor_repo`, colonne par colonne :**
+
+| Colonne | Clé étrangère | Clé primaire | Index qui la rend rapide |
+|---|---|---|---|
+| `actor_id` | ✅ Pointe vers `actor.id` | **Fait partie** de la paire `(actor_id, repo_id)` | Celui de la clé primaire (`actor_id` vient en premier) |
+| `repo_id` | ✅ Pointe vers `repo.id` | **Fait partie** de la paire `(actor_id, repo_id)` | `actor_repo_repo_id_idx`, l'index normal créé à la main |
+
+Aucune des deux colonnes n'est une clé primaire **à elle seule**. La clé
+primaire, c'est la **paire**, et ce qui ne peut pas se répéter, c'est la
+paire entière :
+
+| `actor_id` | `repo_id` | Autorisé ? |
+|---|---|---|
+| 175728472 (Copilot) | 444497690 (LedgerHQ/ledger-live) | ✅ |
+| 1247371 | 444497690 (LedgerHQ/ledger-live) | ✅ Le `repo_id` se répète, mais la paire est différente |
+| 175728472 (Copilot) | 873328 (getsentry/sentry) | ✅ L'`actor_id` se répète, mais la paire est différente |
+| 175728472 (Copilot) | 444497690 (LedgerHQ/ledger-live) | ❌ **La paire existe déjà** : ce serait une connexion répétée |
+
+**Pourquoi l'index de `repo_id` est un index normal et non unique.** Le
+même `repo_id` apparaît **de nombreuses fois** dans `actor_repo`, une fois
+pour chaque acteur ayant produit des événements dans ce dépôt
+(`LedgerHQ/ledger-live` apparaît 4 fois). Un index qui obligerait
+`repo_id` à être unique rejetterait la deuxième ligne de chaque dépôt
+partagé. C'est pourquoi c'est un index **normal** : il aide seulement à
+**trouver rapidement**, sans imposer aucune règle. C'est exactement ce
+qu'il faut pour le saut dépôt → acteur.
+
+**Pourquoi les trois sont nécessaires en même temps.** Chacune comble un
+vide que les autres laissent :
+
+- Sans la **clé primaire**, rien n'empêcherait d'enregistrer deux fois la
+  même connexion.
+- Sans la **clé étrangère**, rien n'empêcherait d'enregistrer une
+  connexion avec un acteur ou un dépôt qui n'existe pas.
+- Sans l'**index de `repo_id`**, le saut dépôt → acteur devrait lire la
+  table entière.
+
+(Dans Neo4j, comme expliqué plus bas, ces trois besoins sont couverts
+autrement : les contraintes d'unicité jouent le rôle des clés primaires,
+et une arête ne peut pas exister sans ses deux nœuds, donc ni clé
+étrangère ni index ne sont nécessaires pour la parcourir.)
 
 #### Comment on parcourt une relation dans une base relationnelle : le JOIN
 

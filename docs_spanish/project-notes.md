@@ -2640,8 +2640,13 @@ cubiertos.
 crean su índice, igual que las claves primarias. Las aristas, en cambio,
 **no necesitan índice**: en un grafo, cada nodo ya guarda enlaces directos
 a sus propias aristas (*index-free adjacency*, "adyacencia sin índices").
-Esa diferencia, índices para unir tablas frente a enlaces directos entre
-nodos, es justo lo que el benchmark quiere medir.
+
+> 🎯 **La idea central de todo el proyecto:** esa diferencia, **índices
+> para unir tablas** (PostgreSQL) frente a **enlaces directos entre nodos**
+> (Neo4j), es **justo lo que el benchmark quiere medir**. La pregunta de
+> investigación es, en el fondo, en qué número de saltos y con qué volumen
+> de datos una forma de encontrar las conexiones empieza a ser más rápida
+> que la otra.
 
 **`ANALYZE`.** Al terminar la carga, `load_postgres.py` ejecuta `ANALYZE`
 sobre las tres tablas. Antes de ejecutar cada consulta, PostgreSQL decide
@@ -2931,6 +2936,64 @@ existe, pero **no** acelera las búsquedas por esa columna. Si una columna
 se usa para unir tablas, hay que indexarla aparte, como hicimos con
 `repo_id`. (`actor_id` no lo necesita porque ya va primero en el índice de
 la clave primaria compuesta.)
+
+#### Clave primaria, índice normal y clave foránea: tres herramientas, tres trabajos
+
+Al leer el esquema de `load_postgres.py` es fácil confundir estas tres
+piezas, porque a veces aparecen en la misma columna. Cada una hace **un
+trabajo distinto**:
+
+| | Clave primaria (`PRIMARY KEY`) | Índice normal (`CREATE INDEX`) | Clave foránea (`REFERENCES`) |
+|---|---|---|---|
+| ¿Encuentra filas rápido? | ✅ Sí: crea un índice automáticamente | ✅ Sí: **para eso existe** | ❌ No: **no crea ningún índice** |
+| ¿Obliga a que el valor sea único? | ✅ Sí | ❌ No: **permite valores repetidos** | ❌ No |
+| ¿Obliga a que no esté vacío? | ✅ Sí (`NOT NULL` incluido) | ❌ No | ❌ No (en nuestras columnas lo hace el `NOT NULL` aparte) |
+| ¿Comprueba que el valor existe en otra tabla? | ❌ No | ❌ No | ✅ Sí: **para eso existe** |
+| ¿Cuántas por tabla? | Solo **una** (aunque puede tener varias columnas) | Todas las que haga falta | Todas las que haga falta |
+
+En una frase: **la clave primaria identifica y encuentra; el índice solo
+encuentra; la clave foránea solo comprueba**.
+
+**Las tres en `actor_repo`, columna a columna:**
+
+| Columna | Clave foránea | Clave primaria | Índice que la hace rápida |
+|---|---|---|---|
+| `actor_id` | ✅ Apunta a `actor.id` | **Parte** de la pareja `(actor_id, repo_id)` | El de la clave primaria (`actor_id` va primero) |
+| `repo_id` | ✅ Apunta a `repo.id` | **Parte** de la pareja `(actor_id, repo_id)` | `actor_repo_repo_id_idx`, el índice normal creado a mano |
+
+Ninguna de las dos columnas es clave primaria **por sí sola**. La clave
+primaria es la **pareja**, y lo que no se puede repetir es la pareja
+entera:
+
+| `actor_id` | `repo_id` | ¿Se permite? |
+|---|---|---|
+| 175728472 (Copilot) | 444497690 (LedgerHQ/ledger-live) | ✅ |
+| 1247371 | 444497690 (LedgerHQ/ledger-live) | ✅ Se repite el `repo_id`, pero la pareja es otra |
+| 175728472 (Copilot) | 873328 (getsentry/sentry) | ✅ Se repite el `actor_id`, pero la pareja es otra |
+| 175728472 (Copilot) | 444497690 (LedgerHQ/ledger-live) | ❌ **La pareja ya existe**: sería una conexión repetida |
+
+**Por qué el índice de `repo_id` es un índice normal y no único.** El mismo
+`repo_id` aparece **muchas veces** en `actor_repo`, una por cada actor que
+ha hecho eventos en ese repo (`LedgerHQ/ledger-live` aparece 4 veces). Un
+índice que obligara a que `repo_id` fuera único rechazaría la segunda fila
+de cada repo compartido. Por eso es un índice **normal**: solo ayuda a
+**encontrar rápido**, sin imponer ninguna regla. Es exactamente lo que
+hace falta para el salto repo → actor.
+
+**Por qué hacen falta las tres a la vez.** Cada una cubre un hueco que las
+otras dejan:
+
+- Sin la **clave primaria**, nada impediría guardar dos veces la misma
+  conexión.
+- Sin la **clave foránea**, nada impediría guardar una conexión con un
+  actor o un repo que no existe.
+- Sin el **índice de `repo_id`**, el salto repo → actor tendría que leer la
+  tabla entera.
+
+(En Neo4j, como se explica más abajo, las tres necesidades se cubren de
+otra forma: las restricciones de unicidad hacen el papel de las claves
+primarias, y una arista no puede existir sin sus dos nodos, así que no
+hace falta ni clave foránea ni índice para recorrerla.)
 
 #### Cómo se recorre una relación en una base de datos relacional: el JOIN
 

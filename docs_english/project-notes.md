@@ -2557,9 +2557,13 @@ for each direction, both hops are covered.
 **In Neo4j**, the uniqueness constraints on `Actor.id` and `Repo.id` build
 their index, just like primary keys. The edges, on the other hand, **don't
 need an index**: in a graph, every node already stores direct links to its
-own edges (*index-free adjacency*). That difference — indexes to join
-tables versus direct links between nodes — is exactly what the benchmark
-wants to measure.
+own edges (*index-free adjacency*).
+
+> 🎯 **The central idea of the whole project:** that difference — **indexes
+> to join tables** (PostgreSQL) versus **direct links between nodes**
+> (Neo4j) — is **exactly what the benchmark wants to measure**. At heart,
+> the research question asks at what number of hops, and at what data
+> volume, one way of finding connections starts to beat the other.
 
 **`ANALYZE`.** At the end of the load, `load_postgres.py` runs `ANALYZE` on
 the three tables. Before running each query, PostgreSQL decides *how* to do
@@ -2840,6 +2844,63 @@ reference exists, but it **doesn't** speed up lookups on that column. If a
 column is used to join tables, it has to be indexed separately, as we did
 with `repo_id`. (`actor_id` doesn't need it because it already comes first
 in the composite primary key's index.)
+
+#### Primary key, normal index and foreign key: three tools, three jobs
+
+When reading the schema in `load_postgres.py` it's easy to mix up these
+three pieces, because they sometimes show up on the same column. Each one
+does **a different job**:
+
+| | Primary key (`PRIMARY KEY`) | Normal index (`CREATE INDEX`) | Foreign key (`REFERENCES`) |
+|---|---|---|---|
+| Does it find rows fast? | ✅ Yes: it creates an index automatically | ✅ Yes: **that's what it's for** | ❌ No: **it doesn't create any index** |
+| Does it force the value to be unique? | ✅ Yes | ❌ No: **it allows repeated values** | ❌ No |
+| Does it force the value not to be empty? | ✅ Yes (`NOT NULL` included) | ❌ No | ❌ No (on our columns the separate `NOT NULL` does it) |
+| Does it check that the value exists in another table? | ❌ No | ❌ No | ✅ Yes: **that's what it's for** |
+| How many per table? | Only **one** (though it can span several columns) | As many as needed | As many as needed |
+
+In one sentence: **the primary key identifies and finds; the index only
+finds; the foreign key only checks**.
+
+**All three on `actor_repo`, column by column:**
+
+| Column | Foreign key | Primary key | Index that makes it fast |
+|---|---|---|---|
+| `actor_id` | ✅ Points at `actor.id` | **Part** of the pair `(actor_id, repo_id)` | The primary key's (`actor_id` comes first) |
+| `repo_id` | ✅ Points at `repo.id` | **Part** of the pair `(actor_id, repo_id)` | `actor_repo_repo_id_idx`, the normal index created by hand |
+
+Neither of the two columns is a primary key **on its own**. The primary
+key is the **pair**, and what can't be repeated is the whole pair:
+
+| `actor_id` | `repo_id` | Allowed? |
+|---|---|---|
+| 175728472 (Copilot) | 444497690 (LedgerHQ/ledger-live) | ✅ |
+| 1247371 | 444497690 (LedgerHQ/ledger-live) | ✅ The `repo_id` repeats, but it's a different pair |
+| 175728472 (Copilot) | 873328 (getsentry/sentry) | ✅ The `actor_id` repeats, but it's a different pair |
+| 175728472 (Copilot) | 444497690 (LedgerHQ/ledger-live) | ❌ **The pair already exists**: it would be a repeated connection |
+
+**Why the `repo_id` index is a normal index and not a unique one.** The
+same `repo_id` appears **many times** in `actor_repo`, once for each actor
+that has made events in that repo (`LedgerHQ/ledger-live` appears 4
+times). An index that forced `repo_id` to be unique would reject the
+second row of every shared repo. That's why it's a **normal** index: it
+only helps **find fast**, without imposing any rule. It's exactly what the
+repo → actor hop needs.
+
+**Why all three are needed at once.** Each one covers a gap the others
+leave:
+
+- Without the **primary key**, nothing would stop the same connection from
+  being stored twice.
+- Without the **foreign key**, nothing would stop a connection from being
+  stored with an actor or a repo that doesn't exist.
+- Without the **`repo_id` index**, the repo → actor hop would have to read
+  the whole table.
+
+(In Neo4j, as explained further down, these three needs are covered
+differently: uniqueness constraints play the role of primary keys, and an
+edge can't exist without its two nodes, so neither a foreign key nor an
+index is needed to walk it.)
 
 #### How a relationship is walked in a relational database: the JOIN
 
