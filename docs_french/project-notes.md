@@ -2549,10 +2549,38 @@ Quelques détails :
 
 ### Les index : les « aides normales » de chaque côté
 
-Un **index**, c'est comme l'index alphabétique à la fin d'un livre : au
-lieu de lire toutes les pages pour trouver un mot, on le cherche dans
-l'index et on va directement à la bonne page. Sans index, une base
-relationnelle devrait lire toute la table à chaque recherche.
+**Ce qu'est un index.** Un index est une structure supplémentaire que la
+base de données garde **à côté** d'une table, pour trouver des lignes
+**sans avoir à toutes les lire**. Il fonctionne comme l'index alphabétique
+à la fin d'un livre : pour trouver le mot « récursivité » dans un livre de
+800 pages, au lieu de lire les 800 pages, on le cherche dans l'index (trié
+par ordre alphabétique, donc on le trouve tout de suite) et on voit qu'il
+est à la page 312. L'index ne contient pas le livre : il contient **chaque
+mot et l'endroit où le trouver**.
+
+Dans une base de données, c'est pareil. Par exemple, l'index sur
+`actor.id` garde **chaque `id`, trié, et l'endroit où se trouve sa ligne**
+sur le disque :
+
+- **Sans index**, pour trouver l'acteur `321725054`, PostgreSQL devrait lire
+  les 14 515 lignes d'`actor` une par une et comparer chaque `id`. On
+  appelle cela un **parcours séquentiel** (*sequential scan*).
+- **Avec un index**, il va directement à la ligne. On appelle cela un
+  **parcours par index** (*index scan*).
+
+En interne, PostgreSQL organise ses index en **arbre B** (*B-tree*) : les
+valeurs, triées et réparties sur quelques niveaux, comme un dictionnaire
+qu'on ouvre au milieu, puis au quart, etc. Grâce à cela, trouver une
+valeur demande **très peu d'étapes**, même si la table compte des millions
+de lignes.
+
+**Ce que coûte un index :** il occupe de la place sur le disque, et à
+chaque insertion d'une ligne il faut aussi mettre à jour les index de la
+table ; les chargements sont donc un peu plus lents. C'est pourquoi on ne
+met pas un index sur chaque colonne, seulement sur celles qui servent à
+**chercher** ou à **joindre des tables**. (La partie « Concepts clés », juste
+en dessous, l'explique plus en détail, avec des exemples
+d'`EXPLAIN`.)
 
 Le principe de conception (« la requête d'abord ») a fixé une règle :
 donner à chaque côté **ses aides normales, ni plus ni moins**. Pour
@@ -2565,12 +2593,38 @@ PostgreSQL, ce sont ces index :
 | `(actor_id, repo_id)` | Automatiquement, par la `PRIMARY KEY` d'`actor_repo` | **Acteur → ses dépôts** : comme `actor_id` vient en premier, il sert à chercher par acteur |
 | `repo_id` | À la main : `CREATE INDEX actor_repo_repo_id_idx` | **Dépôt → ses acteurs** : le sens inverse, que l'index précédent ne couvre pas |
 
-Les deux derniers sont les plus importants. Le parcours du benchmark
-(`acteur → dépôt → acteur → dépôt`) utilise la table `actor_repo` **dans
-les deux sens** à chaque saut : d'un acteur vers ses dépôts, et d'un dépôt
-vers ses acteurs. Chaque sens a besoin de son propre index ; sans celui de
-`repo_id`, chaque saut « en arrière » obligerait à lire toute la table, et
-la comparaison serait injuste pour PostgreSQL.
+**Les deux derniers sont les plus importants, et il faut les deux.** Le
+parcours du benchmark, `acteur → dépôt → acteur → dépôt`, utilise la table
+`actor_repo` dans **deux sens différents**, en les alternant à chaque
+saut :
+
+| Saut | Question | Recherche dans `actor_repo` | Index qui la rend rapide |
+|---|---|---|---|
+| acteur → dépôt | « Dans quels dépôts **cet acteur** a-t-il fait des événements ? » | Lignes avec `actor_id = X` | `(actor_id, repo_id)`, celui de la clé primaire |
+| dépôt → acteur | « Quels acteurs ont fait des événements dans **ce dépôt** ? » | Lignes avec `repo_id = Y` | `repo_id`, celui créé à la main |
+
+Le second saut parcourt la connexion **dans le sens inverse** de celui où
+elle a été enregistrée : la connexion va de l'acteur au dépôt (la flèche de
+Neo4j pointe d'`Actor` vers `Repo`), et ici on va du dépôt vers ses
+acteurs.
+
+**Pourquoi un seul index ne suffit pas pour les deux sens.** L'index de la
+clé primaire est trié **d'abord par `actor_id`**, comme un annuaire trié
+par nom de famille. Trouver toutes les lignes d'un acteur est rapide, car
+elles sont regroupées (comme tous les « García » de l'annuaire). Mais
+trouver toutes les lignes d'un dépôt avec cet index, c'est comme chercher
+toutes les personnes prénommées « Ana » dans un annuaire trié par nom de
+famille : elles sont **éparpillées dans tout l'annuaire**, et il faudrait
+le lire en entier. C'est pourquoi il faut un **second index, trié par
+`repo_id`**.
+
+**Ce qui se passerait sans lui :** à chaque saut dépôt → acteur, PostgreSQL
+devrait lire **toute** la table `actor_repo` (15 053 lignes dans le
+benchmark), et le faire **une fois pour chaque dépôt** venant du saut
+précédent. Neo4j n'a pas ce problème, car chaque nœud `Repo` sait déjà
+quelles arêtes arrivent jusqu'à lui. Mesurer ainsi reviendrait à comparer
+un PostgreSQL privé de son aide normale à un Neo4j complet : la
+comparaison serait **injuste** pour PostgreSQL.
 
 **Dans Neo4j**, les contraintes d'unicité sur `Actor.id` et `Repo.id`
 créent leur index, comme les clés primaires. Les arêtes, elles, **n'ont pas
@@ -2586,6 +2640,381 @@ table d'abord ?), et pour bien décider il utilise des statistiques sur les
 données. Juste après un chargement massif, ces statistiques ne sont pas à
 jour, et `ANALYZE` les rafraîchit. Cela fait aussi partie des aides
 normales du côté relationnel.
+
+### Concepts clés : index, clés primaires, clés étrangères, et pourquoi un graphe n'en a pas besoin
+
+Cette partie développe le tableau **« Ce qui est créé dans chaque base
+de données »** et l'explication des index juste au-dessus : ce qu'est
+exactement chaque chose, s'il y a des index ou non, et pourquoi le graphe
+fonctionne autrement. Ce sont les concepts centraux du projet, car la
+question de recherche porte justement sur **la façon dont chaque base de
+données trouve les connexions**.
+
+#### D'abord, la réponse courte : y a-t-il des index, ou les clés primaires suffisent-elles ?
+
+**Il y a des index.** Une `PRIMARY KEY` n'est pas une alternative à un
+index : **PostgreSQL crée automatiquement un index** pour chaque clé
+primaire, car il en a besoin pour vérifier, à chaque insertion, que la
+valeur n'est pas répétée. Mais les clés primaires **ne couvrent pas toutes
+les recherches**, et les clés étrangères **ne créent aucun index** dans
+PostgreSQL. C'est pourquoi il y a un index de plus, créé à la main.
+
+Voici tout ce qui existe dans chaque base de données (c'est pareil dans
+`gharchive` et dans `gharchive24h`) :
+
+| Structure | Base | Comment elle est créée | Crée-t-elle un index ? | À quoi elle sert |
+|---|---|---|---|---|
+| `PRIMARY KEY` d'`actor` (`id`) | PostgreSQL | `id BIGINT PRIMARY KEY` | **Oui, automatiquement :** `actor_pkey` | Qu'il n'y ait pas deux acteurs avec le même `id`, et trouver un acteur par son `id` instantanément |
+| `PRIMARY KEY` de `repo` (`id`) | PostgreSQL | `id BIGINT PRIMARY KEY` | **Oui, automatiquement :** `repo_pkey` | La même chose, pour les dépôts |
+| `PRIMARY KEY` d'`actor_repo` (`actor_id`, `repo_id`) | PostgreSQL | `PRIMARY KEY (actor_id, repo_id)` | **Oui, automatiquement :** `actor_repo_pkey` (composé, sur deux colonnes) | Qu'aucune paire ne se répète, et chercher **les dépôts d'un acteur** |
+| Clé étrangère `actor_repo.actor_id` → `actor.id` | PostgreSQL | `REFERENCES actor (id)` | **Non** | Que chaque connexion pointe vers un acteur qui existe |
+| Clé étrangère `actor_repo.repo_id` → `repo.id` | PostgreSQL | `REFERENCES repo (id)` | **Non** | Que chaque connexion pointe vers un dépôt qui existe |
+| Index sur `actor_repo.repo_id` | PostgreSQL | `CREATE INDEX actor_repo_repo_id_idx` (à la main) | **Oui :** c'est l'index lui-même | Chercher **les acteurs d'un dépôt** : le sens que la clé primaire ne couvre pas |
+| Contrainte `UNIQUE` sur `Actor.id` | Neo4j | `CREATE CONSTRAINT ... REQUIRE a.id IS UNIQUE` | **Oui, automatiquement** | Qu'il n'y ait pas deux acteurs avec le même `id`, et trouver un acteur par son `id` instantanément |
+| Contrainte `UNIQUE` sur `Repo.id` | Neo4j | `CREATE CONSTRAINT ... REQUIRE r.id IS UNIQUE` | **Oui, automatiquement** | La même chose, pour les dépôts |
+| Les arêtes `INTERACTED_WITH` | Neo4j | `CREATE (a)-[:INTERACTED_WITH]->(r)` | **N'ont pas besoin d'index** | Chaque nœud garde des liens directs vers ses arêtes (voir plus bas) |
+
+**En résumé :** PostgreSQL a **4 index** (trois automatiques pour les clés
+primaires et un à la main), et Neo4j en a **2** (ceux des contraintes). Les
+connexions du graphe n'ont pas d'index parce qu'elles n'en ont pas besoin :
+cette différence est le cœur du benchmark.
+
+**Comment le vérifier vous-même :**
+
+```sql
+-- PostgreSQL (Query Tool de pgAdmin, base gharchive) : les index des trois tables
+SELECT tablename, indexname, indexdef
+FROM pg_indexes
+WHERE tablename IN ('actor', 'repo', 'actor_repo')
+ORDER BY tablename, indexname;
+```
+
+```cypher
+// Neo4j (Query, base gharchive) : les contraintes et les index
+SHOW CONSTRAINTS;
+SHOW INDEXES;
+```
+
+Dans pgAdmin, on les voit aussi dans l'arborescence : dans chaque table,
+**Indexes** (les index) et **Constraints** (les clés primaires et
+étrangères). Dans Neo4j, `SHOW INDEXES` affiche en plus deux index que
+Neo4j crée toujours de lui-même (de type `LOOKUP`), qui servent à trouver
+rapidement « tous les nœuds ayant une étiquette » ou « toutes les arêtes
+d'un type ».
+
+#### Ce qu'est un index, plus en détail
+
+Les bases (l'analogie du livre, et le parcours séquentiel face au parcours
+par index) sont expliquées juste au-dessus, dans « Les index ». Ici, on va
+un peu plus loin : comment un index est construit à l'intérieur, ce qu'il
+coûte et comment PostgreSQL décide de l'utiliser.
+
+**Comment il est fait à l'intérieur : l'arbre B (*B-tree*).** Le type
+d'index que PostgreSQL utilise par défaut est un **arbre B** : les valeurs
+sont triées et réparties en niveaux, comme un arbre à l'envers. Pour
+chercher une valeur, on descend depuis la racine en choisissant à chaque
+niveau la bonne branche, comme quand on cherche un mot dans un dictionnaire
+en l'ouvrant au milieu, puis au quart, etc. C'est pourquoi le nombre
+d'étapes augmente très lentement avec la taille de la table :
+
+| Lignes dans la table | Toutes les lire (sans index) | Étapes approximatives avec un arbre B |
+|---|---|---|
+| 14 515 (benchmark) | 14 515 | environ 3 ou 4 niveaux |
+| 424 098 (24 heures) | 424 098 | environ 3 ou 4 niveaux |
+| 100 millions | 100 millions | environ 4 ou 5 niveaux |
+
+(Chaque « niveau » de l'arbre couvre des centaines de valeurs, donc même des
+tables énormes ont très peu de niveaux.)
+
+**Ce que coûte un index.** Ce n'est pas gratuit :
+
+- **De l'espace :** c'est une structure de plus, stockée sur le disque.
+- **Des écritures plus lentes :** chaque fois qu'une ligne est insérée, la
+  base de données doit aussi mettre à jour tous les index de cette table.
+  C'est pourquoi, dans la pipeline de 24 heures (plus loin dans ces notes), charger `actor_repo` (avec
+  deux index et deux clés étrangères) a pris 27 secondes, et `actor` ou
+  `repo` (avec un seul index) à peine une.
+
+C'est pourquoi on ne met pas un index sur chaque colonne : seulement sur
+celles qui servent à **chercher** ou à **joindre des tables**. C'est le
+principe de « la requête d'abord » appliqué aux index : `login` et `name`
+n'ont pas d'index parce que les requêtes du benchmark ne cherchent pas par
+ces colonnes.
+
+**Le planificateur décide s'il utilise l'index.** Qu'un index existe
+n'oblige pas à l'utiliser. Avant d'exécuter chaque requête, PostgreSQL
+calcule ce qui est le moins coûteux (d'où l'importance d'`ANALYZE`, qui lui
+fournit les statistiques pour le calculer). Pour voir ce qu'il a décidé, on
+met `EXPLAIN` devant la requête :
+
+```sql
+EXPLAIN SELECT * FROM actor WHERE id = 321725054;
+-- Index Scan using actor_pkey on actor ...     <- utilise l'index de la clé primaire
+
+EXPLAIN SELECT * FROM actor WHERE login = 'peitongshi';
+-- Seq Scan on actor ... Filter: (login = ...)  <- pas d'index : lit toute la table
+```
+
+(Dans Neo4j, l'équivalent est de mettre `EXPLAIN` ou `PROFILE` devant une
+requête Cypher.)
+
+#### Ce qu'est une clé primaire (*primary key*)
+
+La **clé primaire** est la colonne (ou le groupe de colonnes) qui
+**identifie chaque ligne de façon unique**, comme le numéro de la carte
+d'identité d'une personne. Elle a trois règles que la base de données
+elle-même fait respecter :
+
+1. **Unique :** il ne peut pas y avoir deux lignes avec la même valeur.
+2. **Jamais vide** (`NOT NULL`) : chaque ligne doit en avoir une.
+3. **Une seule par table**, même si elle peut être formée de plusieurs
+   colonnes.
+
+**Dans ce projet :**
+
+- Dans `actor` et `repo`, la clé primaire est l'`id` de GitHub. C'est une
+  **clé naturelle** : un identifiant qui vient déjà dans les données, et
+  non un identifiant inventé par nous (ce serait une *clé de
+  substitution*, comme un numéro séquentiel 1, 2, 3...). On a choisi l'`id`
+  et pas le nom parce que le nom peut changer (le cas `lucky521-png` →
+  `peitongshi`) et n'est pas unique (les deux comptes `Copilot`).
+- Dans `actor_repo`, la clé primaire est **composée** : la **paire**
+  `(actor_id, repo_id)`. Aucune des deux colonnes n'est unique séparément
+  (un acteur peut être dans beaucoup de dépôts, et un dépôt peut avoir
+  beaucoup d'acteurs), mais la paire, si. C'est la base de données
+  elle-même qui fait respecter la décision « une seule connexion par paire
+  acteur–dépôt ».
+
+**Pourquoi c'est important :**
+
+- **Identité :** chaque ligne peut être désignée sans ambiguïté.
+- **Pas de doublons :** la base de données rejette toute insertion qui
+  répète une clé, même si l'erreur vient de notre code.
+- **Cible des clés étrangères :** c'est la valeur vers laquelle pointent
+  les connexions (voir plus bas).
+- **Recherche rapide :** son index automatique permet de trouver une ligne
+  par sa clé instantanément.
+
+**L'index composé** d'`actor_repo` est trié d'abord par `actor_id`, puis
+par `repo_id`. C'est pourquoi il sert à trouver les dépôts d'un acteur,
+mais pas les acteurs d'un dépôt, et qu'il a fallu l'index supplémentaire
+sur `repo_id` (voir, plus haut, le tableau des deux sens du parcours et
+l'analogie de l'annuaire).
+
+#### Ce qu'est une clé étrangère (*foreign key*)
+
+Une **clé étrangère** est une colonne qui **pointe vers la clé primaire
+d'une autre table**. Dans `actor_repo` :
+
+- `actor_id` pointe vers `actor.id` ;
+- `repo_id` pointe vers `repo.id`.
+
+C'est ainsi qu'une base de données relationnelle **représente les
+relations** : `actor_repo` ne garde ni l'acteur ni le dépôt, seulement leurs
+`id`, comme des « références ». C'est une **table de jonction** (*junction
+table*), la façon standard de représenter une relation **plusieurs à
+plusieurs** (un acteur peut avoir beaucoup de dépôts, et un dépôt beaucoup
+d'acteurs).
+
+**À quoi elle sert : l'intégrité référentielle.** La base de données
+garantit que **toute référence pointe vers quelque chose qui existe** :
+
+- On ne peut pas insérer dans `actor_repo` une connexion avec un
+  `actor_id` qui n'est pas dans `actor` : PostgreSQL la rejette. (C'est
+  pourquoi `load_postgres.py` charge `actor` et `repo` **avant**
+  `actor_repo`.)
+- On ne peut pas supprimer un acteur d'`actor` tant qu'une connexion le
+  désigne, sauf si l'on dit explicitement quoi faire de ces connexions (par
+  exemple, `ON DELETE CASCADE`, qui les supprimerait aussi). C'est pourquoi
+  `load_postgres.py` supprime `actor_repo` **avant** les deux autres.
+
+Sans clés étrangères, une erreur dans le code pourrait laisser des
+connexions « orphelines », qui pointent vers des acteurs ou des dépôts
+inexistants, et les parcours donneraient des résultats faux sans que
+personne ne s'en aperçoive.
+
+**Ce qu'elle coûte :** à chaque insertion dans `actor_repo`, PostgreSQL
+vérifie que l'acteur **et** le dépôt existent, c'est-à-dire **deux
+recherches par ligne**. C'est une autre des raisons pour lesquelles cette
+table met plus de temps à se charger.
+
+**Attention : une clé étrangère ne crée pas d'index** (dans PostgreSQL).
+C'est une erreur très courante de croire le contraire. La clé étrangère
+vérifie que la référence existe, mais elle **n'accélère pas** les
+recherches sur cette colonne. Si une colonne sert à joindre des tables, il
+faut l'indexer à part, comme nous l'avons fait avec `repo_id`. (`actor_id`
+n'en a pas besoin, car elle vient déjà en premier dans l'index de la clé
+primaire composée.)
+
+#### Comment on parcourt une relation dans une base relationnelle : le JOIN
+
+Dans une base relationnelle, les connexions **ne sont pas stockées comme
+des chemins** : elles sont **calculées au moment de la requête**, avec un
+**JOIN** (« jointure »), qui associe les lignes de deux tables ayant une
+valeur égale.
+
+Pour un saut (les dépôts d'un acteur), la requête est :
+
+```sql
+SELECT r.name
+FROM actor a
+JOIN actor_repo ar ON ar.actor_id = a.id     -- 1re jointure
+JOIN repo r        ON r.id = ar.repo_id      -- 2e jointure
+WHERE a.id = 321725054;
+```
+
+Ce que fait PostgreSQL, étape par étape (grâce aux index) :
+
+1. Il cherche l'acteur `321725054` dans l'index `actor_pkey`.
+2. Il cherche dans l'index `actor_repo_pkey` toutes les lignes avec cet
+   `actor_id` : il obtient leurs `repo_id`.
+3. Pour chaque `repo_id`, il cherche le dépôt dans l'index `repo_pkey`.
+
+Chaque flèche du parcours est une **recherche dans un index**, et chaque
+recherche a un coût qui dépend (un peu seulement, grâce à l'arbre B) de la
+taille totale de la table. Pour le parcours du benchmark
+(`acteur → dépôt → acteur → dépôt`), chaque saut ajoute **plus de JOIN**,
+et chaque JOIN est fait pour **toutes** les lignes qui arrivent du saut
+précédent. Si le nombre de lignes augmente à chaque saut, le travail
+augmente très vite.
+
+#### Pourquoi un graphe n'a ni clés primaires ni clés étrangères
+
+Une base de données graphe stocke les choses autrement :
+
+| Concept relationnel | Équivalent dans le graphe de Neo4j |
+|---|---|
+| Table (`actor`, `repo`) | **Étiquette** (*label*) : `:Actor`, `:Repo`. Regroupe les nœuds du même type |
+| Ligne | **Nœud** |
+| Colonne | **Propriété** (`id`, `login`, `name`) |
+| Table de jonction + clés étrangères (`actor_repo`) | **Arête** (*relationship*) : `-[:INTERACTED_WITH]->`, stockée comme un objet à part entière qui relie les deux nœuds |
+| Clé primaire | N'existe pas en tant que telle. On crée une **contrainte d'unicité** sur une propriété (`id`) |
+| JOIN | **Suivre l'arête** : aller d'un nœud à ses voisins |
+
+**Pourquoi les clés étrangères ne sont pas nécessaires :** dans le graphe,
+la connexion **n'est pas une valeur qui pointe vers une autre valeur** (un
+`actor_id` qu'il faut chercher dans une autre table). **C'est un objet à
+part entière qui relie directement les deux nœuds**. Une arête ne peut pas
+exister sans ses deux extrémités : Neo4j ne permet ni de créer une arête
+« dans le vide » ni de supprimer un nœud qui a encore des arêtes (d'où le
+`DETACH DELETE` de `load_neo4j.py`, qui supprime d'abord les arêtes).
+Autrement dit, **l'intégrité référentielle est incluse dans la structure
+elle-même**, sans avoir besoin de la déclarer.
+
+**Pourquoi il n'y a pas de « vraie » clé primaire :** Neo4j identifie
+chaque nœud en interne avec son propre identifiant (l'*element id*), qui
+**n'est pas** une de nos données et qu'il vaut mieux ne pas utiliser comme
+clé métier, car il peut être réutilisé si des nœuds sont supprimés. C'est
+pourquoi nous avons ajouté la **contrainte d'unicité** sur notre propriété
+`id` : elle joue le rôle de la clé primaire (pas de doublons, recherche
+rapide par index), mais elle est facultative et c'est nous qui la
+décidons.
+
+**Et le plus important : dans le graphe, l'index ne sert qu'à trouver le
+point de départ.** Une fois le premier nœud trouvé (par exemple, l'acteur
+`321725054`, grâce à la contrainte d'unicité), **plus aucun index n'est
+utilisé** : le parcours suit directement les arêtes.
+
+#### Ce qu'il y a à la place : l'adjacence sans index (*index-free adjacency*)
+
+Dans Neo4j, **chaque nœud garde l'endroit où se trouvent ses propres
+arêtes**, et chaque arête garde **l'endroit où se trouvent ses deux
+nœuds**. Conceptuellement :
+
+- l'enregistrement d'un nœud pointe vers ses arêtes ;
+- l'enregistrement d'une arête pointe vers son nœud de départ, son nœud
+  d'arrivée et l'arête suivante de chacun d'eux.
+
+(Les versions récentes de Neo4j organisent physiquement les données
+autrement, en regroupant les arêtes de chaque nœud, mais l'idée est la
+même : les connexions d'un nœud sont stockées **avec le nœud**.)
+
+Ainsi, aller d'un acteur à ses dépôts, ce n'est pas « chercher dans une
+table toutes les lignes dont l'`actor_id` vaut X », mais **« lire la liste
+des arêtes que le nœud a déjà »**. C'est comme la différence entre :
+
+- **Relationnel :** chercher les amis d'Ana dans l'annuaire de toute la
+  ville (une recherche, même rapide, dans une liste de tout le monde).
+- **Graphe :** ouvrir le carnet d'adresses d'Ana, où ses amis sont déjà
+  notés (suivre des liens qui sont déjà là).
+
+#### Pourquoi cela optimise (et pourquoi il faut le mesurer)
+
+| | PostgreSQL (relationnel) | Neo4j (graphe) |
+|---|---|---|
+| Trouver le point de départ | Une recherche dans un index (arbre B) | Une recherche dans un index (la contrainte) |
+| Chaque saut | Un JOIN : une **recherche dans un index** pour chaque ligne qui arrive | **Suivre des pointeurs** que le nœud a déjà |
+| Le coût d'un saut dépend-il de la taille **totale** de la base ? | Un peu : l'index grandit avec la table (même si c'est très lentement) | Non : il dépend seulement du **nombre d'arêtes de ce nœud** |
+| Ce qui augmente quand on ajoute des sauts | Le nombre de JOIN et de recherches dans les index | Le nombre d'arêtes suivies |
+
+**La théorie :** sur des parcours **courts** (un ou deux sauts), PostgreSQL
+est très rapide, car ses index sont très efficaces et il optimise les JOIN
+depuis des décennies. Sur des parcours **longs**, le graphe devrait gagner,
+car son coût ne dépend que de la partie du graphe parcourue, et non de la
+taille totale des tables.
+
+**Mais ce n'est qu'une hypothèse.** L'arbre B demande très peu d'étapes,
+même sur des tables énormes, les deux bases gardent en mémoire les données
+les plus utilisées, et le planificateur de PostgreSQL est très bon. **À
+partir de combien de sauts et avec quel volume de données le gagnant
+change**, c'est exactement ce que ce projet veut **mesurer**, au lieu de le
+tenir pour acquis.
+
+#### Autres concepts utiles à connaître
+
+**La normalisation.** C'est la façon d'organiser les tables pour ne pas
+stocker deux fois la même donnée. Par exemple, le `login` d'un acteur se
+trouve **uniquement** dans `actor`, et n'est pas répété dans chaque ligne
+d'`actor_repo`. S'il changeait, il suffirait de le modifier à un seul
+endroit. C'est pourquoi la question de recherche parle d'un modèle
+relationnel **normalisé** : c'est la façon « correcte » de concevoir le
+côté relationnel, celle qu'on utiliserait en pratique.
+
+**La cardinalité d'une relation.** Combien d'éléments d'un côté peuvent
+être liés à combien de l'autre :
+
+| Type | Exemple | Comment on le stocke en relationnel |
+|---|---|---|
+| Un à un | Une personne et sa carte d'identité | Une clé étrangère unique |
+| Un à plusieurs | Un dépôt et ses *issues* (chaque issue appartient à un seul dépôt) | Une clé étrangère du côté « plusieurs » |
+| **Plusieurs à plusieurs** | **Acteurs et dépôts (ce projet)** | **Une table de jonction** (`actor_repo`) avec deux clés étrangères |
+
+Dans le graphe, les trois types se stockent de la même façon : avec des
+arêtes.
+
+**Contrainte ou index.** Une **contrainte** (*constraint*) est une
+**règle** que la base de données fait respecter (unique, non vide, la
+référence existe). Un **index** est une **structure pour chercher
+rapidement**. Ils vont souvent ensemble (une clé primaire ou une contrainte
+d'unicité crée un index pour pouvoir être vérifiée), mais ce sont des
+choses différentes : une clé étrangère est une contrainte **sans** index,
+et `actor_repo_repo_id_idx` est un index **sans** contrainte.
+
+**Transactions et ACID.** Une **transaction** est un groupe de
+modifications qui s'appliquent **toutes ou aucune**. Les deux bases de
+données respectent les propriétés **ACID** : *Atomicité* (tout ou rien),
+*Cohérence* (les règles sont toujours respectées), *Isolation* (les
+transactions ne se marchent pas dessus) et *Durabilité* (ce qui est
+enregistré n'est pas perdu, même si l'ordinateur s'éteint). C'est pourquoi
+le chargement de PostgreSQL, qui est une seule transaction, ne laisse
+jamais des données à moitié chargées.
+
+**Le schéma dans chaque base de données.** PostgreSQL exige de définir les
+tables, les colonnes et les types **avant** de stocker des données
+(*schema-on-write*). Neo4j est plus souple : on peut créer des nœuds avec
+n'importe quelle propriété sans la déclarer avant ; les contraintes sont
+facultatives et nous les ajoutons nous-mêmes pour garantir la qualité des
+données et la rapidité des recherches.
+
+**`EXPLAIN` et `PROFILE` : voir comment une requête s'exécute.** Ils seront
+importants dans le benchmark : il ne suffit pas de savoir **combien de
+temps** prend une requête, il faut aussi savoir **pourquoi**.
+
+- PostgreSQL : `EXPLAIN` affiche le plan sans l'exécuter ;
+  `EXPLAIN ANALYZE` l'exécute et affiche le temps réel de chaque étape (par
+  exemple, s'il a utilisé un `Index Scan` ou un `Seq Scan`).
+- Neo4j : `EXPLAIN` affiche le plan ; `PROFILE` l'exécute et compte, étape
+  par étape, combien de données ont été touchées (*db hits*).
 
 ### Comment chaque script charge
 
@@ -3229,394 +3658,3 @@ désormais que les avertissements et les erreurs du driver de Neo4j.
    apparaît à moitié rempli pendant une minute et demie. Dans les systèmes
    réels, on charge dans une nouvelle base et, une fois terminé, on bascule
    de l'une à l'autre d'un seul coup.
-
-
-## Concepts clés : index, clés primaires, clés étrangères, et pourquoi un graphe n'en a pas besoin
-
-Cette section développe le tableau **« Ce qui est créé dans chaque base de
-données »** de l'étape de chargement, qui mélangeait clés primaires,
-contraintes d'unicité et clés étrangères sans vraiment expliquer ce qu'est
-chaque chose ni s'il y a des index. Ce sont les concepts centraux du
-projet, car la question de recherche porte justement sur **la façon dont
-chaque base de données trouve les connexions**.
-
-### D'abord, la réponse courte : y a-t-il des index, ou les clés primaires suffisent-elles ?
-
-**Il y a des index.** Une `PRIMARY KEY` n'est pas une alternative à un
-index : **PostgreSQL crée automatiquement un index** pour chaque clé
-primaire, car il en a besoin pour vérifier, à chaque insertion, que la
-valeur n'est pas répétée. Mais les clés primaires **ne couvrent pas toutes
-les recherches**, et les clés étrangères **ne créent aucun index** dans
-PostgreSQL. C'est pourquoi il y a un index de plus, créé à la main.
-
-Voici tout ce qui existe dans chaque base de données (c'est pareil dans
-`gharchive` et dans `gharchive24h`) :
-
-| Structure | Base | Comment elle est créée | Crée-t-elle un index ? | À quoi elle sert |
-|---|---|---|---|---|
-| `PRIMARY KEY` d'`actor` (`id`) | PostgreSQL | `id BIGINT PRIMARY KEY` | **Oui, automatiquement :** `actor_pkey` | Qu'il n'y ait pas deux acteurs avec le même `id`, et trouver un acteur par son `id` instantanément |
-| `PRIMARY KEY` de `repo` (`id`) | PostgreSQL | `id BIGINT PRIMARY KEY` | **Oui, automatiquement :** `repo_pkey` | La même chose, pour les dépôts |
-| `PRIMARY KEY` d'`actor_repo` (`actor_id`, `repo_id`) | PostgreSQL | `PRIMARY KEY (actor_id, repo_id)` | **Oui, automatiquement :** `actor_repo_pkey` (composé, sur deux colonnes) | Qu'aucune paire ne se répète, et chercher **les dépôts d'un acteur** |
-| Clé étrangère `actor_repo.actor_id` → `actor.id` | PostgreSQL | `REFERENCES actor (id)` | **Non** | Que chaque connexion pointe vers un acteur qui existe |
-| Clé étrangère `actor_repo.repo_id` → `repo.id` | PostgreSQL | `REFERENCES repo (id)` | **Non** | Que chaque connexion pointe vers un dépôt qui existe |
-| Index sur `actor_repo.repo_id` | PostgreSQL | `CREATE INDEX actor_repo_repo_id_idx` (à la main) | **Oui :** c'est l'index lui-même | Chercher **les acteurs d'un dépôt** : le sens que la clé primaire ne couvre pas |
-| Contrainte `UNIQUE` sur `Actor.id` | Neo4j | `CREATE CONSTRAINT ... REQUIRE a.id IS UNIQUE` | **Oui, automatiquement** | Qu'il n'y ait pas deux acteurs avec le même `id`, et trouver un acteur par son `id` instantanément |
-| Contrainte `UNIQUE` sur `Repo.id` | Neo4j | `CREATE CONSTRAINT ... REQUIRE r.id IS UNIQUE` | **Oui, automatiquement** | La même chose, pour les dépôts |
-| Les arêtes `INTERACTED_WITH` | Neo4j | `CREATE (a)-[:INTERACTED_WITH]->(r)` | **N'ont pas besoin d'index** | Chaque nœud garde des liens directs vers ses arêtes (voir plus bas) |
-
-**En résumé :** PostgreSQL a **4 index** (trois automatiques pour les clés
-primaires et un à la main), et Neo4j en a **2** (ceux des contraintes). Les
-connexions du graphe n'ont pas d'index parce qu'elles n'en ont pas besoin :
-cette différence est le cœur du benchmark.
-
-**Comment le vérifier vous-même :**
-
-```sql
--- PostgreSQL (Query Tool de pgAdmin, base gharchive) : les index des trois tables
-SELECT tablename, indexname, indexdef
-FROM pg_indexes
-WHERE tablename IN ('actor', 'repo', 'actor_repo')
-ORDER BY tablename, indexname;
-```
-
-```cypher
-// Neo4j (Query, base gharchive) : les contraintes et les index
-SHOW CONSTRAINTS;
-SHOW INDEXES;
-```
-
-Dans pgAdmin, on les voit aussi dans l'arborescence : dans chaque table,
-**Indexes** (les index) et **Constraints** (les clés primaires et
-étrangères). Dans Neo4j, `SHOW INDEXES` affiche en plus deux index que
-Neo4j crée toujours de lui-même (de type `LOOKUP`), qui servent à trouver
-rapidement « tous les nœuds ayant une étiquette » ou « toutes les arêtes
-d'un type ».
-
-### Ce qu'est un index
-
-Un **index** est une structure supplémentaire que la base de données garde
-**à côté** d'une table pour trouver des lignes **sans avoir à toutes les
-lire**.
-
-**L'analogie du livre :** pour trouver le mot « récursivité » dans un livre
-de 800 pages, vous pouvez lire les 800 pages, ou aller à l'**index
-alphabétique** à la fin, l'y chercher (il est trié, donc c'est rapide) et
-voir qu'il se trouve page 312. L'index ne contient pas le livre : il
-contient **chaque mot et l'endroit où le trouver**.
-
-Dans une base de données, c'est pareil. L'index d'`actor.id` garde **chaque
-`id` et l'endroit où se trouve sa ligne** sur le disque, **dans l'ordre**.
-Sans lui, pour trouver l'acteur `321725054`, PostgreSQL devrait lire les
-14 515 lignes une par une (un **parcours séquentiel**, *sequential scan*).
-Avec lui, il va directement à la ligne (un **parcours par index**, *index
-scan*).
-
-**Comment il est fait à l'intérieur : l'arbre B (*B-tree*).** Le type
-d'index que PostgreSQL utilise par défaut est un **arbre B** : les valeurs
-sont triées et réparties en niveaux, comme un arbre à l'envers. Pour
-chercher une valeur, on descend depuis la racine en choisissant à chaque
-niveau la bonne branche, comme quand on cherche un mot dans un dictionnaire
-en l'ouvrant au milieu, puis au quart, etc. C'est pourquoi le nombre
-d'étapes augmente très lentement avec la taille de la table :
-
-| Lignes dans la table | Toutes les lire (sans index) | Étapes approximatives avec un arbre B |
-|---|---|---|
-| 14 515 (benchmark) | 14 515 | environ 3 ou 4 niveaux |
-| 424 098 (24 heures) | 424 098 | environ 3 ou 4 niveaux |
-| 100 millions | 100 millions | environ 4 ou 5 niveaux |
-
-(Chaque « niveau » de l'arbre couvre des centaines de valeurs, donc même des
-tables énormes ont très peu de niveaux.)
-
-**Ce que coûte un index.** Ce n'est pas gratuit :
-
-- **De l'espace :** c'est une structure de plus, stockée sur le disque.
-- **Des écritures plus lentes :** chaque fois qu'une ligne est insérée, la
-  base de données doit aussi mettre à jour tous les index de cette table.
-  C'est pourquoi, dans la pipeline de 24 heures, charger `actor_repo` (avec
-  deux index et deux clés étrangères) a pris 27 secondes, et `actor` ou
-  `repo` (avec un seul index) à peine une.
-
-C'est pourquoi on ne met pas un index sur chaque colonne : seulement sur
-celles qui servent à **chercher** ou à **joindre des tables**. C'est le
-principe de « la requête d'abord » appliqué aux index : `login` et `name`
-n'ont pas d'index parce que les requêtes du benchmark ne cherchent pas par
-ces colonnes.
-
-**Le planificateur décide s'il utilise l'index.** Qu'un index existe
-n'oblige pas à l'utiliser. Avant d'exécuter chaque requête, PostgreSQL
-calcule ce qui est le moins coûteux (d'où l'importance d'`ANALYZE`, qui lui
-fournit les statistiques pour le calculer). Pour voir ce qu'il a décidé, on
-met `EXPLAIN` devant la requête :
-
-```sql
-EXPLAIN SELECT * FROM actor WHERE id = 321725054;
--- Index Scan using actor_pkey on actor ...     <- utilise l'index de la clé primaire
-
-EXPLAIN SELECT * FROM actor WHERE login = 'peitongshi';
--- Seq Scan on actor ... Filter: (login = ...)  <- pas d'index : lit toute la table
-```
-
-(Dans Neo4j, l'équivalent est de mettre `EXPLAIN` ou `PROFILE` devant une
-requête Cypher.)
-
-### Ce qu'est une clé primaire (*primary key*)
-
-La **clé primaire** est la colonne (ou le groupe de colonnes) qui
-**identifie chaque ligne de façon unique**, comme le numéro de la carte
-d'identité d'une personne. Elle a trois règles que la base de données
-elle-même fait respecter :
-
-1. **Unique :** il ne peut pas y avoir deux lignes avec la même valeur.
-2. **Jamais vide** (`NOT NULL`) : chaque ligne doit en avoir une.
-3. **Une seule par table**, même si elle peut être formée de plusieurs
-   colonnes.
-
-**Dans ce projet :**
-
-- Dans `actor` et `repo`, la clé primaire est l'`id` de GitHub. C'est une
-  **clé naturelle** : un identifiant qui vient déjà dans les données, et
-  non un identifiant inventé par nous (ce serait une *clé de
-  substitution*, comme un numéro séquentiel 1, 2, 3...). On a choisi l'`id`
-  et pas le nom parce que le nom peut changer (le cas `lucky521-png` →
-  `peitongshi`) et n'est pas unique (les deux comptes `Copilot`).
-- Dans `actor_repo`, la clé primaire est **composée** : la **paire**
-  `(actor_id, repo_id)`. Aucune des deux colonnes n'est unique séparément
-  (un acteur peut être dans beaucoup de dépôts, et un dépôt peut avoir
-  beaucoup d'acteurs), mais la paire, si. C'est la base de données
-  elle-même qui fait respecter la décision « une seule connexion par paire
-  acteur–dépôt ».
-
-**Pourquoi c'est important :**
-
-- **Identité :** chaque ligne peut être désignée sans ambiguïté.
-- **Pas de doublons :** la base de données rejette toute insertion qui
-  répète une clé, même si l'erreur vient de notre code.
-- **Cible des clés étrangères :** c'est la valeur vers laquelle pointent
-  les connexions (voir plus bas).
-- **Recherche rapide :** son index automatique permet de trouver une ligne
-  par sa clé instantanément.
-
-**Un détail de l'index composé :** l'index `actor_repo_pkey` est trié
-**d'abord par `actor_id`, puis par `repo_id`**, comme un annuaire
-téléphonique trié par nom de famille, puis par prénom. Il sert à chercher
-« toutes les lignes d'un `actor_id` » (comme chercher tous les « García »),
-mais **pas** à chercher « toutes les lignes d'un `repo_id` » (comme
-chercher toutes les personnes qui s'appellent « Ana » dans un annuaire trié
-par nom de famille : il faudrait le lire en entier). C'est pourquoi l'index
-supplémentaire sur `repo_id` a été nécessaire.
-
-### Ce qu'est une clé étrangère (*foreign key*)
-
-Une **clé étrangère** est une colonne qui **pointe vers la clé primaire
-d'une autre table**. Dans `actor_repo` :
-
-- `actor_id` pointe vers `actor.id` ;
-- `repo_id` pointe vers `repo.id`.
-
-C'est ainsi qu'une base de données relationnelle **représente les
-relations** : `actor_repo` ne garde ni l'acteur ni le dépôt, seulement leurs
-`id`, comme des « références ». C'est une **table de jonction** (*junction
-table*), la façon standard de représenter une relation **plusieurs à
-plusieurs** (un acteur peut avoir beaucoup de dépôts, et un dépôt beaucoup
-d'acteurs).
-
-**À quoi elle sert : l'intégrité référentielle.** La base de données
-garantit que **toute référence pointe vers quelque chose qui existe** :
-
-- On ne peut pas insérer dans `actor_repo` une connexion avec un
-  `actor_id` qui n'est pas dans `actor` : PostgreSQL la rejette. (C'est
-  pourquoi `load_postgres.py` charge `actor` et `repo` **avant**
-  `actor_repo`.)
-- On ne peut pas supprimer un acteur d'`actor` tant qu'une connexion le
-  désigne, sauf si l'on dit explicitement quoi faire de ces connexions (par
-  exemple, `ON DELETE CASCADE`, qui les supprimerait aussi). C'est pourquoi
-  `load_postgres.py` supprime `actor_repo` **avant** les deux autres.
-
-Sans clés étrangères, une erreur dans le code pourrait laisser des
-connexions « orphelines », qui pointent vers des acteurs ou des dépôts
-inexistants, et les parcours donneraient des résultats faux sans que
-personne ne s'en aperçoive.
-
-**Ce qu'elle coûte :** à chaque insertion dans `actor_repo`, PostgreSQL
-vérifie que l'acteur **et** le dépôt existent, c'est-à-dire **deux
-recherches par ligne**. C'est une autre des raisons pour lesquelles cette
-table met plus de temps à se charger.
-
-**Attention : une clé étrangère ne crée pas d'index** (dans PostgreSQL).
-C'est une erreur très courante de croire le contraire. La clé étrangère
-vérifie que la référence existe, mais elle **n'accélère pas** les
-recherches sur cette colonne. Si une colonne sert à joindre des tables, il
-faut l'indexer à part, comme nous l'avons fait avec `repo_id`. (`actor_id`
-n'en a pas besoin, car elle vient déjà en premier dans l'index de la clé
-primaire composée.)
-
-### Comment on parcourt une relation dans une base relationnelle : le JOIN
-
-Dans une base relationnelle, les connexions **ne sont pas stockées comme
-des chemins** : elles sont **calculées au moment de la requête**, avec un
-**JOIN** (« jointure »), qui associe les lignes de deux tables ayant une
-valeur égale.
-
-Pour un saut (les dépôts d'un acteur), la requête est :
-
-```sql
-SELECT r.name
-FROM actor a
-JOIN actor_repo ar ON ar.actor_id = a.id     -- 1re jointure
-JOIN repo r        ON r.id = ar.repo_id      -- 2e jointure
-WHERE a.id = 321725054;
-```
-
-Ce que fait PostgreSQL, étape par étape (grâce aux index) :
-
-1. Il cherche l'acteur `321725054` dans l'index `actor_pkey`.
-2. Il cherche dans l'index `actor_repo_pkey` toutes les lignes avec cet
-   `actor_id` : il obtient leurs `repo_id`.
-3. Pour chaque `repo_id`, il cherche le dépôt dans l'index `repo_pkey`.
-
-Chaque flèche du parcours est une **recherche dans un index**, et chaque
-recherche a un coût qui dépend (un peu seulement, grâce à l'arbre B) de la
-taille totale de la table. Pour le parcours du benchmark
-(`acteur → dépôt → acteur → dépôt`), chaque saut ajoute **plus de JOIN**,
-et chaque JOIN est fait pour **toutes** les lignes qui arrivent du saut
-précédent. Si le nombre de lignes augmente à chaque saut, le travail
-augmente très vite.
-
-### Pourquoi un graphe n'a ni clés primaires ni clés étrangères
-
-Une base de données graphe stocke les choses autrement :
-
-| Concept relationnel | Équivalent dans le graphe de Neo4j |
-|---|---|
-| Table (`actor`, `repo`) | **Étiquette** (*label*) : `:Actor`, `:Repo`. Regroupe les nœuds du même type |
-| Ligne | **Nœud** |
-| Colonne | **Propriété** (`id`, `login`, `name`) |
-| Table de jonction + clés étrangères (`actor_repo`) | **Arête** (*relationship*) : `-[:INTERACTED_WITH]->`, stockée comme un objet à part entière qui relie les deux nœuds |
-| Clé primaire | N'existe pas en tant que telle. On crée une **contrainte d'unicité** sur une propriété (`id`) |
-| JOIN | **Suivre l'arête** : aller d'un nœud à ses voisins |
-
-**Pourquoi les clés étrangères ne sont pas nécessaires :** dans le graphe,
-la connexion **n'est pas une valeur qui pointe vers une autre valeur** (un
-`actor_id` qu'il faut chercher dans une autre table). **C'est un objet à
-part entière qui relie directement les deux nœuds**. Une arête ne peut pas
-exister sans ses deux extrémités : Neo4j ne permet ni de créer une arête
-« dans le vide » ni de supprimer un nœud qui a encore des arêtes (d'où le
-`DETACH DELETE` de `load_neo4j.py`, qui supprime d'abord les arêtes).
-Autrement dit, **l'intégrité référentielle est incluse dans la structure
-elle-même**, sans avoir besoin de la déclarer.
-
-**Pourquoi il n'y a pas de « vraie » clé primaire :** Neo4j identifie
-chaque nœud en interne avec son propre identifiant (l'*element id*), qui
-**n'est pas** une de nos données et qu'il vaut mieux ne pas utiliser comme
-clé métier, car il peut être réutilisé si des nœuds sont supprimés. C'est
-pourquoi nous avons ajouté la **contrainte d'unicité** sur notre propriété
-`id` : elle joue le rôle de la clé primaire (pas de doublons, recherche
-rapide par index), mais elle est facultative et c'est nous qui la
-décidons.
-
-**Et le plus important : dans le graphe, l'index ne sert qu'à trouver le
-point de départ.** Une fois le premier nœud trouvé (par exemple, l'acteur
-`321725054`, grâce à la contrainte d'unicité), **plus aucun index n'est
-utilisé** : le parcours suit directement les arêtes.
-
-### Ce qu'il y a à la place : l'adjacence sans index (*index-free adjacency*)
-
-Dans Neo4j, **chaque nœud garde l'endroit où se trouvent ses propres
-arêtes**, et chaque arête garde **l'endroit où se trouvent ses deux
-nœuds**. Conceptuellement :
-
-- l'enregistrement d'un nœud pointe vers ses arêtes ;
-- l'enregistrement d'une arête pointe vers son nœud de départ, son nœud
-  d'arrivée et l'arête suivante de chacun d'eux.
-
-(Les versions récentes de Neo4j organisent physiquement les données
-autrement, en regroupant les arêtes de chaque nœud, mais l'idée est la
-même : les connexions d'un nœud sont stockées **avec le nœud**.)
-
-Ainsi, aller d'un acteur à ses dépôts, ce n'est pas « chercher dans une
-table toutes les lignes dont l'`actor_id` vaut X », mais **« lire la liste
-des arêtes que le nœud a déjà »**. C'est comme la différence entre :
-
-- **Relationnel :** chercher les amis d'Ana dans l'annuaire de toute la
-  ville (une recherche, même rapide, dans une liste de tout le monde).
-- **Graphe :** ouvrir le carnet d'adresses d'Ana, où ses amis sont déjà
-  notés (suivre des liens qui sont déjà là).
-
-### Pourquoi cela optimise (et pourquoi il faut le mesurer)
-
-| | PostgreSQL (relationnel) | Neo4j (graphe) |
-|---|---|---|
-| Trouver le point de départ | Une recherche dans un index (arbre B) | Une recherche dans un index (la contrainte) |
-| Chaque saut | Un JOIN : une **recherche dans un index** pour chaque ligne qui arrive | **Suivre des pointeurs** que le nœud a déjà |
-| Le coût d'un saut dépend-il de la taille **totale** de la base ? | Un peu : l'index grandit avec la table (même si c'est très lentement) | Non : il dépend seulement du **nombre d'arêtes de ce nœud** |
-| Ce qui augmente quand on ajoute des sauts | Le nombre de JOIN et de recherches dans les index | Le nombre d'arêtes suivies |
-
-**La théorie :** sur des parcours **courts** (un ou deux sauts), PostgreSQL
-est très rapide, car ses index sont très efficaces et il optimise les JOIN
-depuis des décennies. Sur des parcours **longs**, le graphe devrait gagner,
-car son coût ne dépend que de la partie du graphe parcourue, et non de la
-taille totale des tables.
-
-**Mais ce n'est qu'une hypothèse.** L'arbre B demande très peu d'étapes,
-même sur des tables énormes, les deux bases gardent en mémoire les données
-les plus utilisées, et le planificateur de PostgreSQL est très bon. **À
-partir de combien de sauts et avec quel volume de données le gagnant
-change**, c'est exactement ce que ce projet veut **mesurer**, au lieu de le
-tenir pour acquis.
-
-### Autres concepts utiles à connaître
-
-**La normalisation.** C'est la façon d'organiser les tables pour ne pas
-stocker deux fois la même donnée. Par exemple, le `login` d'un acteur se
-trouve **uniquement** dans `actor`, et n'est pas répété dans chaque ligne
-d'`actor_repo`. S'il changeait, il suffirait de le modifier à un seul
-endroit. C'est pourquoi la question de recherche parle d'un modèle
-relationnel **normalisé** : c'est la façon « correcte » de concevoir le
-côté relationnel, celle qu'on utiliserait en pratique.
-
-**La cardinalité d'une relation.** Combien d'éléments d'un côté peuvent
-être liés à combien de l'autre :
-
-| Type | Exemple | Comment on le stocke en relationnel |
-|---|---|---|
-| Un à un | Une personne et sa carte d'identité | Une clé étrangère unique |
-| Un à plusieurs | Un dépôt et ses *issues* (chaque issue appartient à un seul dépôt) | Une clé étrangère du côté « plusieurs » |
-| **Plusieurs à plusieurs** | **Acteurs et dépôts (ce projet)** | **Une table de jonction** (`actor_repo`) avec deux clés étrangères |
-
-Dans le graphe, les trois types se stockent de la même façon : avec des
-arêtes.
-
-**Contrainte ou index.** Une **contrainte** (*constraint*) est une
-**règle** que la base de données fait respecter (unique, non vide, la
-référence existe). Un **index** est une **structure pour chercher
-rapidement**. Ils vont souvent ensemble (une clé primaire ou une contrainte
-d'unicité crée un index pour pouvoir être vérifiée), mais ce sont des
-choses différentes : une clé étrangère est une contrainte **sans** index,
-et `actor_repo_repo_id_idx` est un index **sans** contrainte.
-
-**Transactions et ACID.** Une **transaction** est un groupe de
-modifications qui s'appliquent **toutes ou aucune**. Les deux bases de
-données respectent les propriétés **ACID** : *Atomicité* (tout ou rien),
-*Cohérence* (les règles sont toujours respectées), *Isolation* (les
-transactions ne se marchent pas dessus) et *Durabilité* (ce qui est
-enregistré n'est pas perdu, même si l'ordinateur s'éteint). C'est pourquoi
-le chargement de PostgreSQL, qui est une seule transaction, ne laisse
-jamais des données à moitié chargées.
-
-**Le schéma dans chaque base de données.** PostgreSQL exige de définir les
-tables, les colonnes et les types **avant** de stocker des données
-(*schema-on-write*). Neo4j est plus souple : on peut créer des nœuds avec
-n'importe quelle propriété sans la déclarer avant ; les contraintes sont
-facultatives et nous les ajoutons nous-mêmes pour garantir la qualité des
-données et la rapidité des recherches.
-
-**`EXPLAIN` et `PROFILE` : voir comment une requête s'exécute.** Ils seront
-importants dans le benchmark : il ne suffit pas de savoir **combien de
-temps** prend une requête, il faut aussi savoir **pourquoi**.
-
-- PostgreSQL : `EXPLAIN` affiche le plan sans l'exécuter ;
-  `EXPLAIN ANALYZE` l'exécute et affiche le temps réel de chaque étape (par
-  exemple, s'il a utilisé un `Index Scan` ou un `Seq Scan`).
-- Neo4j : `EXPLAIN` affiche le plan ; `PROFILE` l'exécute et compte, étape
-  par étape, combien de données ont été touchées (*db hits*).

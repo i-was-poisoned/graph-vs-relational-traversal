@@ -2377,10 +2377,33 @@ A few details:
 
 ### Indexes: each side's "normal aids"
 
-An **index** is like the alphabetical index at the back of a book: instead
-of reading every page to find a word, you look it up and go straight to the
-page. Without indexes, a relational database would have to read the whole
-table on every lookup.
+**What an index is.** An index is an extra structure the database keeps
+**alongside** a table, to find rows **without reading them all**. It works
+like the alphabetical index at the back of a book: to find the word
+"recursion" in an 800-page book, instead of reading all 800 pages, you look
+it up in the index (it's sorted alphabetically, so it's found at once) and
+see it's on page 312. The index doesn't contain the book: it contains
+**each word and where to find it**.
+
+A database works the same way. For example, the index on `actor.id` keeps
+**every `id`, sorted, and where its row is** on disk:
+
+- **Without an index**, to find actor `321725054`, PostgreSQL would have to
+  read all 14,515 rows of `actor` one by one and compare each `id`. That's
+  a **sequential scan**.
+- **With an index**, it goes straight to the row. That's an **index scan**.
+
+Internally, PostgreSQL organises its indexes as a **B-tree**: the values,
+sorted and spread over a few levels, like a dictionary you open in the
+middle, then at a quarter, and so on. Thanks to that, finding a value takes
+**very few steps** even when the table has millions of rows.
+
+**What an index costs:** it takes up disk space, and every time a row is
+inserted the table's indexes have to be updated too, so loads are a bit
+slower. That's why not every column gets an index — only the ones used to
+**look things up** or to **join tables**. (The "Key concepts" part just
+below explains it in more detail, with `EXPLAIN`
+examples.)
 
 The design principle ("query-first") set a rule: give each side **its
 normal aids, no more and no less**. For PostgreSQL, that means these
@@ -2393,12 +2416,35 @@ indexes:
 | `(actor_id, repo_id)` | Automatically, by `actor_repo`'s `PRIMARY KEY` | **Actor → their repos**: since `actor_id` comes first, it works for looking up by actor |
 | `repo_id` | By hand: `CREATE INDEX actor_repo_repo_id_idx` | **Repo → its actors**: the opposite direction, which the previous index doesn't cover |
 
-The last two are the important ones. The benchmark walk
-(`actor → repo → actor → repo`) uses the `actor_repo` table **in both
-directions** at every hop: from an actor to their repos, and from a repo to
-its actors. Each direction needs its own index; without the `repo_id` one,
-every "backwards" hop would mean reading the whole table, and the
-comparison would be unfair to PostgreSQL.
+**The last two are the important ones, and both are needed.** The
+benchmark walk, `actor → repo → actor → repo`, uses the `actor_repo` table
+in **two different directions**, alternating them at every hop:
+
+| Hop | Question | Lookup in `actor_repo` | Index that makes it fast |
+|---|---|---|---|
+| actor → repo | "Which repos has **this actor** made events in?" | Rows with `actor_id = X` | `(actor_id, repo_id)`, the primary key's |
+| repo → actor | "Which actors have made events in **this repo**?" | Rows with `repo_id = Y` | `repo_id`, the one created by hand |
+
+The second hop goes along the connection **the opposite way** from how it
+was stored: the connection goes from actor to repo (Neo4j's arrow points
+from `Actor` to `Repo`), and here the walk goes from the repo to its
+actors.
+
+**Why one index can't serve both directions.** The primary key's index is
+sorted **by `actor_id` first**, like a phone book sorted by surname.
+Finding all of an actor's rows is fast, because they're together (like all
+the "Smiths" in the phone book). But finding all of a repo's rows with that
+index is like finding everyone called "Ana" in a phone book sorted by
+surname: they're **spread across the whole book**, and you'd have to read
+all of it. That's why a **second index, sorted by `repo_id`**, is needed.
+
+**What would happen without it:** at every repo → actor hop, PostgreSQL
+would have to read **the whole** `actor_repo` table (15,053 rows in the
+benchmark), and do it **once for every repo** coming from the previous hop.
+Neo4j doesn't have that problem, because every `Repo` node already knows
+which edges point to it. Measuring like that would compare a PostgreSQL
+without its normal aid against a complete Neo4j: the comparison would be
+**unfair** to PostgreSQL.
 
 **In Neo4j**, the uniqueness constraints on `Actor.id` and `Repo.id` build
 their index, just like primary keys. The edges, on the other hand, **don't
@@ -2413,6 +2459,354 @@ it (use an index or read the whole table? which table first?), and to
 decide well it uses statistics about the data. Right after a bulk load
 those statistics are out of date, and `ANALYZE` refreshes them. It's also
 part of the relational side's normal aids.
+
+### Key concepts: indexes, primary keys, foreign keys, and why a graph doesn't need them
+
+This part expands on the **"What gets created in each database"** table
+and the explanation of indexes just above: what exactly each thing is,
+whether there are indexes or not, and why the graph works differently.
+These are the project's core concepts, because the research question is
+precisely **how each database finds the connections**.
+
+#### First, the short answer: are there indexes, or are primary keys enough?
+
+**There are indexes.** A `PRIMARY KEY` isn't an alternative to an index:
+**PostgreSQL automatically creates an index** for every primary key,
+because it needs one to check, on every insert, that the value isn't
+repeated. But primary keys **don't cover every lookup**, and foreign keys
+**don't create any index** in PostgreSQL. That's why there's one more
+index, created by hand.
+
+This is everything that exists in each database (it's the same in
+`gharchive` and in `gharchive24h`):
+
+| Structure | Database | How it's created | Does it create an index? | What it's for |
+|---|---|---|---|---|
+| `actor`'s `PRIMARY KEY` (`id`) | PostgreSQL | `id BIGINT PRIMARY KEY` | **Yes, automatically:** `actor_pkey` | No two actors with the same `id`, and finding an actor by its `id` instantly |
+| `repo`'s `PRIMARY KEY` (`id`) | PostgreSQL | `id BIGINT PRIMARY KEY` | **Yes, automatically:** `repo_pkey` | The same, for repos |
+| `actor_repo`'s `PRIMARY KEY` (`actor_id`, `repo_id`) | PostgreSQL | `PRIMARY KEY (actor_id, repo_id)` | **Yes, automatically:** `actor_repo_pkey` (composite, two columns) | No pair is repeated, and looking up **an actor's repos** |
+| Foreign key `actor_repo.actor_id` → `actor.id` | PostgreSQL | `REFERENCES actor (id)` | **No** | Every connection points at an actor that exists |
+| Foreign key `actor_repo.repo_id` → `repo.id` | PostgreSQL | `REFERENCES repo (id)` | **No** | Every connection points at a repo that exists |
+| Index on `actor_repo.repo_id` | PostgreSQL | `CREATE INDEX actor_repo_repo_id_idx` (by hand) | **Yes:** it is the index itself | Looking up **a repo's actors**: the direction the primary key doesn't cover |
+| `UNIQUE` constraint on `Actor.id` | Neo4j | `CREATE CONSTRAINT ... REQUIRE a.id IS UNIQUE` | **Yes, automatically** | No two actors with the same `id`, and finding an actor by its `id` instantly |
+| `UNIQUE` constraint on `Repo.id` | Neo4j | `CREATE CONSTRAINT ... REQUIRE r.id IS UNIQUE` | **Yes, automatically** | The same, for repos |
+| The `INTERACTED_WITH` edges | Neo4j | `CREATE (a)-[:INTERACTED_WITH]->(r)` | **Don't need an index** | Every node stores direct links to its edges (see below) |
+
+**Summary:** PostgreSQL has **4 indexes** (three automatic ones from the
+primary keys and one by hand), and Neo4j has **2** (the constraints' ones).
+The graph's connections have no index because they don't need one: that
+difference is the heart of the benchmark.
+
+**How to check it yourself:**
+
+```sql
+-- PostgreSQL (pgAdmin Query Tool, gharchive database): the indexes of the three tables
+SELECT tablename, indexname, indexdef
+FROM pg_indexes
+WHERE tablename IN ('actor', 'repo', 'actor_repo')
+ORDER BY tablename, indexname;
+```
+
+```cypher
+// Neo4j (Query, gharchive database): the constraints and the indexes
+SHOW CONSTRAINTS;
+SHOW INDEXES;
+```
+
+In pgAdmin you can also see them in the tree: inside each table, **Indexes**
+(the indexes) and **Constraints** (the primary and foreign keys). In Neo4j,
+`SHOW INDEXES` also shows two indexes that Neo4j always creates on its own
+(of type `LOOKUP`), which are used to quickly find "all nodes with a label"
+or "all edges of a type".
+
+#### What an index is, in more depth
+
+The basics (the book analogy, and sequential scan versus index scan) are
+explained just above, in "Indexes". This goes one step further: how an
+index is built inside, what it costs, and how PostgreSQL decides whether to
+use it.
+
+**How it's built inside: the B-tree.** The kind of index PostgreSQL uses by
+default is a **B-tree**: the values are sorted and spread across levels,
+like an upside-down tree. To look up a value you go down from the root,
+picking the right branch at each level, like looking up a word in a
+dictionary by opening it in the middle, then at a quarter, and so on. That's
+why the number of steps grows very slowly with the size of the table:
+
+| Rows in the table | Read them all (no index) | Approximate steps with a B-tree |
+|---|---|---|
+| 14,515 (benchmark) | 14,515 | about 3 or 4 levels |
+| 424,098 (24 hours) | 424,098 | about 3 or 4 levels |
+| 100 million | 100 million | about 4 or 5 levels |
+
+(Each "level" of the tree covers hundreds of values, so even huge tables
+have very few levels.)
+
+**What an index costs.** It isn't free:
+
+- **Space:** it's one more structure, stored on disk.
+- **Slower writes:** every time a row is inserted, the database also has to
+  update every index on that table. That's why, in the 24-hour pipeline (further down in these notes),
+  loading `actor_repo` (with two indexes and two foreign keys) took 27
+  seconds, and `actor` or `repo` (with a single index) barely one.
+
+That's why you don't put an index on every column: only on the ones used to
+**look things up** or to **join tables**. It's the "query-first" principle
+applied to indexes: `login` and `name` have no index because the benchmark
+queries don't look things up by them.
+
+**The planner decides whether to use the index.** An index existing doesn't
+force it to be used. Before running each query, PostgreSQL works out what's
+cheaper (hence the importance of `ANALYZE`, which gives it the statistics to
+work it out). To see what it decided, put `EXPLAIN` in front of the query:
+
+```sql
+EXPLAIN SELECT * FROM actor WHERE id = 321725054;
+-- Index Scan using actor_pkey on actor ...     <- uses the primary key's index
+
+EXPLAIN SELECT * FROM actor WHERE login = 'peitongshi';
+-- Seq Scan on actor ... Filter: (login = ...)  <- no index: reads the whole table
+```
+
+(In Neo4j, the equivalent is putting `EXPLAIN` or `PROFILE` in front of a
+Cypher query.)
+
+#### What a primary key is
+
+The **primary key** is the column (or group of columns) that **uniquely
+identifies each row**, like a person's ID card number. It has three rules
+that the database itself enforces:
+
+1. **Unique:** there can't be two rows with the same value.
+2. **Never empty** (`NOT NULL`): every row has to have one.
+3. **Only one per table**, although it can be made up of several columns.
+
+**In this project:**
+
+- In `actor` and `repo`, the primary key is the GitHub `id`. It's a
+  **natural key**: an identifier that already comes in the data, not one we
+  invented (that would be a *surrogate key*, like a running number 1, 2,
+  3...). The `id` was chosen instead of the name because the name can
+  change (the `lucky521-png` → `peitongshi` case) and isn't unique (the two
+  `Copilot` accounts).
+- In `actor_repo`, the primary key is **composite**: the **pair**
+  `(actor_id, repo_id)`. Neither column is unique on its own (an actor can
+  be in many repos, and a repo can have many actors), but the pair is. It's
+  the database itself that enforces the "only one connection per
+  actor–repo pair" decision.
+
+**Why it matters:**
+
+- **Identity:** every row can be pointed at without ambiguity.
+- **No duplicates:** the database rejects any insert that repeats a key,
+  even if the mistake is in our code.
+- **Target of the foreign keys:** it's the value the connections point at
+  (see below).
+- **Fast lookup:** its automatic index lets you find a row by its key
+  instantly.
+
+**The composite index** on `actor_repo` is sorted by `actor_id` first and
+then by `repo_id`. That's why it works for finding an actor's repos but not
+a repo's actors, and the extra index on `repo_id` was needed (see the table
+of the walk's two directions and the phone-book analogy, above).
+
+#### What a foreign key is
+
+A **foreign key** is a column that **points at another table's primary
+key**. In `actor_repo`:
+
+- `actor_id` points at `actor.id`;
+- `repo_id` points at `repo.id`.
+
+This is how a relational database **represents relationships**:
+`actor_repo` doesn't store the actor or the repo, only their `id`s, as
+"references". It's a **junction table**, the standard way to represent a
+**many-to-many** relationship (an actor can have many repos, and a repo
+many actors).
+
+**What it's for: referential integrity.** The database guarantees that
+**every reference points at something that exists**:
+
+- You can't insert a connection into `actor_repo` with an `actor_id` that
+  isn't in `actor`: PostgreSQL rejects it. (That's why `load_postgres.py`
+  loads `actor` and `repo` **before** `actor_repo`.)
+- You can't delete an actor from `actor` while some connection points at
+  it, unless you say explicitly what to do with those connections (for
+  example, `ON DELETE CASCADE`, which would delete them too). That's why
+  `load_postgres.py` drops `actor_repo` **before** the other two.
+
+Without foreign keys, a bug in the code could leave "orphaned" connections,
+pointing at actors or repos that don't exist, and the walks would give
+false results without anyone noticing.
+
+**What it costs:** on every insert into `actor_repo`, PostgreSQL checks
+that the actor **and** the repo exist, that is, **two lookups per row**.
+It's another of the reasons that table takes longer to load.
+
+**Watch out: a foreign key doesn't create an index** (in PostgreSQL). It's
+a very common mistake to think it does. The foreign key checks that the
+reference exists, but it **doesn't** speed up lookups on that column. If a
+column is used to join tables, it has to be indexed separately, as we did
+with `repo_id`. (`actor_id` doesn't need it because it already comes first
+in the composite primary key's index.)
+
+#### How a relationship is walked in a relational database: the JOIN
+
+In a relational database, the connections **aren't stored as paths**:
+they're **computed at query time**, with a **JOIN**, which pairs up rows
+from two tables by a matching value.
+
+For one hop (an actor's repos), the query is:
+
+```sql
+SELECT r.name
+FROM actor a
+JOIN actor_repo ar ON ar.actor_id = a.id     -- 1st join
+JOIN repo r        ON r.id = ar.repo_id      -- 2nd join
+WHERE a.id = 321725054;
+```
+
+What PostgreSQL does, step by step (thanks to the indexes):
+
+1. It looks up actor `321725054` in the `actor_pkey` index.
+2. It looks up all the rows with that `actor_id` in the `actor_repo_pkey`
+   index: it gets their `repo_id`s.
+3. For each `repo_id`, it looks up the repo in the `repo_pkey` index.
+
+Every arrow in the walk is an **index lookup**, and every lookup has a cost
+that depends (though only slightly, thanks to the B-tree) on the total size
+of the table. For the benchmark walk (`actor → repo → actor → repo`), every
+hop adds **more JOINs**, and every JOIN is done for **all** the rows coming
+from the previous hop. If the number of rows grows at each hop, the work
+grows very fast.
+
+#### Why a graph has no primary or foreign keys
+
+A graph database stores things differently:
+
+| Relational concept | Equivalent in the Neo4j graph |
+|---|---|
+| Table (`actor`, `repo`) | **Label**: `:Actor`, `:Repo`. Groups nodes of the same kind |
+| Row | **Node** |
+| Column | **Property** (`id`, `login`, `name`) |
+| Junction table + foreign keys (`actor_repo`) | **Edge** (*relationship*): `-[:INTERACTED_WITH]->`, stored as an object of its own that joins the two nodes |
+| Primary key | Doesn't exist as such. You create a **uniqueness constraint** on a property (`id`) |
+| JOIN | **Following the edge**: going from a node to its neighbors |
+
+**Why foreign keys aren't needed:** in the graph, the connection **isn't a
+value that points at another value** (an `actor_id` you have to look up in
+another table). **It's an object of its own that directly joins the two
+nodes**. An edge can't exist without its two ends: Neo4j doesn't allow
+creating a "dangling" edge or deleting a node that still has edges (hence
+the `DETACH DELETE` in `load_neo4j.py`, which deletes the edges first). In
+other words, **referential integrity is built into the structure itself**,
+with no need to declare it.
+
+**Why there's no "real" primary key:** Neo4j identifies every node
+internally with its own identifier (the *element id*), which **isn't** our
+data and shouldn't be used as a business key, because it can be reused if
+nodes are deleted. That's why we added the **uniqueness constraint** on our
+`id` property: it plays the role of the primary key (no duplicates, fast
+lookup by index), but it's optional and our choice.
+
+**And most importantly: in the graph, the index is only used to find the
+starting point.** Once the first node has been found (for example, actor
+`321725054`, thanks to the uniqueness constraint), **no index is used any
+more**: the walk follows the edges directly.
+
+#### What's there instead: index-free adjacency
+
+In Neo4j, **every node stores where its own edges are**, and every edge
+stores **where its two nodes are**. Conceptually:
+
+- a node's record points at its edges;
+- an edge's record points at its start node, its end node, and the next
+  edge of each of them.
+
+(Recent versions of Neo4j physically organize the data differently,
+grouping each node's edges together, but the idea is the same: a node's
+connections are stored **with the node**.)
+
+So going from an actor to their repos isn't "searching a table for all the
+rows whose `actor_id` is X", but **"reading the list of edges the node
+already has"**. It's like the difference between:
+
+- **Relational:** searching the whole city's phone book for Ana's friends
+  (a lookup, however fast, in a list of everyone).
+- **Graph:** opening Ana's address book, which already has her friends
+  written down (following links that are already there).
+
+#### Why that optimizes (and why it has to be measured)
+
+| | PostgreSQL (relational) | Neo4j (graph) |
+|---|---|---|
+| Finding the starting point | An index lookup (B-tree) | An index lookup (the constraint) |
+| Each hop | A JOIN: one **index lookup** for every incoming row | **Following pointers** the node already has |
+| Does a hop's cost depend on the **total** size of the database? | A little: the index grows with the table (though very slowly) | No: it depends only on **how many edges that node has** |
+| What grows as hops are added | The number of JOINs and index lookups | The number of edges followed |
+
+**The theory:** on **short** walks (one or two hops), PostgreSQL is very
+fast, because its indexes are very efficient and it has spent decades
+optimizing JOINs. On **long** walks, the graph should win, because its cost
+depends only on the part of the graph being walked, not on the total size
+of the tables.
+
+**But it's only a hypothesis.** The B-tree needs very few steps even on
+huge tables, both databases keep the most-used data in memory, and
+PostgreSQL's planner is very good. **At what number of hops and with what
+volume of data the winner changes** is exactly what this project wants to
+**measure**, instead of taking it for granted.
+
+#### Other concepts worth knowing
+
+**Normalization.** It's the way of organizing tables so the same piece of
+data isn't stored twice. For example, an actor's `login` is **only** in
+`actor`, not repeated in every row of `actor_repo`. If it changed, it would
+only have to be changed in one place. That's why the research question
+talks about a **normalized** relational model: it's the "correct" way to
+design the relational side, the one that would be used in practice.
+
+**Cardinality of a relationship.** How many items on one side can be
+related to how many on the other:
+
+| Type | Example | How it's stored in relational |
+|---|---|---|
+| One-to-one | A person and their ID card | A unique foreign key |
+| One-to-many | A repo and its *issues* (each issue belongs to a single repo) | A foreign key on the "many" side |
+| **Many-to-many** | **Actors and repos (this project)** | **A junction table** (`actor_repo`) with two foreign keys |
+
+In the graph, all three types are stored the same way: with edges.
+
+**Constraint versus index.** A **constraint** is a **rule** the database
+enforces (unique, not empty, the reference exists). An **index** is a
+**structure for fast lookups**. They often go together (a primary key or a
+uniqueness constraint creates an index so it can be checked), but they're
+different things: a foreign key is a constraint **without** an index, and
+`actor_repo_repo_id_idx` is an index **without** a constraint.
+
+**Transactions and ACID.** A **transaction** is a group of changes that are
+applied **all or nothing**. Both databases meet the **ACID** properties:
+*Atomicity* (all or nothing), *Consistency* (the rules always hold),
+*Isolation* (transactions don't step on each other) and *Durability* (what's
+saved isn't lost even if the computer is switched off). That's why the
+PostgreSQL load, which is a single transaction, never leaves data
+half-loaded.
+
+**The schema in each database.** PostgreSQL requires the tables, columns
+and types to be defined **before** storing data (*schema-on-write*). Neo4j
+is more flexible: you can create nodes with any property without declaring
+it first; the constraints are optional and we add them ourselves to ensure
+data quality and fast lookups.
+
+**`EXPLAIN` and `PROFILE`: seeing how a query runs.** They'll matter in the
+benchmark: it's not enough to know **how long** a query takes, but also
+**why**.
+
+- PostgreSQL: `EXPLAIN` shows the plan without running it; `EXPLAIN ANALYZE`
+  runs it and shows the real time of each step (for example, whether it
+  used an `Index Scan` or a `Seq Scan`).
+- Neo4j: `EXPLAIN` shows the plan; `PROFILE` runs it and counts, step by
+  step, how much data was touched (*db hits*).
 
 ### How each script loads
 
@@ -3030,365 +3424,3 @@ errors from the Neo4j driver.
    minute and a half. In real systems the data is loaded into a new
    database and, once finished, the switch from one to the other happens
    all at once.
-
-
-## Key concepts: indexes, primary keys, foreign keys, and why a graph doesn't need them
-
-This section expands on the **"What gets created in each database"** table
-from the Loading Stage, which mixed primary keys, uniqueness constraints and
-foreign keys without fully explaining what each one is or whether there are
-indexes. These are the project's core concepts, because the research
-question is precisely **how each database finds the connections**.
-
-### First, the short answer: are there indexes, or are primary keys enough?
-
-**There are indexes.** A `PRIMARY KEY` isn't an alternative to an index:
-**PostgreSQL automatically creates an index** for every primary key,
-because it needs one to check, on every insert, that the value isn't
-repeated. But primary keys **don't cover every lookup**, and foreign keys
-**don't create any index** in PostgreSQL. That's why there's one more
-index, created by hand.
-
-This is everything that exists in each database (it's the same in
-`gharchive` and in `gharchive24h`):
-
-| Structure | Database | How it's created | Does it create an index? | What it's for |
-|---|---|---|---|---|
-| `actor`'s `PRIMARY KEY` (`id`) | PostgreSQL | `id BIGINT PRIMARY KEY` | **Yes, automatically:** `actor_pkey` | No two actors with the same `id`, and finding an actor by its `id` instantly |
-| `repo`'s `PRIMARY KEY` (`id`) | PostgreSQL | `id BIGINT PRIMARY KEY` | **Yes, automatically:** `repo_pkey` | The same, for repos |
-| `actor_repo`'s `PRIMARY KEY` (`actor_id`, `repo_id`) | PostgreSQL | `PRIMARY KEY (actor_id, repo_id)` | **Yes, automatically:** `actor_repo_pkey` (composite, two columns) | No pair is repeated, and looking up **an actor's repos** |
-| Foreign key `actor_repo.actor_id` → `actor.id` | PostgreSQL | `REFERENCES actor (id)` | **No** | Every connection points at an actor that exists |
-| Foreign key `actor_repo.repo_id` → `repo.id` | PostgreSQL | `REFERENCES repo (id)` | **No** | Every connection points at a repo that exists |
-| Index on `actor_repo.repo_id` | PostgreSQL | `CREATE INDEX actor_repo_repo_id_idx` (by hand) | **Yes:** it is the index itself | Looking up **a repo's actors**: the direction the primary key doesn't cover |
-| `UNIQUE` constraint on `Actor.id` | Neo4j | `CREATE CONSTRAINT ... REQUIRE a.id IS UNIQUE` | **Yes, automatically** | No two actors with the same `id`, and finding an actor by its `id` instantly |
-| `UNIQUE` constraint on `Repo.id` | Neo4j | `CREATE CONSTRAINT ... REQUIRE r.id IS UNIQUE` | **Yes, automatically** | The same, for repos |
-| The `INTERACTED_WITH` edges | Neo4j | `CREATE (a)-[:INTERACTED_WITH]->(r)` | **Don't need an index** | Every node stores direct links to its edges (see below) |
-
-**Summary:** PostgreSQL has **4 indexes** (three automatic ones from the
-primary keys and one by hand), and Neo4j has **2** (the constraints' ones).
-The graph's connections have no index because they don't need one: that
-difference is the heart of the benchmark.
-
-**How to check it yourself:**
-
-```sql
--- PostgreSQL (pgAdmin Query Tool, gharchive database): the indexes of the three tables
-SELECT tablename, indexname, indexdef
-FROM pg_indexes
-WHERE tablename IN ('actor', 'repo', 'actor_repo')
-ORDER BY tablename, indexname;
-```
-
-```cypher
-// Neo4j (Query, gharchive database): the constraints and the indexes
-SHOW CONSTRAINTS;
-SHOW INDEXES;
-```
-
-In pgAdmin you can also see them in the tree: inside each table, **Indexes**
-(the indexes) and **Constraints** (the primary and foreign keys). In Neo4j,
-`SHOW INDEXES` also shows two indexes that Neo4j always creates on its own
-(of type `LOOKUP`), which are used to quickly find "all nodes with a label"
-or "all edges of a type".
-
-### What an index is
-
-An **index** is an extra structure the database keeps **alongside** a table
-to find rows **without having to read them all**.
-
-**The book analogy:** to find the word "recursion" in an 800-page book, you
-can read all 800 pages, or go to the **alphabetical index** at the back,
-look it up (it's sorted, so it's quick) and see that it's on page 312. The
-index doesn't contain the book: it contains **every word and where to find
-it**.
-
-A database works the same way. The index on `actor.id` stores **every `id`
-and where its row is** on disk, **sorted**. Without it, to find actor
-`321725054`, PostgreSQL would have to read the 14,515 rows one by one (a
-**sequential scan**). With it, it goes straight to the row (an **index
-scan**).
-
-**How it's built inside: the B-tree.** The kind of index PostgreSQL uses by
-default is a **B-tree**: the values are sorted and spread across levels,
-like an upside-down tree. To look up a value you go down from the root,
-picking the right branch at each level, like looking up a word in a
-dictionary by opening it in the middle, then at a quarter, and so on. That's
-why the number of steps grows very slowly with the size of the table:
-
-| Rows in the table | Read them all (no index) | Approximate steps with a B-tree |
-|---|---|---|
-| 14,515 (benchmark) | 14,515 | about 3 or 4 levels |
-| 424,098 (24 hours) | 424,098 | about 3 or 4 levels |
-| 100 million | 100 million | about 4 or 5 levels |
-
-(Each "level" of the tree covers hundreds of values, so even huge tables
-have very few levels.)
-
-**What an index costs.** It isn't free:
-
-- **Space:** it's one more structure, stored on disk.
-- **Slower writes:** every time a row is inserted, the database also has to
-  update every index on that table. That's why, in the 24-hour pipeline,
-  loading `actor_repo` (with two indexes and two foreign keys) took 27
-  seconds, and `actor` or `repo` (with a single index) barely one.
-
-That's why you don't put an index on every column: only on the ones used to
-**look things up** or to **join tables**. It's the "query-first" principle
-applied to indexes: `login` and `name` have no index because the benchmark
-queries don't look things up by them.
-
-**The planner decides whether to use the index.** An index existing doesn't
-force it to be used. Before running each query, PostgreSQL works out what's
-cheaper (hence the importance of `ANALYZE`, which gives it the statistics to
-work it out). To see what it decided, put `EXPLAIN` in front of the query:
-
-```sql
-EXPLAIN SELECT * FROM actor WHERE id = 321725054;
--- Index Scan using actor_pkey on actor ...     <- uses the primary key's index
-
-EXPLAIN SELECT * FROM actor WHERE login = 'peitongshi';
--- Seq Scan on actor ... Filter: (login = ...)  <- no index: reads the whole table
-```
-
-(In Neo4j, the equivalent is putting `EXPLAIN` or `PROFILE` in front of a
-Cypher query.)
-
-### What a primary key is
-
-The **primary key** is the column (or group of columns) that **uniquely
-identifies each row**, like a person's ID card number. It has three rules
-that the database itself enforces:
-
-1. **Unique:** there can't be two rows with the same value.
-2. **Never empty** (`NOT NULL`): every row has to have one.
-3. **Only one per table**, although it can be made up of several columns.
-
-**In this project:**
-
-- In `actor` and `repo`, the primary key is the GitHub `id`. It's a
-  **natural key**: an identifier that already comes in the data, not one we
-  invented (that would be a *surrogate key*, like a running number 1, 2,
-  3...). The `id` was chosen instead of the name because the name can
-  change (the `lucky521-png` → `peitongshi` case) and isn't unique (the two
-  `Copilot` accounts).
-- In `actor_repo`, the primary key is **composite**: the **pair**
-  `(actor_id, repo_id)`. Neither column is unique on its own (an actor can
-  be in many repos, and a repo can have many actors), but the pair is. It's
-  the database itself that enforces the "only one connection per
-  actor–repo pair" decision.
-
-**Why it matters:**
-
-- **Identity:** every row can be pointed at without ambiguity.
-- **No duplicates:** the database rejects any insert that repeats a key,
-  even if the mistake is in our code.
-- **Target of the foreign keys:** it's the value the connections point at
-  (see below).
-- **Fast lookup:** its automatic index lets you find a row by its key
-  instantly.
-
-**A detail about the composite index:** the `actor_repo_pkey` index is
-sorted **first by `actor_id` and then by `repo_id`**, like a phone book
-sorted by surname and then by first name. It works for looking up "all the
-rows for an `actor_id`" (like finding everyone called "Smith"), but **not**
-for looking up "all the rows for a `repo_id`" (like finding everyone whose
-first name is "Ana" in a phone book sorted by surname: you'd have to read
-the whole thing). That's why the extra index on `repo_id` was needed.
-
-### What a foreign key is
-
-A **foreign key** is a column that **points at another table's primary
-key**. In `actor_repo`:
-
-- `actor_id` points at `actor.id`;
-- `repo_id` points at `repo.id`.
-
-This is how a relational database **represents relationships**:
-`actor_repo` doesn't store the actor or the repo, only their `id`s, as
-"references". It's a **junction table**, the standard way to represent a
-**many-to-many** relationship (an actor can have many repos, and a repo
-many actors).
-
-**What it's for: referential integrity.** The database guarantees that
-**every reference points at something that exists**:
-
-- You can't insert a connection into `actor_repo` with an `actor_id` that
-  isn't in `actor`: PostgreSQL rejects it. (That's why `load_postgres.py`
-  loads `actor` and `repo` **before** `actor_repo`.)
-- You can't delete an actor from `actor` while some connection points at
-  it, unless you say explicitly what to do with those connections (for
-  example, `ON DELETE CASCADE`, which would delete them too). That's why
-  `load_postgres.py` drops `actor_repo` **before** the other two.
-
-Without foreign keys, a bug in the code could leave "orphaned" connections,
-pointing at actors or repos that don't exist, and the walks would give
-false results without anyone noticing.
-
-**What it costs:** on every insert into `actor_repo`, PostgreSQL checks
-that the actor **and** the repo exist, that is, **two lookups per row**.
-It's another of the reasons that table takes longer to load.
-
-**Watch out: a foreign key doesn't create an index** (in PostgreSQL). It's
-a very common mistake to think it does. The foreign key checks that the
-reference exists, but it **doesn't** speed up lookups on that column. If a
-column is used to join tables, it has to be indexed separately, as we did
-with `repo_id`. (`actor_id` doesn't need it because it already comes first
-in the composite primary key's index.)
-
-### How a relationship is walked in a relational database: the JOIN
-
-In a relational database, the connections **aren't stored as paths**:
-they're **computed at query time**, with a **JOIN**, which pairs up rows
-from two tables by a matching value.
-
-For one hop (an actor's repos), the query is:
-
-```sql
-SELECT r.name
-FROM actor a
-JOIN actor_repo ar ON ar.actor_id = a.id     -- 1st join
-JOIN repo r        ON r.id = ar.repo_id      -- 2nd join
-WHERE a.id = 321725054;
-```
-
-What PostgreSQL does, step by step (thanks to the indexes):
-
-1. It looks up actor `321725054` in the `actor_pkey` index.
-2. It looks up all the rows with that `actor_id` in the `actor_repo_pkey`
-   index: it gets their `repo_id`s.
-3. For each `repo_id`, it looks up the repo in the `repo_pkey` index.
-
-Every arrow in the walk is an **index lookup**, and every lookup has a cost
-that depends (though only slightly, thanks to the B-tree) on the total size
-of the table. For the benchmark walk (`actor → repo → actor → repo`), every
-hop adds **more JOINs**, and every JOIN is done for **all** the rows coming
-from the previous hop. If the number of rows grows at each hop, the work
-grows very fast.
-
-### Why a graph has no primary or foreign keys
-
-A graph database stores things differently:
-
-| Relational concept | Equivalent in the Neo4j graph |
-|---|---|
-| Table (`actor`, `repo`) | **Label**: `:Actor`, `:Repo`. Groups nodes of the same kind |
-| Row | **Node** |
-| Column | **Property** (`id`, `login`, `name`) |
-| Junction table + foreign keys (`actor_repo`) | **Edge** (*relationship*): `-[:INTERACTED_WITH]->`, stored as an object of its own that joins the two nodes |
-| Primary key | Doesn't exist as such. You create a **uniqueness constraint** on a property (`id`) |
-| JOIN | **Following the edge**: going from a node to its neighbors |
-
-**Why foreign keys aren't needed:** in the graph, the connection **isn't a
-value that points at another value** (an `actor_id` you have to look up in
-another table). **It's an object of its own that directly joins the two
-nodes**. An edge can't exist without its two ends: Neo4j doesn't allow
-creating a "dangling" edge or deleting a node that still has edges (hence
-the `DETACH DELETE` in `load_neo4j.py`, which deletes the edges first). In
-other words, **referential integrity is built into the structure itself**,
-with no need to declare it.
-
-**Why there's no "real" primary key:** Neo4j identifies every node
-internally with its own identifier (the *element id*), which **isn't** our
-data and shouldn't be used as a business key, because it can be reused if
-nodes are deleted. That's why we added the **uniqueness constraint** on our
-`id` property: it plays the role of the primary key (no duplicates, fast
-lookup by index), but it's optional and our choice.
-
-**And most importantly: in the graph, the index is only used to find the
-starting point.** Once the first node has been found (for example, actor
-`321725054`, thanks to the uniqueness constraint), **no index is used any
-more**: the walk follows the edges directly.
-
-### What's there instead: index-free adjacency
-
-In Neo4j, **every node stores where its own edges are**, and every edge
-stores **where its two nodes are**. Conceptually:
-
-- a node's record points at its edges;
-- an edge's record points at its start node, its end node, and the next
-  edge of each of them.
-
-(Recent versions of Neo4j physically organize the data differently,
-grouping each node's edges together, but the idea is the same: a node's
-connections are stored **with the node**.)
-
-So going from an actor to their repos isn't "searching a table for all the
-rows whose `actor_id` is X", but **"reading the list of edges the node
-already has"**. It's like the difference between:
-
-- **Relational:** searching the whole city's phone book for Ana's friends
-  (a lookup, however fast, in a list of everyone).
-- **Graph:** opening Ana's address book, which already has her friends
-  written down (following links that are already there).
-
-### Why that optimizes (and why it has to be measured)
-
-| | PostgreSQL (relational) | Neo4j (graph) |
-|---|---|---|
-| Finding the starting point | An index lookup (B-tree) | An index lookup (the constraint) |
-| Each hop | A JOIN: one **index lookup** for every incoming row | **Following pointers** the node already has |
-| Does a hop's cost depend on the **total** size of the database? | A little: the index grows with the table (though very slowly) | No: it depends only on **how many edges that node has** |
-| What grows as hops are added | The number of JOINs and index lookups | The number of edges followed |
-
-**The theory:** on **short** walks (one or two hops), PostgreSQL is very
-fast, because its indexes are very efficient and it has spent decades
-optimizing JOINs. On **long** walks, the graph should win, because its cost
-depends only on the part of the graph being walked, not on the total size
-of the tables.
-
-**But it's only a hypothesis.** The B-tree needs very few steps even on
-huge tables, both databases keep the most-used data in memory, and
-PostgreSQL's planner is very good. **At what number of hops and with what
-volume of data the winner changes** is exactly what this project wants to
-**measure**, instead of taking it for granted.
-
-### Other concepts worth knowing
-
-**Normalization.** It's the way of organizing tables so the same piece of
-data isn't stored twice. For example, an actor's `login` is **only** in
-`actor`, not repeated in every row of `actor_repo`. If it changed, it would
-only have to be changed in one place. That's why the research question
-talks about a **normalized** relational model: it's the "correct" way to
-design the relational side, the one that would be used in practice.
-
-**Cardinality of a relationship.** How many items on one side can be
-related to how many on the other:
-
-| Type | Example | How it's stored in relational |
-|---|---|---|
-| One-to-one | A person and their ID card | A unique foreign key |
-| One-to-many | A repo and its *issues* (each issue belongs to a single repo) | A foreign key on the "many" side |
-| **Many-to-many** | **Actors and repos (this project)** | **A junction table** (`actor_repo`) with two foreign keys |
-
-In the graph, all three types are stored the same way: with edges.
-
-**Constraint versus index.** A **constraint** is a **rule** the database
-enforces (unique, not empty, the reference exists). An **index** is a
-**structure for fast lookups**. They often go together (a primary key or a
-uniqueness constraint creates an index so it can be checked), but they're
-different things: a foreign key is a constraint **without** an index, and
-`actor_repo_repo_id_idx` is an index **without** a constraint.
-
-**Transactions and ACID.** A **transaction** is a group of changes that are
-applied **all or nothing**. Both databases meet the **ACID** properties:
-*Atomicity* (all or nothing), *Consistency* (the rules always hold),
-*Isolation* (transactions don't step on each other) and *Durability* (what's
-saved isn't lost even if the computer is switched off). That's why the
-PostgreSQL load, which is a single transaction, never leaves data
-half-loaded.
-
-**The schema in each database.** PostgreSQL requires the tables, columns
-and types to be defined **before** storing data (*schema-on-write*). Neo4j
-is more flexible: you can create nodes with any property without declaring
-it first; the constraints are optional and we add them ourselves to ensure
-data quality and fast lookups.
-
-**`EXPLAIN` and `PROFILE`: seeing how a query runs.** They'll matter in the
-benchmark: it's not enough to know **how long** a query takes, but also
-**why**.
-
-- PostgreSQL: `EXPLAIN` shows the plan without running it; `EXPLAIN ANALYZE`
-  runs it and shows the real time of each step (for example, whether it
-  used an `Index Scan` or a `Seq Scan`).
-- Neo4j: `EXPLAIN` shows the plan; `PROFILE` runs it and counts, step by
-  step, how much data was touched (*db hits*).
