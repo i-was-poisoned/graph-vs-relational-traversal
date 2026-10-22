@@ -2638,6 +2638,108 @@ explained just above, in "Indexes". This goes one step further: how an
 index is built inside, what it costs, and how PostgreSQL decides whether to
 use it.
 
+**First, the basics: the warehouse and the boxes.** To understand how an
+index works inside, you need a few very basic concepts. They're all
+explained with **a single picture** that doesn't change: **a warehouse full
+of boxes**. We'll go up one step at a time.
+
+**Step 1: memory and disk.** A computer keeps data in two places:
+
+| | **Memory (RAM)** | **Disk** |
+|---|---|---|
+| Speed | Very fast | Much slower |
+| Is it erased when you power off? | **Yes** | **No**: it's permanent |
+| In the warehouse it would be... | **Your desk**: what you have in front of you, at hand | **The warehouse**: where everything is stored, but you have to go and fetch it |
+
+A database keeps its data **on disk**, so it isn't lost when the power
+goes off. But to work with it, it has to **bring it into memory**, like
+taking something out of the warehouse and putting it on your desk.
+
+**Step 2: data lives in files.** On disk, everything is stored in
+**files**, just like the project's CSVs or scripts. A PostgreSQL table,
+for example `actor`, **is a file** on disk, with all its rows. In the
+warehouse it would be **a shelf**: the "actor" shelf, with all the actors.
+
+**Step 3: the disk is read box by box.** Going to the warehouse is
+**slow**. So when you go, you don't bring back a single sheet of paper:
+**you bring back the whole box** it's in, because the trip costs the same.
+That's why PostgreSQL doesn't read rows one at a time: it splits each file
+into **fixed-size blocks** (8 KB) and always reads or writes **a whole
+block**. That block is called a **page**.
+
+> **Page = a box in the warehouse.** They're all the same size. Each one
+> holds several rows (in `actor`, about 150).
+
+The `actor` table, with 14,515 rows, takes up about **a hundred boxes**.
+What's slow, and what needs saving, is **the number of boxes you have to
+bring from the warehouse**.
+
+**Step 4: searching without an index.** To find actor `321725054`: the
+boxes on the "actor" shelf **aren't sorted**, so there's no way to know
+which one it's in. You have to **bring all hundred boxes, one by one**, and
+look inside each one. That's the **sequential scan** (*Seq Scan*).
+
+**Step 5: the index is ANOTHER shelf.** To avoid having to look at every
+box, **another shelf** is created: the one for the `actor_pkey` index. Its
+boxes don't hold the full rows, only **a sorted list of the `id`s**, and
+next to each one, **which box on the "actor" shelf holds its row**:
+
+```
+INDEX shelf (sorted)                         TABLE shelf "actor" (unsorted)
+   index box:                                   box 93:
+   ...                                          ...
+   321,725,054 → "box 93 of the table" ──────►  id=321725054, login='peitongshi'
+   ...                                          ...
+```
+
+The index **is also made of boxes** (pages). That's why there are "index
+pages" and "table pages": **they're boxes on two different shelves**.
+
+**Step 6: the index has a "guide" box on top.** The sorted list of the
+14,515 `id`s doesn't fit in a single box: it takes up about 37. How do you
+know **which of those 37** to open without looking at them all? **One more
+box is added, the guide box**, which only says what each of the others
+contains:
+
+```
+GUIDE BOX (top)
+   "ids up to 300,000,000               → box 24 of the index"
+   "ids from 300,000,001 to 330,000,000 → box 25 of the index"
+   ...
+            │
+            ▼
+LIST BOXES (bottom): box 24, box 25, box 26...  (37 boxes)
+   box 25:  "321,725,054 → box 93 of the table"
+```
+
+**Step 7: the technical names.** Now, and only now, the names used in the
+rest of this section:
+
+| What we've seen | Technical name |
+|---|---|
+| A box (on any shelf) | **page** |
+| The guide box on top, in the index | **root** |
+| The list boxes, at the bottom, in the index | **leaves** |
+| The boxes on the table's shelf | **table pages** |
+
+So looking up `321725054` means **bringing 3 boxes**: the guide box (the
+root), box 25 of the index (a leaf) and box 93 of the table. Instead of
+bringing all hundred boxes of the table.
+
+**To see it for real.** PostgreSQL can tell you how many boxes each shelf
+takes up. In pgAdmin's Query Tool, with the `gharchive` database:
+
+```sql
+SELECT pg_relation_size('actor')      / 8192 AS boxes_in_table,
+       pg_relation_size('actor_pkey') / 8192 AS boxes_in_index;
+```
+
+(`pg_relation_size` gives the size in bytes; divided by 8,192, which is
+8 KB, it gives the number of pages.)
+
+With this foundation, the rest of the section explains the same tree in
+more detail: why it works so fast, how it grows and what it costs.
+
 **How it's built inside: the B-tree.** To understand it you need three
 ideas, one after another.
 
@@ -2703,37 +2805,17 @@ Look up actor 321725054:
 (around a hundred for 14,515 rows) without an index. And inside each page, the
 search for the exact value is done by "halving", like in the game.
 
-**Pages and leaves: what each one is.** The drawing shows "root", "leaf
-25" and "page 93". All three are **pages**; what changes is **where**
-each one **is**.
+**Pages and leaves, with the warehouse picture.** The diagram shows
+"root", "leaf 25" and "page 93". All three are **boxes** (pages) that have
+to be brought from the warehouse; the only thing that changes is **which
+shelf they're on and what they hold**, as seen in "First, the basics":
 
-Think of a **family tree**. Everyone in it is a **person**, but depending
-on **where they are** in the tree we call them something different: the
-one at the **very top** is the **great-grandparent**, and the ones at the
-**very bottom** are the **great-grandchildren**. A great-grandchild is not
-"something different" from a person: **it's a person**, and
-"great-grandchild" only says **where they are** in the tree.
-
-The index works exactly the same way:
-
-- **"Page"** says **what it is**: a fixed-size block (8 KB) in which
-  PostgreSQL stores data on disk. It's like "person".
-- **"Root"** and **"leaf"** say **where** that page **is** within the index
-  tree: the root is the page at the **top**, and the leaves are the pages
-  at the **bottom**. They're like "great-grandparent" and
-  "great-grandchild". ("Leaf" comes from the leaves of a tree, which are at
-  the tips of the branches.)
-
-So **"leaf 25"** means: "page number 25 in the bottom row of the index
-tree". And **"page 93"** is not in the tree: it's a page from **somewhere
-else**, the **table**, where the complete rows are.
-
-| Type of page | Where is it? | What does it contain? |
+| Page type | Which shelf is it on? | What does it hold? |
 |---|---|---|
-| **Root** | At the top of the **index** tree (there's only one) | Signposts: "up to 300,000,000 → leaf 24..." |
-| **Intermediate page** | Between the root and the leaves (only in trees with 3 or more levels) | More signposts, more detailed |
-| **Leaf** | At the bottom of the **index** tree | Each value, sorted, with the address of its row: "321,725,054 → row on page 93" |
-| **Table page** | In the **table**, outside the tree | The **complete rows**: `id = 321725054, login = 'peitongshi'` |
+| **Root** (the guide box) | The **index**'s (there's only one, on top) | Signposts: "up to 300,000,000 → leaf 24..." |
+| **Intermediate page** | The **index**'s (between the root and the leaves; only in trees with 3 or more levels) | More signposts, more detailed |
+| **Leaf** (a list box) | The **index**'s (at the bottom) | Each value, sorted, with the address of its row: "321,725,054 → row in page 93" |
+| **Table page** | The **table**'s | The **full rows**: `id = 321725054, login = 'peitongshi'` |
 
 The first three make up the **index**; the last one is the **table**.
 

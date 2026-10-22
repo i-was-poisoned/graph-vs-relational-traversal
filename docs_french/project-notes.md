@@ -2823,6 +2823,116 @@ par index) sont expliquées juste au-dessus, dans « Les index ». Ici, on va
 un peu plus loin : comment un index est construit à l'intérieur, ce qu'il
 coûte et comment PostgreSQL décide de l'utiliser.
 
+**D'abord, les bases : l'entrepôt et les cartons.** Pour comprendre
+comment un index fonctionne à l'intérieur, il faut quelques notions très
+simples. Elles s'expliquent toutes avec **une seule image** qui ne change
+pas : **un entrepôt rempli de cartons**. On monte marche par marche.
+
+**Marche 1 : la mémoire et le disque.** Un ordinateur garde les données à
+deux endroits :
+
+| | **Mémoire (RAM)** | **Disque** |
+|---|---|---|
+| Vitesse | Très rapide | Beaucoup plus lent |
+| S'efface-t-elle à l'extinction ? | **Oui** | **Non** : c'est permanent |
+| Dans l'entrepôt, ce serait... | **Votre bureau** : ce que vous avez devant vous, sous la main | **L'entrepôt** : là où tout est rangé, mais il faut aller le chercher |
+
+Une base de données garde ses données **sur le disque**, pour ne pas les
+perdre à l'extinction. Mais pour travailler avec, elle doit **les amener en
+mémoire**, comme sortir quelque chose de l'entrepôt pour le poser sur votre
+bureau.
+
+**Marche 2 : les données sont dans des fichiers.** Sur le disque, tout est
+rangé dans des **fichiers**, comme les CSV ou les scripts du projet. Une
+table PostgreSQL, par exemple `actor`, **est un fichier** sur le disque,
+avec toutes ses lignes. Dans l'entrepôt, ce serait **une étagère** :
+l'étagère « actor », avec tous les acteurs.
+
+**Marche 3 : le disque se lit par cartons.** Aller à l'entrepôt est
+**lent**. Alors, quand vous y allez, vous ne rapportez pas une seule
+feuille : **vous rapportez le carton entier** où elle se trouve, parce que
+le trajet coûte pareil. C'est pour cela que PostgreSQL ne lit pas les
+lignes une par une : il découpe chaque fichier en **blocs de taille fixe**
+(8 Ko) et lit ou écrit toujours **un bloc entier**. Ce bloc s'appelle une
+**page**.
+
+> **Page = un carton de l'entrepôt.** Ils ont tous la même taille. Chacun
+> contient plusieurs lignes (dans `actor`, environ 150).
+
+La table `actor`, avec 14 515 lignes, occupe environ **une centaine de
+cartons**. Ce qui est lent, et ce qu'il faut économiser, c'est **le nombre
+de cartons à rapporter de l'entrepôt**.
+
+**Marche 4 : chercher sans index.** Pour trouver l'acteur `321725054` : les
+cartons de l'étagère « actor » **ne sont pas triés**, donc on ne sait pas
+dans lequel il se trouve. Il faut **rapporter les cent cartons, un par
+un**, et regarder dans chacun. C'est le **parcours séquentiel**
+(*Seq Scan*).
+
+**Marche 5 : l'index est UNE AUTRE étagère.** Pour ne pas avoir à regarder
+tous les cartons, on crée **une autre étagère** : celle de l'index
+`actor_pkey`. Ses cartons ne contiennent pas les lignes complètes, seulement
+**une liste triée des `id`**, et à côté de chacun, **dans quel carton de
+l'étagère « actor » se trouve sa ligne** :
+
+```
+Étagère de l'INDEX (triée)                       Étagère de la TABLE « actor » (non triée)
+   carton de l'index :                              carton 93 :
+   ...                                              ...
+   321 725 054 → « carton 93 de la table » ──────►  id=321725054, login='peitongshi'
+   ...                                              ...
+```
+
+L'index **est lui aussi fait de cartons** (de pages). C'est pour cela qu'il
+y a des « pages de l'index » et des « pages de la table » : **ce sont des
+cartons de deux étagères différentes**.
+
+**Marche 6 : l'index a un carton « guide » en haut.** La liste triée des
+14 515 `id` ne tient pas dans un seul carton : elle en occupe environ 37.
+Comment savoir **lequel de ces 37** ouvrir sans les regarder tous ? On
+ajoute **un carton de plus, le carton guide**, qui indique seulement ce que
+contient chacun des autres :
+
+```
+CARTON GUIDE (en haut)
+   « ids jusqu'à 300 000 000          → carton 24 de l'index »
+   « ids de 300 000 001 à 330 000 000 → carton 25 de l'index »
+   ...
+            │
+            ▼
+CARTONS DE LA LISTE (en bas) : carton 24, carton 25, carton 26...  (37 cartons)
+   carton 25 :  « 321 725 054 → carton 93 de la table »
+```
+
+**Marche 7 : les noms techniques.** Maintenant, et seulement maintenant,
+les noms utilisés dans le reste de cette section :
+
+| Ce que nous avons vu | Nom technique |
+|---|---|
+| Un carton (de n'importe quelle étagère) | **page** |
+| Le carton guide du haut, dans l'index | **racine** |
+| Les cartons de la liste, en bas, dans l'index | **feuilles** |
+| Les cartons de l'étagère de la table | **pages de la table** |
+
+Chercher `321725054` revient donc à **rapporter 3 cartons** : le carton
+guide (la racine), le carton 25 de l'index (une feuille) et le carton 93 de
+la table. Au lieu de rapporter les cent cartons de la table.
+
+**Pour le voir pour de vrai.** PostgreSQL peut vous dire combien de cartons
+occupe chaque étagère. Dans le Query Tool de pgAdmin, avec la base
+`gharchive` :
+
+```sql
+SELECT pg_relation_size('actor')      / 8192 AS cartons_de_la_table,
+       pg_relation_size('actor_pkey') / 8192 AS cartons_de_l_index;
+```
+
+(`pg_relation_size` donne la taille en octets ; divisée par 8 192, soit
+8 Ko, elle donne le nombre de pages.)
+
+Avec cette base, la suite de la section explique le même arbre plus en
+détail : pourquoi il est si rapide, comment il grandit et ce qu'il coûte.
+
 **Comment il est fait à l'intérieur : l'arbre B (*B-tree*).** Pour le
 comprendre, il faut trois idées, l'une après l'autre.
 
@@ -2893,40 +3003,18 @@ Chercher l'acteur 321725054 :
 chaque page, la recherche de la valeur exacte se fait « par le milieu »,
 comme dans le jeu.
 
-**Pages et feuilles : ce qu'est chacune.** Dans le dessin apparaissent
-« racine », « feuille 25 » et « page 93 ». Les trois sont des **pages** ;
-ce qui change, c'est **où se trouve** chacune.
+**Pages et feuilles, avec l'image de l'entrepôt.** Sur le schéma
+apparaissent « racine », « feuille 25 » et « page 93 ». Ce sont toutes les
+trois des **cartons** (des pages) qu'il faut rapporter de l'entrepôt ; la
+seule chose qui change, c'est **de quelle étagère ils sont et ce qu'ils
+contiennent**, comme on l'a vu dans « D'abord, les bases » :
 
-Pensez à un **arbre généalogique**. Tous ceux qui y apparaissent sont des
-**personnes**, mais selon **où ils se trouvent** dans l'arbre, on les
-appelle autrement : celui **tout en haut** est l'**arrière-grand-parent**,
-et ceux **tout en bas** sont les **arrière-petits-enfants**. Un
-arrière-petit-enfant n'est pas « quelque chose de différent » d'une
-personne : **c'est une personne**, et « arrière-petit-enfant » dit
-seulement **où il se trouve** dans l'arbre.
-
-Avec l'index, c'est exactement pareil :
-
-- **« Page »** dit **ce que c'est** : un bloc de taille fixe (8 Ko) dans
-  lequel PostgreSQL range les données sur le disque. C'est comme
-  « personne ».
-- **« Racine »** et **« feuille »** disent **où se trouve** cette page dans
-  l'arbre de l'index : la racine est la page du **haut**, et les feuilles
-  sont les pages du **bas**. C'est comme « arrière-grand-parent » et
-  « arrière-petit-enfant ». (« Feuille » vient des feuilles d'un arbre, qui
-  se trouvent au bout des branches.)
-
-Ainsi, **« feuille 25 »** signifie : « la page numéro 25 de la rangée du
-bas de l'arbre de l'index ». Et **« page 93 »** n'est pas dans l'arbre :
-c'est une page d'**un autre endroit**, la **table**, où se trouvent les
-lignes complètes.
-
-| Type de page | Où se trouve-t-elle ? | Que contient-elle ? |
+| Type de page | De quelle étagère est-elle ? | Que contient-elle ? |
 |---|---|---|
-| **Racine** | En haut de l'arbre de l'**index** (il n'y en a qu'une) | Des panneaux : « jusqu'à 300 000 000 → feuille 24... » |
-| **Page intermédiaire** | Entre la racine et les feuilles (seulement dans les arbres de 3 niveaux ou plus) | D'autres panneaux, plus détaillés |
-| **Feuille** | En bas de l'arbre de l'**index** | Chaque valeur, triée, avec l'adresse de sa ligne : « 321 725 054 → ligne dans la page 93 » |
-| **Page de la table** | Dans la **table**, en dehors de l'arbre | Les **lignes complètes** : `id = 321725054, login = 'peitongshi'` |
+| **Racine** (le carton guide) | De l'**index** (il n'y en a qu'une, en haut) | Des indications : « jusqu'à 300 000 000 → feuille 24... » |
+| **Page intermédiaire** | De l'**index** (entre la racine et les feuilles ; seulement dans les arbres de 3 niveaux ou plus) | D'autres indications, plus détaillées |
+| **Feuille** (un carton de la liste) | De l'**index** (en bas) | Chaque valeur, triée, avec l'adresse de sa ligne : « 321 725 054 → ligne dans la page 93 » |
+| **Page de la table** | De la **table** | Les **lignes complètes** : `id = 321725054, login = 'peitongshi'` |
 
 Les trois premières forment l'**index** ; la dernière, c'est la **table**.
 

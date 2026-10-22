@@ -2723,6 +2723,111 @@ recorrido por índice) está explicado justo arriba, en "Los índices". Aquí
 se va un paso más allá: cómo está hecho un índice por dentro, lo que
 cuesta y cómo decide PostgreSQL si lo usa.
 
+**Primero, lo básico: el almacén y las cajas.** Para entender cómo
+funciona un índice por dentro hacen falta unos conceptos muy básicos.
+Todos se explican con **una sola imagen** que no cambia: **un almacén con
+cajas**. Se sube escalón a escalón.
+
+**Escalón 1: memoria y disco.** Un ordenador guarda los datos en dos
+sitios:
+
+| | **Memoria (RAM)** | **Disco** |
+|---|---|---|
+| Velocidad | Muy rápida | Mucho más lenta |
+| ¿Se borra al apagar? | **Sí** | **No**: es permanente |
+| En el almacén sería... | **Tu mesa de trabajo**: lo que tienes delante, a mano | **El almacén**: donde se guarda todo, pero hay que ir a buscarlo |
+
+Una base de datos guarda sus datos **en el disco**, para no perderlos al
+apagar. Pero para trabajar con ellos tiene que **traerlos a la memoria**,
+como sacar algo del almacén y ponerlo en tu mesa.
+
+**Escalón 2: los datos están en archivos.** En el disco, todo se guarda en
+**archivos**, igual que los CSV o los scripts del proyecto. Una tabla de
+PostgreSQL, por ejemplo `actor`, **es un archivo** en el disco, con todas
+sus filas. En el almacén sería **una estantería**: la estantería "actor",
+con todos los actores.
+
+**Escalón 3: el disco se lee por cajas.** Ir al almacén es **lento**. Así
+que, cuando vas, no traes un solo papel: **traes la caja entera** donde
+está, porque el viaje cuesta lo mismo. Por eso PostgreSQL no lee las
+filas una a una: divide cada archivo en **bloques de tamaño fijo** (8 KB)
+y siempre lee o escribe **un bloque entero**. Ese bloque se llama
+**página**.
+
+> **Página = una caja del almacén.** Todas del mismo tamaño. Cada una
+> contiene varias filas (en `actor`, unas 150).
+
+La tabla `actor`, con 14.515 filas, ocupa alrededor de **un centenar de
+cajas**. Lo que es lento, y lo que hay que ahorrar, es **el número de
+cajas que hay que traer del almacén**.
+
+**Escalón 4: buscar sin índice.** Para encontrar el actor `321725054`: las
+cajas de la estantería "actor" **no están ordenadas**, así que no se sabe
+en cuál está. Hay que **traer las cien cajas, una a una**, y mirar dentro
+de cada una. Es el **recorrido secuencial** (*Seq Scan*).
+
+**Escalón 5: el índice es OTRA estantería.** Para no tener que mirar todas
+las cajas, se crea **otra estantería**: la del índice `actor_pkey`. Sus
+cajas no tienen las filas completas, solo **una lista ordenada de los
+`id`**, y al lado de cada uno, **en qué caja de la estantería "actor" está
+su fila**:
+
+```
+Estantería del ÍNDICE (ordenada)             Estantería de la TABLA "actor" (sin ordenar)
+   caja del índice:                             caja 93:
+   ...                                          ...
+   321.725.054 → "caja 93 de la tabla" ──────►  id=321725054, login='peitongshi'
+   ...                                          ...
+```
+
+El índice **también está hecho de cajas** (páginas). Por eso hay
+"páginas del índice" y "páginas de la tabla": **son cajas de dos
+estanterías distintas**.
+
+**Escalón 6: el índice tiene una caja "guía" arriba.** La lista ordenada
+de los 14.515 `id` no cabe en una sola caja: ocupa unas 37. ¿Cómo saber
+**cuál de esas 37** abrir sin mirarlas todas? Se añade **una caja más, la
+caja guía**, que solo dice qué contiene cada una de las otras:
+
+```
+CAJA GUÍA (arriba)
+   "ids hasta 300.000.000              → caja 24 del índice"
+   "ids del 300.000.001 al 330.000.000 → caja 25 del índice"
+   ...
+            │
+            ▼
+CAJAS DE LA LISTA (abajo): caja 24, caja 25, caja 26...  (37 cajas)
+   caja 25:  "321.725.054 → caja 93 de la tabla"
+```
+
+**Escalón 7: los nombres técnicos.** Ahora, y solo ahora, los nombres que
+se usan en el resto de esta sección:
+
+| Lo que hemos visto | Nombre técnico |
+|---|---|
+| Una caja (de cualquier estantería) | **página** |
+| La caja guía de arriba, en el índice | **raíz** |
+| Las cajas de la lista, abajo, en el índice | **hojas** |
+| Las cajas de la estantería de la tabla | **páginas de la tabla** |
+
+Así que buscar a `321725054` es **traer 3 cajas**: la caja guía (la raíz),
+la caja 25 del índice (una hoja) y la caja 93 de la tabla. En lugar de
+traer las cien cajas de la tabla.
+
+**Para verlo de verdad.** PostgreSQL puede decir cuántas cajas ocupa cada
+estantería. En el Query Tool de pgAdmin, con la base `gharchive`:
+
+```sql
+SELECT pg_relation_size('actor')      / 8192 AS cajas_de_la_tabla,
+       pg_relation_size('actor_pkey') / 8192 AS cajas_del_indice;
+```
+
+(`pg_relation_size` da el tamaño en bytes; dividido entre 8.192, que son
+8 KB, da el número de páginas.)
+
+Con esta base, el resto del apartado explica el mismo árbol con más
+detalle: por qué funciona tan rápido, cómo crece y qué cuesta.
+
 **Cómo está hecho por dentro: el árbol B (*B-tree*).** Para entenderlo
 hacen falta tres ideas, una detrás de otra.
 
@@ -2790,36 +2895,17 @@ Buscar el actor 321725054:
 (alrededor de un centenar para 14.515 filas) sin índice. Y dentro de cada página, la
 búsqueda del valor exacto se hace "por la mitad", como en el juego.
 
-**Páginas y hojas: qué es cada cosa.** En el dibujo aparecen "raíz", "hoja
-25" y "página 93". Las tres son **páginas**; lo que cambia es **dónde
-está** cada una.
+**Páginas y hojas, con la imagen del almacén.** En el dibujo aparecen
+"raíz", "hoja 25" y "página 93". Las tres son **cajas** (páginas) que hay
+que traer del almacén; lo único que cambia es **de qué estantería son y
+qué guardan**, como se vio en "Primero, lo básico":
 
-Piensa en un **árbol genealógico**. Todos los que aparecen en él son
-**personas**, pero según **dónde están** en el árbol los llamamos de otra
-forma: el de **arriba del todo** es el **bisabuelo**, y los de **abajo del
-todo** son los **bisnietos**. Un bisnieto no es "algo distinto" de una
-persona: **es una persona**, y "bisnieto" solo dice **dónde está** en el
-árbol.
-
-Con el índice pasa exactamente lo mismo:
-
-- **"Página"** dice **qué es**: un bloque de tamaño fijo (8 KB) en el que
-  PostgreSQL guarda los datos en el disco. Es como "persona".
-- **"Raíz"** y **"hoja"** dicen **dónde está** esa página dentro del árbol
-  del índice: la raíz es la página de **arriba**, y las hojas son las
-  páginas de **abajo**. Son como "bisabuelo" y "bisnieto". ("Hoja" viene de
-  las hojas de un árbol, que están en las puntas de las ramas.)
-
-Así, **"hoja 25"** significa: "la página número 25 de la fila de abajo del
-árbol del índice". Y **"página 93"** no está en el árbol: es una página de
-**otro sitio**, la **tabla**, donde están las filas completas.
-
-| Tipo de página | ¿Dónde está? | ¿Qué contiene? |
+| Tipo de página | ¿De qué estantería es? | ¿Qué contiene? |
 |---|---|---|
-| **Raíz** | Arriba del árbol del **índice** (solo hay una) | Señales: "hasta 300.000.000 → hoja 24..." |
-| **Página intermedia** | Entre la raíz y las hojas (solo en árboles de 3 o más niveles) | Más señales, más detalladas |
-| **Hoja** | Abajo del árbol del **índice** | Cada valor, ordenado, con la dirección de su fila: "321.725.054 → fila en la página 93" |
-| **Página de la tabla** | En la **tabla**, fuera del árbol | Las **filas completas**: `id = 321725054, login = 'peitongshi'` |
+| **Raíz** (la caja guía) | Del **índice** (solo hay una, arriba) | Señales: "hasta 300.000.000 → hoja 24..." |
+| **Página intermedia** | Del **índice** (entre la raíz y las hojas; solo en árboles de 3 o más niveles) | Más señales, más detalladas |
+| **Hoja** (una caja de la lista) | Del **índice** (abajo) | Cada valor, ordenado, con la dirección de su fila: "321.725.054 → fila en la página 93" |
+| **Página de la tabla** | De la **tabla** | Las **filas completas**: `id = 321725054, login = 'peitongshi'` |
 
 Las tres primeras forman el **índice**; la última es la **tabla**.
 
