@@ -2703,29 +2703,37 @@ Look up actor 321725054:
 (around a hundred for 14,515 rows) without an index. And inside each page, the
 search for the exact value is done by "halving", like in the game.
 
-**Pages and leaves: not the same thing.** The drawing shows "root", "leaf
-25" and "page 93", and it's easy to mix them up. Note that **"leaf" comes
-from the tree metaphor** (the pages at the bottom level of the tree), not
-from a leaf of paper. They're two different ideas:
+**Pages and leaves: what each one is.** The drawing shows "root", "leaf
+25" and "page 93". All three are **pages**; what changes is **where**
+each one **is**.
 
-- **Page = the container.** It's the fixed-size "box" (8 KB) in which
-  PostgreSQL stores **everything** on disk. It's a unit of
-  **storage**.
-- **Leaf = a role within the tree.** It's the name a page gets
-  **based on where it sits in the B-tree**: the ones on the bottom level.
-  It's a **position** or a **function**.
+Think of a **family tree**. Everyone in it is a **person**, but depending
+on **where they are** in the tree we call them something different: the
+one at the **very top** is the **great-grandparent**, and the ones at the
+**very bottom** are the **great-grandchildren**. A great-grandchild is not
+"something different" from a person: **it's a person**, and
+"great-grandchild" only says **where they are** in the tree.
 
-**Every leaf is a page, but not every page is a leaf.** An
-analogy: an office filing cabinet full of **folders, all the same
-size** (the pages). Depending on what each folder is used for, it gets a
-different name:
+The index works exactly the same way:
 
-| Type of page | Where it is | What it contains | In the office filing cabinet |
-|---|---|---|---|
-| **Root** | At the top of the index tree (there's only one) | Signposts: "up to 300,000,000 → leaf 24..." | The general index folder: "customers A–F, drawer 1; G–M, drawer 2..." |
-| **Intermediate page** | Between the root and the leaves (only in trees with 3 or more levels) | More signposts, more detailed | A drawer's folder: "customers Smith–Snow, section 4..." |
-| **Leaf** | At the bottom of the index tree | Each value, sorted, with the address of its row: "321,725,054 → row on page 93" | The final index card: "Smith, Ana: file on shelf 93" |
-| **Table page** | **Not in the tree**: it's the table itself | The **complete rows**: `id = 321725054, login = 'peitongshi'` | The actual **file**, on shelf 93 |
+- **"Page"** says **what it is**: a fixed-size block (8 KB) in which
+  PostgreSQL stores data on disk. It's like "person".
+- **"Root"** and **"leaf"** say **where** that page **is** within the index
+  tree: the root is the page at the **top**, and the leaves are the pages
+  at the **bottom**. They're like "great-grandparent" and
+  "great-grandchild". ("Leaf" comes from the leaves of a tree, which are at
+  the tips of the branches.)
+
+So **"leaf 25"** means: "page number 25 in the bottom row of the index
+tree". And **"page 93"** is not in the tree: it's a page from **somewhere
+else**, the **table**, where the complete rows are.
+
+| Type of page | Where is it? | What does it contain? |
+|---|---|---|
+| **Root** | At the top of the **index** tree (there's only one) | Signposts: "up to 300,000,000 → leaf 24..." |
+| **Intermediate page** | Between the root and the leaves (only in trees with 3 or more levels) | More signposts, more detailed |
+| **Leaf** | At the bottom of the **index** tree | Each value, sorted, with the address of its row: "321,725,054 → row on page 93" |
+| **Table page** | In the **table**, outside the tree | The **complete rows**: `id = 321725054, login = 'peitongshi'` |
 
 The first three make up the **index**; the last one is the **table**.
 

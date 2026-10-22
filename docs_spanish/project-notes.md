@@ -2790,30 +2790,36 @@ Buscar el actor 321725054:
 (alrededor de un centenar para 14.515 filas) sin índice. Y dentro de cada página, la
 búsqueda del valor exacto se hace "por la mitad", como en el juego.
 
-**Páginas y hojas: no son lo mismo.** En el dibujo aparecen "raíz", "hoja
-25" y "página 93", y es fácil confundirlas. Hay una trampa en el idioma:
-en español, "hoja" también es una hoja de papel, que se parece mucho a
-"página". Pero aquí **"hoja" viene de la hoja de un árbol** (en inglés,
-*leaf*, no *sheet*). Son dos ideas distintas:
+**Páginas y hojas: qué es cada cosa.** En el dibujo aparecen "raíz", "hoja
+25" y "página 93". Las tres son **páginas**; lo que cambia es **dónde
+está** cada una.
 
-- **Página = el contenedor.** Es la "caja" de tamaño fijo (8 KB) en la que
-  PostgreSQL guarda **todo** en el disco. Es una unidad de
-  **almacenamiento**.
-- **Hoja = un papel dentro del árbol.** Es el nombre que recibe una página
-  **según el lugar que ocupa en el árbol B**: las del nivel de abajo. Es
-  una **posición** o una **función**.
+Piensa en un **árbol genealógico**. Todos los que aparecen en él son
+**personas**, pero según **dónde están** en el árbol los llamamos de otra
+forma: el de **arriba del todo** es el **bisabuelo**, y los de **abajo del
+todo** son los **bisnietos**. Un bisnieto no es "algo distinto" de una
+persona: **es una persona**, y "bisnieto" solo dice **dónde está** en el
+árbol.
 
-**Toda hoja es una página, pero no toda página es una hoja.** Una
-analogía: un archivo de oficina lleno de **carpetas, todas del mismo
-tamaño** (las páginas). Según para qué se use cada carpeta, recibe un
-nombre distinto:
+Con el índice pasa exactamente lo mismo:
 
-| Tipo de página | Dónde está | Qué contiene | En el archivo de oficina |
-|---|---|---|---|
-| **Raíz** | Arriba del árbol del índice (solo hay una) | Señales: "hasta 300.000.000 → hoja 24..." | La carpeta del índice general: "clientes A–F, cajón 1; G–M, cajón 2..." |
-| **Página intermedia** | Entre la raíz y las hojas (solo en árboles de 3 o más niveles) | Más señales, más detalladas | La carpeta de un cajón: "clientes García–Gómez, sección 4..." |
-| **Hoja** | Abajo del árbol del índice | Cada valor, ordenado, con la dirección de su fila: "321.725.054 → fila en la página 93" | La ficha final: "García, Ana: expediente en la estantería 93" |
-| **Página de la tabla** | **No está en el árbol**: es la tabla en sí | Las **filas completas**: `id = 321725054, login = 'peitongshi'` | El **expediente** de verdad, en la estantería 93 |
+- **"Página"** dice **qué es**: un bloque de tamaño fijo (8 KB) en el que
+  PostgreSQL guarda los datos en el disco. Es como "persona".
+- **"Raíz"** y **"hoja"** dicen **dónde está** esa página dentro del árbol
+  del índice: la raíz es la página de **arriba**, y las hojas son las
+  páginas de **abajo**. Son como "bisabuelo" y "bisnieto". ("Hoja" viene de
+  las hojas de un árbol, que están en las puntas de las ramas.)
+
+Así, **"hoja 25"** significa: "la página número 25 de la fila de abajo del
+árbol del índice". Y **"página 93"** no está en el árbol: es una página de
+**otro sitio**, la **tabla**, donde están las filas completas.
+
+| Tipo de página | ¿Dónde está? | ¿Qué contiene? |
+|---|---|---|
+| **Raíz** | Arriba del árbol del **índice** (solo hay una) | Señales: "hasta 300.000.000 → hoja 24..." |
+| **Página intermedia** | Entre la raíz y las hojas (solo en árboles de 3 o más niveles) | Más señales, más detalladas |
+| **Hoja** | Abajo del árbol del **índice** | Cada valor, ordenado, con la dirección de su fila: "321.725.054 → fila en la página 93" |
+| **Página de la tabla** | En la **tabla**, fuera del árbol | Las **filas completas**: `id = 321725054, login = 'peitongshi'` |
 
 Las tres primeras forman el **índice**; la última es la **tabla**.
 

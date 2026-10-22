@@ -2893,31 +2893,40 @@ Chercher l'acteur 321725054 :
 chaque page, la recherche de la valeur exacte se fait « par le milieu »,
 comme dans le jeu.
 
-**Pages et feuilles : ce n'est pas la même chose.** Dans le dessin
-apparaissent « racine », « feuille 25 » et « page 93 », et il est facile de
-les confondre. Il y a un piège dans la langue : en français, « feuille »
-désigne aussi une feuille de papier, ce qui ressemble beaucoup à « page ».
-Mais ici, **« feuille » vient de la feuille d'un arbre** (en anglais,
-*leaf*, pas *sheet*). Ce sont deux idées différentes :
+**Pages et feuilles : ce qu'est chacune.** Dans le dessin apparaissent
+« racine », « feuille 25 » et « page 93 ». Les trois sont des **pages** ;
+ce qui change, c'est **où se trouve** chacune.
 
-- **Page = le contenant.** C'est la « boîte » de taille fixe (8 Ko) dans
-  laquelle PostgreSQL range **tout** sur le disque. C'est une unité de
-  **stockage**.
-- **Feuille = un rôle dans l'arbre.** C'est le nom que reçoit une page
-  **selon la place qu'elle occupe dans l'arbre B** : celles du niveau du
-  bas. C'est une **position** ou une **fonction**.
+Pensez à un **arbre généalogique**. Tous ceux qui y apparaissent sont des
+**personnes**, mais selon **où ils se trouvent** dans l'arbre, on les
+appelle autrement : celui **tout en haut** est l'**arrière-grand-parent**,
+et ceux **tout en bas** sont les **arrière-petits-enfants**. Un
+arrière-petit-enfant n'est pas « quelque chose de différent » d'une
+personne : **c'est une personne**, et « arrière-petit-enfant » dit
+seulement **où il se trouve** dans l'arbre.
 
-**Toute feuille est une page, mais toute page n'est pas une feuille.** Une
-analogie : un classeur de bureau rempli de **dossiers, tous de la même
-taille** (les pages). Selon l'usage de chaque dossier, il reçoit un nom
-différent :
+Avec l'index, c'est exactement pareil :
 
-| Type de page | Où elle se trouve | Ce qu'elle contient | Dans le classeur de bureau |
-|---|---|---|---|
-| **Racine** | En haut de l'arbre de l'index (il n'y en a qu'une) | Des panneaux : « jusqu'à 300 000 000 → feuille 24... » | Le dossier de l'index général : « clients A–F, tiroir 1 ; G–M, tiroir 2... » |
-| **Page intermédiaire** | Entre la racine et les feuilles (seulement dans les arbres de 3 niveaux ou plus) | D'autres panneaux, plus détaillés | Le dossier d'un tiroir : « clients García–Gómez, section 4... » |
-| **Feuille** | En bas de l'arbre de l'index | Chaque valeur, triée, avec l'adresse de sa ligne : « 321 725 054 → ligne dans la page 93 » | La fiche finale : « García, Ana : dossier sur l'étagère 93 » |
-| **Page de la table** | **Elle n'est pas dans l'arbre** : c'est la table elle-même | Les **lignes complètes** : `id = 321725054, login = 'peitongshi'` | Le **dossier** lui-même, sur l'étagère 93 |
+- **« Page »** dit **ce que c'est** : un bloc de taille fixe (8 Ko) dans
+  lequel PostgreSQL range les données sur le disque. C'est comme
+  « personne ».
+- **« Racine »** et **« feuille »** disent **où se trouve** cette page dans
+  l'arbre de l'index : la racine est la page du **haut**, et les feuilles
+  sont les pages du **bas**. C'est comme « arrière-grand-parent » et
+  « arrière-petit-enfant ». (« Feuille » vient des feuilles d'un arbre, qui
+  se trouvent au bout des branches.)
+
+Ainsi, **« feuille 25 »** signifie : « la page numéro 25 de la rangée du
+bas de l'arbre de l'index ». Et **« page 93 »** n'est pas dans l'arbre :
+c'est une page d'**un autre endroit**, la **table**, où se trouvent les
+lignes complètes.
+
+| Type de page | Où se trouve-t-elle ? | Que contient-elle ? |
+|---|---|---|
+| **Racine** | En haut de l'arbre de l'**index** (il n'y en a qu'une) | Des panneaux : « jusqu'à 300 000 000 → feuille 24... » |
+| **Page intermédiaire** | Entre la racine et les feuilles (seulement dans les arbres de 3 niveaux ou plus) | D'autres panneaux, plus détaillés |
+| **Feuille** | En bas de l'arbre de l'**index** | Chaque valeur, triée, avec l'adresse de sa ligne : « 321 725 054 → ligne dans la page 93 » |
+| **Page de la table** | Dans la **table**, en dehors de l'arbre | Les **lignes complètes** : `id = 321725054, login = 'peitongshi'` |
 
 Les trois premières forment l'**index** ; la dernière, c'est la **table**.
 
