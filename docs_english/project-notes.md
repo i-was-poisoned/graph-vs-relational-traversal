@@ -2393,10 +2393,10 @@ A database works the same way. For example, the index on `actor.id` keeps
   a **sequential scan**.
 - **With an index**, it goes straight to the row. That's an **index scan**.
 
-Internally, PostgreSQL organises its indexes as a **B-tree**: the values,
-sorted and spread over a few levels, like a dictionary you open in the
-middle, then at a quarter, and so on. Thanks to that, finding a value takes
-**very few steps** even when the table has millions of rows.
+Internally, PostgreSQL organises its indexes as a **B-tree**, a structure
+that finds a value in **very few steps** even when the table has millions
+of rows. Exactly how it works, with a step-by-step example, is explained
+further down, in "What an index is, in more depth".
 
 **What an index costs:** it takes up disk space, and every time a row is
 inserted the table's indexes have to be updated too, so loads are a bit
@@ -2526,21 +2526,104 @@ explained just above, in "Indexes". This goes one step further: how an
 index is built inside, what it costs, and how PostgreSQL decides whether to
 use it.
 
-**How it's built inside: the B-tree.** The kind of index PostgreSQL uses by
-default is a **B-tree**: the values are sorted and spread across levels,
-like an upside-down tree. To look up a value you go down from the root,
-picking the right branch at each level, like looking up a word in a
-dictionary by opening it in the middle, then at a quarter, and so on. That's
-why the number of steps grows very slowly with the size of the table:
+**How it's built inside: the B-tree.** To understand it you need three
+ideas, one after another.
 
-| Rows in the table | Read them all (no index) | Approximate steps with a B-tree |
+**Idea 1: searching in something sorted is much, much faster.** Think of
+the "guess the number from 1 to 100" game, where the only answers you get
+are "higher" or "lower". If you ask number by number (1, 2, 3...), you may
+need 100 questions. But if you always ask for the middle
+("50?" → "higher"; "75?" → "lower"; "62?"...), each question
+**rules out half** of what's left, and you find it in **7 questions
+at most**. That only works because the numbers are **sorted**.
+
+| Sorted values | "Halving" questions, at most |
+|---|---|
+| 100 | 7 |
+| 1,000 | 10 |
+| 1,000,000 | 20 |
+
+A table without an index is like an **unsorted** list: there's no choice
+but to look row by row. An index is, above all, **a sorted copy of the
+values of a column**, each one with the address of its row.
+
+**Idea 2: the disk is read in pages, not in values.** A database doesn't
+read data one value at a time: it reads it from disk in fixed-size blocks
+called **pages** (in PostgreSQL, 8 KB each). Reading a page from disk is
+much, much slower than comparing two numbers in memory. So what really
+needs saving isn't comparisons, but **pages read**. A page can hold
+**hundreds** of numbers like our `id`s (roughly 400).
+
+**Idea 3: the B-tree combines the two ideas.** It's a sorted list
+spread across pages and organized **in levels**, like an upside-down
+tree:
+
+- **The leaves** (the bottom level): pages with the sorted values and,
+  next to each one, **the address of its row** in the table (which page
+  of the table it's on). Each leaf is linked to the next one, so ranges
+  can be read in sequence.
+- **The root** (at the top) **and the intermediate levels**: pages that
+  don't store rows, but **"signposts"**, like the signs in an airport:
+  "`id`s up to 300,000,000, this way; from 300,000,001 to 330,000,000,
+  that way".
+
+Looking up a value means **going down** from the root, following the
+signposts, to the right leaf. An example with the benchmark's `actor`
+table (14,515 `id`s, about 37 leaves of about 400 `id`s each; the signpost
+and page numbers are made up, just to illustrate it):
+
+```
+Look up actor 321725054:
+
+  1. Root (1 page read):
+     [ ... | up to 300,000,000 → leaf 24 | up to 330,000,000 → leaf 25 | ... ]
+                                              │
+                                              ▼
+  2. Leaf 25 (1 page read):
+     [ ... 321,700,991 → row on page 81 | 321,725,054 → row on page 93 | ... ]
+                                                        │
+                                                        ▼
+  3. Table actor, page 93 (1 page read):
+     id = 321725054, login = 'peitongshi'
+```
+
+**Three pages read**, versus reading every page of the table
+(around a hundred for 14,515 rows) without an index. And inside each page, the
+search for the exact value is done by "halving", like in the game.
+
+**Why the number of steps grows so slowly:** each extra level
+multiplies the number of values that fit in the tree by about 400:
+
+| Tree levels | Values that fit (about 400 per page) | In this project |
 |---|---|---|
-| 14,515 (benchmark) | 14,515 | about 3 or 4 levels |
-| 424,098 (24 hours) | 424,098 | about 3 or 4 levels |
-| 100 million | 100 million | about 4 or 5 levels |
+| 1 (just the root) | about 400 | — |
+| 2 | about 160,000 | the benchmark's `actor` (14,515 rows) |
+| 3 | about 64 million | the 24-hour pipeline's `actor_repo` (424,098 rows) |
+| 4 | about 25 billion | — |
 
-(Each "level" of the tree covers hundreds of values, so even huge tables
-have very few levels.)
+That's why going from 14,515 rows to 424,098 (almost 30 times more) only
+adds **one level**: one more page to read per lookup. This kind of
+growth is called **logarithmic**: when the data is multiplied, the cost
+only **adds** one step. (Also, the root and the upper levels are used in
+every lookup, so they're usually already **in memory**, and often only
+the leaf and the row have to be read from disk.)
+
+**Why it's called "B" and why it's always "balanced":** the "B" doesn't
+stand for "binary" (each page has hundreds of branches, not two). What
+matters is that the tree is always **balanced**: all the leaves are at
+the **same depth**, so every lookup costs the same. To keep it that way,
+when a value is inserted into a leaf that's already full, the database
+**splits it in two** and adds a new signpost to the level above. That
+extra work on every insert is one of the reasons why indexes make loads
+slower (see the next section).
+
+**A composite index is the same thing, sorted by pairs.** The index
+`(actor_id, repo_id)` is just the same kind of B-tree, but its values are
+**pairs**, sorted first by `actor_id` and, when those are equal, by
+`repo_id`. That's why all the rows of the same actor end up **together in
+the leaves** (you find them by going down once and reading in sequence),
+while those of the same repo end up **scattered** across all the leaves.
+It's the phone book from above, seen from the inside.
 
 **What an index costs.** It isn't free:
 

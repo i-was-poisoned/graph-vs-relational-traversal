@@ -2473,10 +2473,10 @@ En una base de datos es igual. Por ejemplo, el índice de `actor.id` guarda
   índice** (*index scan*).
 
 Por dentro, PostgreSQL organiza sus índices como un **árbol B**
-(*B-tree*): los valores, ordenados y repartidos en unos pocos niveles,
-como un diccionario que abres por la mitad, luego por un cuarto, etc.
-Gracias a eso, encontrar un valor cuesta **muy pocos pasos** aunque la
-tabla tenga millones de filas.
+(*B-tree*), una estructura que permite encontrar un valor en **muy pocos
+pasos** aunque la tabla tenga millones de filas. Cómo funciona
+exactamente, con un ejemplo paso a paso, está explicado más abajo, en
+"Qué es un índice, más a fondo".
 
 **Lo que cuesta un índice:** ocupa espacio en el disco, y cada vez que se
 inserta una fila hay que actualizar también los índices de esa tabla, así
@@ -2607,22 +2607,107 @@ recorrido por índice) está explicado justo arriba, en "Los índices". Aquí
 se va un paso más allá: cómo está hecho un índice por dentro, lo que
 cuesta y cómo decide PostgreSQL si lo usa.
 
-**Cómo está hecho por dentro: el árbol B (*B-tree*).** El tipo de índice
-que PostgreSQL usa por defecto es un **árbol B**: los valores están
-ordenados y repartidos en niveles, como un árbol puesto boca abajo. Para
-buscar un valor se baja desde la raíz eligiendo en cada nivel la rama
-correcta, como cuando buscas una palabra en un diccionario abriéndolo por
-la mitad, luego por un cuarto, etc. Por eso el número de pasos crece muy
-despacio con el tamaño de la tabla:
+**Cómo está hecho por dentro: el árbol B (*B-tree*).** Para entenderlo
+hacen falta tres ideas, una detrás de otra.
 
-| Filas en la tabla | Leer todas (sin índice) | Pasos aproximados con un árbol B |
+**Idea 1: buscar en algo ordenado es muchísimo más rápido.** Piensa en el
+juego de "adivina el número del 1 al 100", en el que solo te responden
+"más alto" o "más bajo". Si preguntas número a número (1, 2, 3...),
+puedes necesitar 100 preguntas. Pero si preguntas siempre por la mitad
+("¿50?" → "más alto"; "¿75?" → "más bajo"; "¿62?"...), cada pregunta
+**descarta la mitad** de lo que queda, y lo encuentras en **7 preguntas
+como mucho**. Eso solo funciona porque los números están **ordenados**.
+
+| Valores ordenados | Preguntas "por la mitad", como mucho |
+|---|---|
+| 100 | 7 |
+| 1.000 | 10 |
+| 1.000.000 | 20 |
+
+Una tabla sin índice es como una lista **desordenada**: no queda más
+remedio que mirar fila por fila. Un índice es, ante todo, **una copia
+ordenada de los valores de una columna**, cada uno con la dirección de su
+fila.
+
+**Idea 2: el disco se lee por páginas, no por valores.** Una base de datos
+no lee los datos uno a uno: los lee del disco en bloques de tamaño fijo
+llamados **páginas** (en PostgreSQL, de 8 KB). Leer una página del disco
+es muchísimo más lento que comparar dos números en memoria. Así que lo que
+de verdad hay que ahorrar no son comparaciones, sino **páginas leídas**. En
+una página caben **cientos** de números como nuestros `id` (más o menos
+unos 400).
+
+**Idea 3: el árbol B junta las dos ideas.** Es una lista ordenada
+repartida en páginas y organizada **en niveles**, como un árbol puesto
+boca abajo:
+
+- **Las hojas** (el nivel de abajo): páginas con los valores ordenados y,
+  junto a cada uno, **la dirección de su fila** en la tabla (en qué página
+  de la tabla está). Cada hoja está enlazada con la siguiente, para poder
+  leer rangos seguidos.
+- **La raíz** (arriba) **y los niveles intermedios**: páginas que no
+  guardan filas, sino **"señales"**, como los carteles de un aeropuerto:
+  "los `id` hasta 300.000.000, por aquí; del 300.000.001 al 330.000.000,
+  por allá".
+
+Buscar un valor es **bajar** desde la raíz siguiendo las señales hasta la
+hoja correcta. Un ejemplo con la tabla `actor` del benchmark (14.515 `id`,
+unas 37 hojas de unos 400 `id` cada una; los números de las señales y de
+las páginas son inventados, solo para ilustrarlo):
+
+```
+Buscar el actor 321725054:
+
+  1. Raíz (1 página leída):
+     [ ... | hasta 300.000.000 → hoja 24 | hasta 330.000.000 → hoja 25 | ... ]
+                                              │
+                                              ▼
+  2. Hoja 25 (1 página leída):
+     [ ... 321.700.991 → fila en la página 81 | 321.725.054 → fila en la página 93 | ... ]
+                                                              │
+                                                              ▼
+  3. Tabla actor, página 93 (1 página leída):
+     id = 321725054, login = 'peitongshi'
+```
+
+**Tres páginas leídas**, frente a leer todas las páginas de la tabla
+(alrededor de un centenar para 14.515 filas) sin índice. Y dentro de cada página, la
+búsqueda del valor exacto se hace "por la mitad", como en el juego.
+
+**Por qué el número de pasos crece tan despacio:** cada nivel más
+multiplica por unos 400 los valores que caben en el árbol:
+
+| Niveles del árbol | Valores que caben (unos 400 por página) | En este proyecto |
 |---|---|---|
-| 14.515 (benchmark) | 14.515 | unos 3 o 4 niveles |
-| 424.098 (24 horas) | 424.098 | unos 3 o 4 niveles |
-| 100 millones | 100 millones | unos 4 o 5 niveles |
+| 1 (solo la raíz) | unos 400 | — |
+| 2 | unos 160.000 | `actor` del benchmark (14.515 filas) |
+| 3 | unos 64 millones | `actor_repo` de la pipeline de 24 horas (424.098 filas) |
+| 4 | unos 25.000 millones | — |
 
-(Cada "nivel" del árbol cubre cientos de valores, así que incluso tablas
-enormes tienen muy pocos niveles.)
+Por eso, pasar de 14.515 filas a 424.098 (casi 30 veces más) solo añade
+**un nivel**: una página más que leer por búsqueda. A este tipo de
+crecimiento se le llama **logarítmico**: cuando los datos se multiplican,
+el coste solo **suma** un paso. (Además, la raíz y los niveles de arriba
+se usan en todas las búsquedas, así que suelen estar ya **en memoria**, y
+muchas veces solo hay que leer del disco la hoja y la fila.)
+
+**Por qué se llama "B" y por qué está siempre "equilibrado":** la "B" no
+viene de "binario" (cada página tiene cientos de ramas, no dos). Lo
+importante es que el árbol está siempre **equilibrado** (*balanced*):
+todas las hojas están a la **misma profundidad**, así que cualquier
+búsqueda cuesta lo mismo. Para mantenerlo así, cuando se inserta un valor
+en una hoja que ya está llena, la base de datos la **parte en dos** y
+añade una señal nueva en el nivel de arriba. Ese trabajo extra en cada
+inserción es una de las razones por las que los índices hacen las cargas
+más lentas (ver el siguiente apartado).
+
+**El índice compuesto es lo mismo, ordenado por parejas.** El índice
+`(actor_id, repo_id)` es un árbol B igual, pero sus valores son
+**parejas**, ordenadas primero por `actor_id` y, a igualdad, por `repo_id`.
+Por eso todas las filas de un mismo actor quedan **juntas en las hojas**
+(se encuentran bajando una vez y leyendo seguido), mientras que las de un
+mismo repo quedan **repartidas** por todas las hojas. Es la guía
+telefónica de más arriba, vista por dentro.
 
 **Lo que cuesta un índice.** No es gratis:
 

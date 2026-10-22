@@ -2568,11 +2568,11 @@ sur le disque :
 - **Avec un index**, il va directement à la ligne. On appelle cela un
   **parcours par index** (*index scan*).
 
-En interne, PostgreSQL organise ses index en **arbre B** (*B-tree*) : les
-valeurs, triées et réparties sur quelques niveaux, comme un dictionnaire
-qu'on ouvre au milieu, puis au quart, etc. Grâce à cela, trouver une
-valeur demande **très peu d'étapes**, même si la table compte des millions
-de lignes.
+En interne, PostgreSQL organise ses index en **arbre B** (*B-tree*), une
+structure qui permet de trouver une valeur en **très peu d'étapes**,
+même si la table compte des millions de lignes. Son fonctionnement
+exact, avec un exemple pas à pas, est expliqué plus bas, dans « Ce
+qu'est un index, plus en détail ».
 
 **Ce que coûte un index :** il occupe de la place sur le disque, et à
 chaque insertion d'une ligne il faut aussi mettre à jour les index de la
@@ -2709,22 +2709,114 @@ par index) sont expliquées juste au-dessus, dans « Les index ». Ici, on va
 un peu plus loin : comment un index est construit à l'intérieur, ce qu'il
 coûte et comment PostgreSQL décide de l'utiliser.
 
-**Comment il est fait à l'intérieur : l'arbre B (*B-tree*).** Le type
-d'index que PostgreSQL utilise par défaut est un **arbre B** : les valeurs
-sont triées et réparties en niveaux, comme un arbre à l'envers. Pour
-chercher une valeur, on descend depuis la racine en choisissant à chaque
-niveau la bonne branche, comme quand on cherche un mot dans un dictionnaire
-en l'ouvrant au milieu, puis au quart, etc. C'est pourquoi le nombre
-d'étapes augmente très lentement avec la taille de la table :
+**Comment il est fait à l'intérieur : l'arbre B (*B-tree*).** Pour le
+comprendre, il faut trois idées, l'une après l'autre.
 
-| Lignes dans la table | Toutes les lire (sans index) | Étapes approximatives avec un arbre B |
+**Idée 1 : chercher dans quelque chose de trié est beaucoup plus rapide.**
+Pensez au jeu « devinez le nombre de 1 à 100 », où l'on vous répond seulement
+« plus grand » ou « plus petit ». Si vous demandez nombre par nombre (1, 2,
+3...), il peut vous falloir 100 questions. Mais si vous demandez toujours le
+milieu (« 50 ? » → « plus grand » ; « 75 ? » → « plus petit » ;
+« 62 ? »...), chaque question **élimine la moitié** de ce qui reste, et vous
+le trouvez en **7 questions au maximum**. Cela ne marche que parce que les
+nombres sont **triés**.
+
+| Valeurs triées | Questions « par le milieu », au maximum |
+|---|---|
+| 100 | 7 |
+| 1 000 | 10 |
+| 1 000 000 | 20 |
+
+Une table sans index est comme une liste **non triée** : on n'a pas d'autre
+choix que de regarder ligne par ligne. Un index est, avant tout, **une
+copie triée des valeurs d'une colonne**, chacune avec l'adresse de sa
+ligne.
+
+**Idée 2 : le disque se lit par pages, pas par valeurs.** Une base de
+données ne lit pas les données une par une : elle les lit sur le disque
+par blocs de taille fixe appelés **pages** (dans PostgreSQL, de 8 Ko). Lire
+une page sur le disque est beaucoup plus lent que comparer deux nombres en
+mémoire. Ce qu'il faut vraiment économiser, ce ne sont donc pas les
+comparaisons, mais les **pages lues**. Une page peut contenir **des
+centaines** de nombres comme nos `id` (environ 400).
+
+**Idée 3 : l'arbre B réunit les deux idées.** C'est une liste triée
+répartie sur des pages et organisée **en niveaux**, comme un arbre à
+l'envers :
+
+- **Les feuilles** (le niveau du bas) : des pages avec les valeurs triées
+  et, à côté de chacune, **l'adresse de sa ligne** dans la table (dans
+  quelle page de la table elle se trouve). Chaque feuille est reliée à la
+  suivante, pour pouvoir lire des plages à la suite.
+- **La racine** (en haut) **et les niveaux intermédiaires** : des pages qui
+  ne stockent pas de lignes, mais des **« panneaux »**, comme les panneaux
+  d'un aéroport : « les `id` jusqu'à 300 000 000, par ici ; de 300 000 001
+  à 330 000 000, par là ».
+
+Chercher une valeur, c'est **descendre** depuis la racine en suivant les
+panneaux jusqu'à la bonne feuille. Un exemple avec la table `actor` du
+benchmark (14 515 `id`, environ 37 feuilles d'environ 400 `id` chacune ;
+les numéros des panneaux et des pages sont inventés, juste pour
+l'illustrer) :
+
+```
+Chercher l'acteur 321725054 :
+
+  1. Racine (1 page lue) :
+     [ ... | jusqu'à 300 000 000 → feuille 24 | jusqu'à 330 000 000 → feuille 25 | ... ]
+                                                   │
+                                                   ▼
+  2. Feuille 25 (1 page lue) :
+     [ ... 321 700 991 → ligne dans la page 81 | 321 725 054 → ligne dans la page 93 | ... ]
+                                                               │
+                                                               ▼
+  3. Table actor, page 93 (1 page lue) :
+     id = 321725054, login = 'peitongshi'
+```
+
+**Trois pages lues**, contre lire toutes les pages de la table
+(une centaine environ pour 14 515 lignes) sans index. Et à l'intérieur de
+chaque page, la recherche de la valeur exacte se fait « par le milieu »,
+comme dans le jeu.
+
+**Pourquoi le nombre d'étapes augmente si lentement :** chaque niveau
+supplémentaire multiplie par environ 400 les valeurs que l'arbre peut
+contenir :
+
+| Niveaux de l'arbre | Valeurs contenues (environ 400 par page) | Dans ce projet |
 |---|---|---|
-| 14 515 (benchmark) | 14 515 | environ 3 ou 4 niveaux |
-| 424 098 (24 heures) | 424 098 | environ 3 ou 4 niveaux |
-| 100 millions | 100 millions | environ 4 ou 5 niveaux |
+| 1 (seulement la racine) | environ 400 | — |
+| 2 | environ 160 000 | `actor` du benchmark (14 515 lignes) |
+| 3 | environ 64 millions | `actor_repo` de la pipeline de 24 heures (424 098 lignes) |
+| 4 | environ 25 milliards | — |
 
-(Chaque « niveau » de l'arbre couvre des centaines de valeurs, donc même des
-tables énormes ont très peu de niveaux.)
+C'est pourquoi passer de 14 515 lignes à 424 098 (presque 30 fois plus)
+n'ajoute qu'**un niveau** : une page de plus à lire par recherche. Ce type
+de croissance s'appelle **logarithmique** : quand les données sont
+multipliées, le coût ne fait qu'**ajouter** une étape. (De plus, la racine
+et les niveaux du haut servent à toutes les recherches, donc ils sont
+généralement déjà **en mémoire**, et souvent il ne reste à lire sur le
+disque que la feuille et la ligne.)
+
+**Pourquoi il s'appelle « B » et pourquoi il est toujours « équilibré » :**
+le « B » ne vient pas de « binaire » (chaque page a des centaines de
+branches, pas deux). L'important, c'est que l'arbre est toujours
+**équilibré** (*balanced*) : toutes les feuilles sont à la **même
+profondeur**, donc n'importe quelle recherche coûte la même chose. Pour le
+garder ainsi, quand on insère une valeur dans une feuille déjà pleine, la
+base de données la **coupe en deux** et ajoute un nouveau panneau au niveau
+du dessus. Ce travail supplémentaire à chaque insertion est l'une des
+raisons pour lesquelles les index ralentissent les chargements (voir la
+section suivante).
+
+**L'index composé, c'est la même chose, trié par paires.** L'index
+`(actor_id, repo_id)` est un arbre B identique, mais ses valeurs sont des
+**paires**, triées d'abord par `actor_id` puis, à égalité, par `repo_id`.
+C'est pourquoi toutes les lignes d'un même acteur se retrouvent
+**ensemble dans les feuilles** (on les trouve en descendant une seule fois
+et en lisant à la suite), tandis que celles d'un même dépôt se retrouvent
+**dispersées** dans toutes les feuilles. C'est l'annuaire évoqué plus
+haut, vu de l'intérieur.
 
 **Ce que coûte un index.** Ce n'est pas gratuit :
 
