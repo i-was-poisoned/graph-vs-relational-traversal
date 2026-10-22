@@ -2703,22 +2703,90 @@ Look up actor 321725054:
 (around a hundred for 14,515 rows) without an index. And inside each page, the
 search for the exact value is done by "halving", like in the game.
 
-**Why the number of steps grows so slowly:** each extra level
-multiplies the number of values that fit in the tree by about 400:
+**Why the number of steps grows so slowly.** This is the most
+important part of the B-tree, and it's easiest to understand with a miniature tree.
 
-| Tree levels | Values that fit (about 400 per page) | In this project |
+**Step 1: a small, toy tree.** Imagine that each page can only hold
+**3 values** (in reality about 400 fit, but with 3 it can be
+drawn). Each slot in the root is a signpost that leads to a page on the
+level below:
+
+```
+Level 1 (root):        [  A  |  B  |  C  ]                       1 page
+                         │     │     │
+                ┌────────┘     │     └────────┐
+                ▼              ▼              ▼
+Level 2:   [ 1 | 2 | 3 ]  [ 4 | 5 | 6 ]  [ 7 | 8 | 9 ]           3 pages
+```
+
+- With **1 level** (just the root), **3** values fit.
+- With **2 levels**, each of the root's 3 signposts leads to a page
+  with 3 values: **3 × 3 = 9** values fit.
+- With **3 levels**, each of those 9 slots would lead to another page of 3:
+  **9 × 3 = 27** fit.
+- With 4 levels, **27 × 3 = 81**. With 5, **243**...
+
+Each new level **multiplies** what fits by 3, because each slot on the
+level above "opens" a whole page on the level below. It's like a
+family tree: each generation multiplies the number of people.
+
+**Step 2: looking up a value costs "one page per level".** To find
+the 8 in the drawing, you read the root (1 page), pick the signpost `C` and
+read that level-2 page (another page). **Two levels, two pages
+read**, even though there are 9 values. With 3 levels it would be three pages, even though
+there are 27 values. The number of pages you have to read **is the number of
+levels**, not the number of values.
+
+**Step 3: the same thing, with real pages.** A real PostgreSQL page
+holds about **400** `id`s, not 3. So each level multiplies by
+**400**:
+
+| Tree levels | How many values fit | Calculation | In this project |
+|---|---|---|---|
+| 1 (just the root) | about 400 | 400 | — |
+| 2 | about 160,000 | 400 × 400 | the benchmark's `actor`: 14,515 rows → **fit in 2 levels** |
+| 3 | about 64 million | 160,000 × 400 | the 24-hour pipeline's `actor_repo`: 424,098 rows → **3 levels** |
+| 4 | about 25.6 billion | 64 million × 400 | more than everyone on the planet |
+
+And since each lookup reads **one page per level**:
+
+| Table rows | Pages read **without** an index (reading the whole table) | **Index** pages read (one per level) |
 |---|---|---|
-| 1 (just the root) | about 400 | — |
-| 2 | about 160,000 | the benchmark's `actor` (14,515 rows) |
-| 3 | about 64 million | the 24-hour pipeline's `actor_repo` (424,098 rows) |
-| 4 | about 25 billion | — |
+| 14,515 (benchmark) | every page of the table: around a hundred | **2** |
+| 424,098 (24-hour pipeline) | every page of the table: about two thousand | **3** |
+| 64 million | hundreds of thousands | **3** |
+| 25 billion | more than a hundred million | **4** |
 
-That's why going from 14,515 rows to 424,098 (almost 30 times more) only
-adds **one level**: one more page to read per lookup. This kind of
-growth is called **logarithmic**: when the data is multiplied, the cost
-only **adds** one step. (Also, the root and the upper levels are used in
-every lookup, so they're usually already **in memory**, and often only
-the leaf and the row have to be read from disk.)
+(On top of that comes one more page, to read the row in the table, as in the
+earlier drawing: **3 pages in total** for the benchmark.)
+
+**Step 4: the conclusion.** Going from the benchmark (14,515 rows) to the
+24-hour pipeline (424,098 rows) means having **almost 30 times more data**,
+but looking up a value only costs **one more level**: one more page to
+read, from 2 to 3. Without an index, on the other hand, the work would be multiplied by 30.
+
+**Linear versus logarithmic (the two ways of growing).** There are two ways
+for the work to grow when the data grows:
+
+- **Linear:** if the data is multiplied by 30, the work is also
+  multiplied by 30. That's what happens when reading the whole table (without an index): twice
+  the rows, twice the work.
+- **Logarithmic:** if the data is multiplied by 400, the work only
+  **adds 1** (one more level). That's what happens with the B-tree. The
+  **logarithm** answers the question "how many times do I have to
+  multiply by 400 to reach this number of rows?", and that is
+  exactly the number of levels: for 14,515, 2 times is enough (400 ×
+  400 is already more than 14,515); for 424,098, it takes 3.
+
+That's why indexes are so powerful on large tables: the data can
+grow enormously, and the cost of finding a value barely changes.
+
+**One more detail: memory.** Reading from **disk** is slow; reading from
+**memory** (RAM) is much, much faster. The root and the upper levels
+are used in **every** lookup, so PostgreSQL usually keeps them
+**in memory** (this is called **caching**). In practice,
+many lookups only have to go to disk for the leaf and the row, or not
+even that, if those were also in memory.
 
 **Why it's called "B" and why it's always "balanced":** the "B" doesn't
 stand for "binary" (each page has hundreds of branches, not two). What

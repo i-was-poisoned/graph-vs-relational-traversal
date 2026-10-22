@@ -2893,24 +2893,90 @@ Chercher l'acteur 321725054 :
 chaque page, la recherche de la valeur exacte se fait « par le milieu »,
 comme dans le jeu.
 
-**Pourquoi le nombre d'étapes augmente si lentement :** chaque niveau
-supplémentaire multiplie par environ 400 les valeurs que l'arbre peut
-contenir :
+**Pourquoi le nombre d'étapes augmente si lentement.** C'est la partie la plus
+importante de l'arbre B, et on la comprend mieux avec un arbre en miniature.
 
-| Niveaux de l'arbre | Valeurs contenues (environ 400 par page) | Dans ce projet |
+**Étape 1 : un petit arbre, un arbre jouet.** Imaginez que chaque page ne
+peut contenir que **3 valeurs** (en réalité, il en tient environ 400, mais avec 3 on peut
+le dessiner). Chaque case de la racine est un panneau qui mène à une page du
+niveau du dessous :
+
+```
+Niveau 1 (racine) :    [  A  |  B  |  C  ]                       1 page
+                         │     │     │
+                ┌────────┘     │     └────────┐
+                ▼              ▼              ▼
+Niveau 2 : [ 1 | 2 | 3 ]  [ 4 | 5 | 6 ]  [ 7 | 8 | 9 ]           3 pages
+```
+
+- Avec **1 niveau** (seulement la racine), il tient **3** valeurs.
+- Avec **2 niveaux**, chacun des 3 panneaux de la racine mène à une page
+  de 3 valeurs : il en tient **3 × 3 = 9**.
+- Avec **3 niveaux**, chacune de ces 9 cases mènerait à une autre page de 3 :
+  il en tient **9 × 3 = 27**.
+- Avec 4 niveaux, **27 × 3 = 81**. Avec 5, **243**...
+
+Chaque nouveau niveau **multiplie** par 3 ce qui peut tenir, parce que chaque case du
+niveau du dessus « ouvre » une page entière au niveau du dessous. C'est comme un
+arbre généalogique : chaque génération multiplie le nombre de personnes.
+
+**Étape 2 : chercher une valeur coûte « une page par niveau ».** Pour trouver
+le 8 dans le dessin, on lit la racine (1 page), on choisit le panneau `C` et on
+lit cette page du niveau 2 (une autre page). **Deux niveaux, deux pages
+lues**, bien qu'il y ait 9 valeurs. Avec 3 niveaux, ce serait trois pages, bien
+qu'il y ait 27 valeurs. Le nombre de pages à lire **est le nombre de
+niveaux**, pas le nombre de valeurs.
+
+**Étape 3 : la même chose, avec de vraies pages.** Une vraie page de
+PostgreSQL contient environ **400** `id`, pas 3. Chaque niveau multiplie donc par
+**400** :
+
+| Niveaux de l'arbre | Combien de valeurs tiennent | Calcul | Dans ce projet |
+|---|---|---|---|
+| 1 (seulement la racine) | environ 400 | 400 | — |
+| 2 | environ 160 000 | 400 × 400 | `actor` du benchmark : 14 515 lignes → **tiennent en 2 niveaux** |
+| 3 | environ 64 millions | 160 000 × 400 | `actor_repo` de la pipeline de 24 heures : 424 098 lignes → **3 niveaux** |
+| 4 | environ 25,6 milliards | 64 millions × 400 | plus que toutes les personnes de la planète |
+
+Et comme chaque recherche lit **une page par niveau** :
+
+| Lignes de la table | Pages lues **sans** index (lire toute la table) | Pages **de l'index** lues (une par niveau) |
 |---|---|---|
-| 1 (seulement la racine) | environ 400 | — |
-| 2 | environ 160 000 | `actor` du benchmark (14 515 lignes) |
-| 3 | environ 64 millions | `actor_repo` de la pipeline de 24 heures (424 098 lignes) |
-| 4 | environ 25 milliards | — |
+| 14 515 (benchmark) | toutes celles de la table : une centaine | **2** |
+| 424 098 (pipeline de 24 heures) | toutes celles de la table : environ deux mille | **3** |
+| 64 millions | des centaines de milliers | **3** |
+| 25 milliards | plus de cent millions | **4** |
 
-C'est pourquoi passer de 14 515 lignes à 424 098 (presque 30 fois plus)
-n'ajoute qu'**un niveau** : une page de plus à lire par recherche. Ce type
-de croissance s'appelle **logarithmique** : quand les données sont
-multipliées, le coût ne fait qu'**ajouter** une étape. (De plus, la racine
-et les niveaux du haut servent à toutes les recherches, donc ils sont
-généralement déjà **en mémoire**, et souvent il ne reste à lire sur le
-disque que la feuille et la ligne.)
+(À cela s'ajoute une page de plus, pour lire la ligne dans la table, comme dans le
+dessin précédent : **3 pages au total** pour le benchmark.)
+
+**Étape 4 : la conclusion.** Passer du benchmark (14 515 lignes) à la
+pipeline de 24 heures (424 098 lignes), c'est avoir **presque 30 fois plus de données**,
+mais chercher une valeur ne coûte qu'**un niveau de plus** : une page de plus à
+lire, de 2 à 3. Sans index, en revanche, le travail serait multiplié par 30.
+
+**Linéaire face à logarithmique (les deux façons de croître).** Il y a deux façons
+pour le travail de croître quand les données croissent :
+
+- **Linéaire :** si les données sont multipliées par 30, le travail est aussi
+  multiplié par 30. C'est ce qui se passe quand on lit toute la table (sans index) : deux fois
+  plus de lignes, deux fois plus de travail.
+- **Logarithmique :** si les données sont multipliées par 400, le travail ne fait
+  qu'**ajouter 1** (un niveau de plus). C'est ce qui se passe avec l'arbre B. Le
+  **logarithme** répond à la question « combien de fois dois-je
+  multiplier par 400 pour arriver à ce nombre de lignes ? », et c'est
+  justement le nombre de niveaux : pour 14 515, 2 fois suffisent (400 ×
+  400, c'est déjà plus que 14 515) ; pour 424 098, il en faut 3.
+
+C'est pourquoi les index sont si puissants sur les grandes tables : les données peuvent
+croître énormément, et le coût pour trouver une valeur change à peine.
+
+**Un détail de plus : la mémoire.** Lire sur le **disque** est lent ; lire en
+**mémoire** (RAM) est beaucoup plus rapide. La racine et les niveaux du haut
+servent à **toutes** les recherches, donc PostgreSQL les garde
+généralement **en mémoire** (c'est ce qu'on appelle le **cache**). En pratique,
+beaucoup de recherches n'ont besoin d'aller sur le disque que pour la feuille et la ligne, ou même
+pas, si elles étaient aussi en mémoire.
 
 **Pourquoi il s'appelle « B » et pourquoi il est toujours « équilibré » :**
 le « B » ne vient pas de « binaire » (chaque page a des centaines de

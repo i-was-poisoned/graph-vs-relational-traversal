@@ -2790,22 +2790,90 @@ Buscar el actor 321725054:
 (alrededor de un centenar para 14.515 filas) sin índice. Y dentro de cada página, la
 búsqueda del valor exacto se hace "por la mitad", como en el juego.
 
-**Por qué el número de pasos crece tan despacio:** cada nivel más
-multiplica por unos 400 los valores que caben en el árbol:
+**Por qué el número de pasos crece tan despacio.** Esta es la parte más
+importante del árbol B, y se entiende mejor con un árbol en miniatura.
 
-| Niveles del árbol | Valores que caben (unos 400 por página) | En este proyecto |
+**Paso 1: un árbol pequeño, de juguete.** Imagina que en cada página solo
+cabe **3 valores** (en la realidad caben unos 400, pero con 3 se puede
+dibujar). Cada casilla de la raíz es una señal que lleva a una página del
+nivel de abajo:
+
+```
+Nivel 1 (raíz):        [  A  |  B  |  C  ]                       1 página
+                         │     │     │
+                ┌────────┘     │     └────────┐
+                ▼              ▼              ▼
+Nivel 2:   [ 1 | 2 | 3 ]  [ 4 | 5 | 6 ]  [ 7 | 8 | 9 ]           3 páginas
+```
+
+- Con **1 nivel** (solo la raíz) caben **3** valores.
+- Con **2 niveles**, cada una de las 3 señales de la raíz lleva a una página
+  con 3 valores: caben **3 × 3 = 9** valores.
+- Con **3 niveles**, cada una de esas 9 casillas llevaría a otra página de 3:
+  caben **9 × 3 = 27**.
+- Con 4 niveles, **27 × 3 = 81**. Con 5, **243**...
+
+Cada nivel nuevo **multiplica** por 3 lo que cabe, porque cada casilla del
+nivel de arriba "abre" una página entera en el nivel de abajo. Es como un
+árbol genealógico: cada generación multiplica el número de personas.
+
+**Paso 2: buscar un valor cuesta "una página por nivel".** Para encontrar
+el 8 en el dibujo, se lee la raíz (1 página), se elige la señal `C` y se
+lee esa página del nivel 2 (otra página). **Dos niveles, dos páginas
+leídas**, aunque haya 9 valores. Con 3 niveles serían tres páginas, aunque
+haya 27 valores. El número de páginas que hay que leer **es el número de
+niveles**, no el número de valores.
+
+**Paso 3: lo mismo, con páginas de verdad.** En una página real de
+PostgreSQL caben unos **400** `id`, no 3. Así que cada nivel multiplica por
+**400**:
+
+| Niveles del árbol | Cuántos valores caben | Cálculo | En este proyecto |
+|---|---|---|---|
+| 1 (solo la raíz) | unos 400 | 400 | — |
+| 2 | unos 160.000 | 400 × 400 | `actor` del benchmark: 14.515 filas → **caben en 2 niveles** |
+| 3 | unos 64 millones | 160.000 × 400 | `actor_repo` de la pipeline de 24 horas: 424.098 filas → **3 niveles** |
+| 4 | unos 25.600 millones | 64 millones × 400 | más que todas las personas del planeta |
+
+Y como cada búsqueda lee **una página por nivel**:
+
+| Filas de la tabla | Páginas leídas **sin** índice (leer toda la tabla) | Páginas **del índice** leídas (una por nivel) |
 |---|---|---|
-| 1 (solo la raíz) | unos 400 | — |
-| 2 | unos 160.000 | `actor` del benchmark (14.515 filas) |
-| 3 | unos 64 millones | `actor_repo` de la pipeline de 24 horas (424.098 filas) |
-| 4 | unos 25.000 millones | — |
+| 14.515 (benchmark) | todas las de la tabla: un centenar | **2** |
+| 424.098 (pipeline de 24 horas) | todas las de la tabla: unas dos mil | **3** |
+| 64 millones | cientos de miles | **3** |
+| 25.000 millones | más de cien millones | **4** |
 
-Por eso, pasar de 14.515 filas a 424.098 (casi 30 veces más) solo añade
-**un nivel**: una página más que leer por búsqueda. A este tipo de
-crecimiento se le llama **logarítmico**: cuando los datos se multiplican,
-el coste solo **suma** un paso. (Además, la raíz y los niveles de arriba
-se usan en todas las búsquedas, así que suelen estar ya **en memoria**, y
-muchas veces solo hay que leer del disco la hoja y la fila.)
+(A eso se suma una página más, para leer la fila en la tabla, como en el
+dibujo de antes: **3 páginas en total** para el benchmark.)
+
+**Paso 4: la conclusión.** Pasar del benchmark (14.515 filas) a la
+pipeline de 24 horas (424.098 filas) es tener **casi 30 veces más datos**,
+pero buscar un valor solo cuesta **un nivel más**: una página más que
+leer, de 2 a 3. Sin índice, en cambio, el trabajo se multiplicaría por 30.
+
+**Lineal frente a logarítmico (las dos formas de crecer).** Hay dos formas
+de que el trabajo crezca cuando crecen los datos:
+
+- **Lineal:** si los datos se multiplican por 30, el trabajo también se
+  multiplica por 30. Es lo que pasa al leer toda la tabla (sin índice): el
+  doble de filas, el doble de trabajo.
+- **Logarítmico:** si los datos se multiplican por 400, el trabajo solo
+  **suma 1** (un nivel más). Es lo que pasa con el árbol B. El
+  **logaritmo** responde a la pregunta "¿cuántas veces tengo que
+  multiplicar por 400 para llegar a este número de filas?", y esa es
+  justamente la cantidad de niveles: para 14.515 basta con 2 veces (400 ×
+  400 ya es más que 14.515); para 424.098 hacen falta 3.
+
+Por eso los índices son tan potentes en tablas grandes: los datos pueden
+crecer muchísimo, y el coste de encontrar un valor apenas cambia.
+
+**Un detalle más: la memoria.** Leer del **disco** es lento; leer de la
+**memoria** (RAM) es muchísimo más rápido. La raíz y los niveles de arriba
+se usan en **todas** las búsquedas, así que PostgreSQL los mantiene
+normalmente **en memoria** (a esto se le llama **caché**). En la práctica,
+muchas búsquedas solo tienen que ir al disco a por la hoja y la fila, o ni
+siquiera eso, si también estaban en memoria.
 
 **Por qué se llama "B" y por qué está siempre "equilibrado":** la "B" no
 viene de "binario" (cada página tiene cientos de ramas, no dos). Lo
