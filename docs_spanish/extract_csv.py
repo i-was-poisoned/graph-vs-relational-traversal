@@ -15,17 +15,26 @@
 # el valor "más reciente" mientras se lee, ordenar para obtener una salida
 # reproducible y crear carpetas con Path.mkdir().
 #
+# QUÉ HAY DE NUEVO en esta versión (añadido para el pipeline en vivo de
+# 24 horas, pipeline.py): puede leer VARIOS archivos de una vez, y lee
+# directamente archivos comprimidos .json.gz (sin descomprimirlos antes
+# en disco); se salta el raro evento que no tiene id de actor/repo y lo
+# avisa con el módulo `logging`; y el paso de escribir los CSV vive ahora
+# en su propia función, write_all(), para que pipeline.py pueda
+# reutilizarlo. Para la hora del benchmark, los archivos CSV que produce
+# son idénticos byte a byte a los de antes.
+#
 # Su función en el proyecto: ser la ÚNICA FUENTE desde la que se cargan
 # las dos bases de datos. PostgreSQL y Neo4j leerán cada una estos mismos
 # tres archivos, así que no pueden acabar guardando datos distintos — un
 # requisito para que el benchmark sea justo.
 ########################################################################
 
-"""Extract the benchmark's actor/repo graph from a GH Archive file into CSV files.
+"""Extract the benchmark's actor/repo graph from GH Archive files into CSV files.
 
-Reads the JSON Lines file once, skips bot accounts (logins ending in "[bot]"),
-and writes three CSV files that both databases are loaded from, so they always
-hold exactly the same data:
+Reads one or more JSON Lines files (plain .json or compressed .json.gz) once,
+skips bot accounts (logins ending in "[bot]"), and writes three CSV files that
+both databases are loaded from, so they always hold exactly the same data:
 
     actors.csv       id, login             one row per actor (most recent login)
     repos.csv        id, name              one row per repo (most recent name)
@@ -34,6 +43,7 @@ hold exactly the same data:
 Usage:
     python scripts/extract_csv.py
     python scripts/extract_csv.py --file data/2026-08-27-15.json --out-dir data/csv
+    python scripts/extract_csv.py --file data/live/raw/*.json.gz --out-dir data/live/csv
 """
 
 # ---------------------------------------------------------------------
@@ -53,11 +63,26 @@ Usage:
 # falta), y tanto PostgreSQL como Neo4j leen su salida sin problemas.
 #
 # argparse, json, Path: ya explicados en los scripts anotados anteriores.
+#
+# gzip: ya lo vimos en la copia anotada de download_gharchive.py. Aquí se
+# usa de otra forma: para LEER un archivo .json.gz como texto,
+# descomprimiéndolo sobre la marcha (ver open_text() más abajo).
+#
+# logging: NUEVO — la forma de la biblioteca estándar de avisar de
+# advertencias y otros mensajes. Se explica donde se crea `log`, justo
+# debajo de las constantes.
+#
+# from typing import TextIO: NUEVO — TextIO solo se usa en una anotación
+# de tipo. Significa "un archivo abierto del que lees TEXTO" (en vez de
+# bytes crudos). Ver open_text() más abajo.
 # ---------------------------------------------------------------------
 import argparse
 import csv
+import gzip
 import json
+import logging
 from pathlib import Path
+from typing import TextIO
 
 # ---------------------------------------------------------------------
 # PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -81,6 +106,32 @@ DEFAULT_OUT_DIR = PROJECT_DIR / "data" / "csv"
 # benchmark los excluye porque actúan como nodos centrales artificiales
 # entre repos que no tienen relación entre sí.
 BOT_SUFFIX = "[bot]"
+
+# ---------------------------------------------------------------------
+# log = logging.getLogger(__name__)
+#
+# NUEVO: un "logger" — un objeto para emitir mensajes, una alternativa
+# más flexible a print(). getLogger(nombre) te da el logger con ese
+# nombre; __name__ es el nombre de este mismo módulo (p. ej.
+# "extract_csv"), así que cada mensaje lleva la etiqueta de dónde viene.
+#
+# ¿Por qué no simplemente print()? Porque DÓNDE acaban los mensajes lo
+# decide quien ejecuta el programa, no este archivo:
+#   - Ejecutado solo (python scripts/extract_csv.py), nadie ha
+#     configurado logging, y lo que Python hace por defecto es mostrar
+#     las advertencias (y lo que sea más grave) en pantalla. Así que la
+#     advertencia de abajo sigue apareciendo en la terminal.
+#   - Ejecutado desde pipeline.py, que SÍ configura logging al empezar:
+#     la misma advertencia va entonces también a logs/pipeline.log, para
+#     que puedas leerla más tarde aunque el pipeline funcione sin
+#     supervisión.
+# Este archivo no necesita saber ni preocuparse por cuál de los dos
+# casos está ocurriendo.
+#
+# Los mensajes tienen niveles — debug, info, warning, error, critical —
+# de menos a más grave. Abajo usamos log.warning(...).
+# ---------------------------------------------------------------------
+log = logging.getLogger(__name__)
 
 
 def is_bot(login: str) -> bool:
@@ -129,9 +180,52 @@ def remember_latest(names: dict[int, tuple[str, str]], key: int, created_at: str
 
 
 # ---------------------------------------------------------------------
-# def extract(file_path) -> tuple[...]:
+# def open_text(path) -> TextIO:
 #
-# Lee el archivo una vez y devuelve CUATRO cosas a la vez. La anotación
+# NUEVO: abre un archivo para leer texto, esté comprimido o no.
+#
+#   path.suffix
+#     La ÚLTIMA extensión de la ruta: para "2026-08-27-15.json.gz" es
+#     ".gz"; para "2026-08-27-15.json" es ".json".
+#
+#   gzip.open(path, "rt", encoding="utf-8")
+#     "rt" = Read, Text (lectura, modo texto). gzip descomprime los bytes
+#     a medida que los leemos y el modo texto los convierte en cadenas
+#     normales, así que quien llama puede recorrerlo con `for line in f:`
+#     exactamente igual que con un archivo normal. No se descomprime
+#     nada en disco: una ventana de 24 horas son 24 archivos comprimidos,
+#     y mantenerlos comprimidos ahorra MUCHO espacio en disco (cada hora
+#     ocupa varias veces más una vez descomprimida).
+#
+#   open(path, "r", encoding="utf-8")
+#     El caso normal, como antes, para un archivo .json ya descomprimido
+#     (como la hora del benchmark, data/2026-08-27-15.json).
+#
+# -> TextIO: las dos ramas devuelven "un archivo de texto abierto", así
+# que la función se puede usar en una sentencia `with` igual que el
+# propio open():
+#     with open_text(file_path) as f:
+# Quien llama no necesita saber qué tipo de archivo era.
+# ---------------------------------------------------------------------
+def open_text(path: Path) -> TextIO:
+    # Los archivos .json.gz se leen comprimidos, sin descomprimirlos antes en disco.
+    if path.suffix == ".gz":
+        return gzip.open(path, "rt", encoding="utf-8")
+    return open(path, "r", encoding="utf-8")
+
+
+# ---------------------------------------------------------------------
+# def extract(file_paths) -> tuple[...]:
+#
+# NUEVO: ahora recibe una LISTA de archivos (file_paths: list[Path]) en
+# lugar de uno solo, y los lee uno detrás de otro sobre los MISMOS
+# diccionarios y el MISMO conjunto. Así, un actor que aparece en la hora
+# 3 y otra vez en la hora 17 sigue acabando como UNA sola fila, con su
+# login más reciente (remember_latest() compara las horas de los
+# eventos, vengan del archivo que vengan). Para el benchmark, la lista
+# contiene solo un archivo.
+#
+# Lee los archivos una vez y devuelve CUATRO cosas a la vez. La anotación
 # de tipo parece un trabalenguas, pero son solo dos tipos de TUPLA
 # pequeña y una grande. Vamos de dentro afuera, con datos reales.
 #
@@ -190,7 +284,7 @@ def remember_latest(names: dict[int, tuple[str, str]], key: int, created_at: str
 #        int,                             4. skipped_bot_events: un número
 #    ]
 # ---------------------------------------------------------------------
-def extract(file_path: Path) -> tuple[dict[int, tuple[str, str]], dict[int, tuple[str, str]], set[tuple[int, int]], int]:
+def extract(file_paths: list[Path]) -> tuple[dict[int, tuple[str, str]], dict[int, tuple[str, str]], set[tuple[int, int]], int]:
     actors: dict[int, tuple[str, str]] = {}
     repos: dict[int, tuple[str, str]] = {}
 
@@ -211,26 +305,86 @@ def extract(file_path: Path) -> tuple[dict[int, tuple[str, str]], dict[int, tupl
     # -----------------------------------------------------------------
     pairs: set[tuple[int, int]] = set()
     skipped_bot_events = 0
+    # NUEVO: cuenta los eventos descartados porque no tenían id de
+    # actor/repo (se explica más abajo, en la línea `if "id" not in ...`).
+    skipped_without_id = 0
 
-    with open(file_path, "r", encoding="utf-8") as f:
-        for line in f:
-            event = json.loads(line)
-            actor = event["actor"]
-            repo = event["repo"]
+    # NUEVO: un bucle exterior que recorre los archivos. Todo lo de dentro
+    # es el mismo trabajo por línea de antes, solo que con un nivel más de
+    # sangría. Cada archivo se abre con open_text(), así que funcionan
+    # tanto .json como .json.gz.
+    for file_path in file_paths:
+        with open_text(file_path) as f:
+            for line in f:
+                event = json.loads(line)
+                actor = event["actor"]
+                repo = event["repo"]
+                # ---------------------------------------------------
+                # NUEVO: saltar los eventos cuyo actor o repo no tiene id.
+                #
+                # Encontrado en datos REALES: en una ventana de 24 horas
+                # con 1,250,059 eventos, 2 ForkEvents tenían un repo
+                # VACÍO:
+                #     "repo": {}
+                # seguramente forks de repos que se han borrado desde
+                # entonces. Sin id no hay nodo que crear ni conexión que
+                # dibujar, y repo["id"] haría fallar toda la ejecución
+                # con un KeyError.
+                #
+                # `"id" not in actor` comprueba si el diccionario tiene
+                # esa clave en absoluto (la misma prueba `in` sobre
+                # diccionarios que se usa en remember_latest). Contamos
+                # estos eventos y seguimos con `continue`, igual que con
+                # los eventos de bots de abajo. El total se avisa una
+                # sola vez, después de leer todos los archivos.
+                #
+                # (La hora del benchmark no tiene eventos así, por eso
+                # su salida CSV no cambia.)
+                # ---------------------------------------------------
+                # Algunos eventos llegan con un repo vacío ({}), p. ej. forks de repos
+                # borrados después: sin ids no hay nodo ni conexión que crear.
+                if "id" not in actor or "id" not in repo:
+                    skipped_without_id += 1
+                    continue
 
-            # El mismo patrón de saltar y contar de antes: `continue` salta
-            # a la siguiente línea sin llegar al código de abajo.
-            if is_bot(actor["login"]):
-                skipped_bot_events += 1
-                continue
+                # El mismo patrón de saltar y contar de antes: `continue`
+                # salta a la siguiente línea sin llegar al código de abajo.
+                if is_bot(actor["login"]):
+                    skipped_bot_events += 1
+                    continue
 
-            # Los ids (actor["id"], repo["id"]) son las claves en todas
-            # partes — nunca los nombres, que pueden cambiar (ver
-            # remember_latest).
-            remember_latest(actors, actor["id"], event["created_at"], actor["login"])
-            remember_latest(repos, repo["id"], event["created_at"], repo["name"])
-            pairs.add((actor["id"], repo["id"]))
+                # Los ids (actor["id"], repo["id"]) son las claves en
+                # todas partes — nunca los nombres, que pueden cambiar
+                # (ver remember_latest).
+                remember_latest(actors, actor["id"], event["created_at"], actor["login"])
+                remember_latest(repos, repo["id"], event["created_at"], repo["name"])
+                pairs.add((actor["id"], repo["id"]))
 
+    # -----------------------------------------------------------------
+    # NUEVO: avisar de los eventos saltados, pero solo si hubo alguno.
+    #
+    # `if skipped_without_id:` — un número cuenta como False cuando es 0
+    # y como True en cualquier otro caso, así que esto se lee "si se
+    # saltó alguno".
+    #
+    # log.warning("Skipped %d event(s) ...", skipped_without_id)
+    #   Ojo: NO es una f-string. logging tiene su propio estilo de
+    #   huecos: %d significa "aquí va un número entero", y el valor se
+    #   pasa como un argumento aparte. logging lo rellena él mismo, p. ej.
+    #       Skipped 2 event(s) without an actor or repo id
+    #   (Es la convención en las llamadas a logging: el texto solo se
+    #   construye si el mensaje de verdad se va a mostrar en algún sitio.)
+    #
+    # Dónde aparece: en pantalla cuando se ejecuta solo; en pantalla Y en
+    # logs/pipeline.log cuando se ejecuta desde pipeline.py (ver `log`
+    # arriba).
+    #
+    # Es una advertencia y no un valor de retorno más, así que la línea
+    # del return (y todos los que llaman a la función) se queda
+    # exactamente como estaba.
+    # -----------------------------------------------------------------
+    if skipped_without_id:
+        log.warning("Skipped %d event(s) without an actor or repo id", skipped_without_id)
     return actors, repos, pairs, skipped_bot_events
 
 
@@ -266,36 +420,32 @@ def write_csv(path: Path, header: list[str], rows: list[tuple]) -> None:
     print(f"  {path.name:<16} {len(rows):>7} rows")
 
 
-# parse_args(): el mismo patrón que en los scripts anteriores. --out-dir
-# permite elegir otra carpeta de salida; type=Path la convierte, igual
-# que con --file.
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--file", type=Path, default=DEFAULT_FILE,
-                         help=f"Path to the JSON Lines file (default: {DEFAULT_FILE})")
-    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR,
-                         help=f"Folder to write the CSV files to (default: {DEFAULT_OUT_DIR})")
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-
-    # extract() devuelve una tupla de cuatro valores; esta línea la
-    # DESEMPAQUETA en cuatro variables a la vez (la misma idea que
-    # `for key, value in ...`).
-    actors, repos, pairs, skipped_bot_events = extract(args.file)
-
+# ---------------------------------------------------------------------
+# def write_all(out_dir, actors, repos, pairs) -> None:
+#
+# NUEVO: los pasos de "crear la carpeta y escribir los tres archivos
+# CSV" que antes estaban dentro de main(), trasladados a su propia
+# función. No ha cambiado nada en ellos — se han MOVIDO, para que
+# pipeline.py pueda llamar a extract() y después a write_all() por su
+# cuenta, sin pasar por main() ni por sus argumentos de línea de
+# comandos.
+#
+# La firma es larga, así que se parte en dos líneas: Python permite un
+# salto de línea en cualquier punto dentro de paréntesis ( ), y la
+# segunda línea se sangra para alinearse con el primer parámetro, solo
+# por legibilidad.
+# ---------------------------------------------------------------------
+def write_all(out_dir: Path, actors: dict[int, tuple[str, str]], repos: dict[int, tuple[str, str]],
+              pairs: set[tuple[int, int]]) -> None:
     # -----------------------------------------------------------------
-    # args.out_dir.mkdir(parents=True, exist_ok=True)
+    # out_dir.mkdir(parents=True, exist_ok=True)
     #
     # Crea la carpeta de salida (data/csv/) si todavía no existe.
     #   parents=True   crea también las carpetas superiores que falten.
     #   exist_ok=True  no falla si la carpeta ya existe (p. ej. en la
     #                  segunda ejecución).
     # -----------------------------------------------------------------
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Skipped {skipped_bot_events} bot events. Writing to {args.out_dir}:")
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     # -----------------------------------------------------------------
     # Construir las filas: sorted(...) + una list comprehension
@@ -319,11 +469,53 @@ def main() -> None:
     # -----------------------------------------------------------------
     # Ordenado por id para que la misma entrada produzca siempre los mismos
     # archivos, byte a byte.
-    write_csv(args.out_dir / "actors.csv", ["id", "login"],
+    write_csv(out_dir / "actors.csv", ["id", "login"],
               [(actor_id, login) for actor_id, (_, login) in sorted(actors.items())])
-    write_csv(args.out_dir / "repos.csv", ["id", "name"],
+    write_csv(out_dir / "repos.csv", ["id", "name"],
               [(repo_id, name) for repo_id, (_, name) in sorted(repos.items())])
-    write_csv(args.out_dir / "actor_repo.csv", ["actor_id", "repo_id"], sorted(pairs))
+    write_csv(out_dir / "actor_repo.csv", ["actor_id", "repo_id"], sorted(pairs))
+
+
+# parse_args(): el mismo patrón que en los scripts anteriores. --out-dir
+# permite elegir otra carpeta de salida; type=Path la convierte, igual
+# que con --file.
+#
+# NUEVO en --file:
+#   nargs="+"              "uno o más valores". Ahora puedes escribir
+#                            --file a.json.gz b.json.gz c.json.gz
+#                          y args.file pasa a ser una LISTA de tres Path
+#                          (type=Path se aplica a cada uno). En una
+#                          shell como Git Bash, data/live/raw/*.json.gz
+#                          se expande en todos los nombres de archivo que
+#                          coinciden antes incluso de que Python los vea.
+#   default=[DEFAULT_FILE] el valor por defecto también tiene que ser
+#                          ahora una lista (de un archivo), para que
+#                          extract() reciba siempre una lista, se haya
+#                          pasado --file o no.
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--file", type=Path, nargs="+", default=[DEFAULT_FILE],
+                         help=f"One or more .json or .json.gz files (default: {DEFAULT_FILE})")
+    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR,
+                         help=f"Folder to write the CSV files to (default: {DEFAULT_OUT_DIR})")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    # extract() devuelve una tupla de cuatro valores; esta línea la
+    # DESEMPAQUETA en cuatro variables a la vez (la misma idea que
+    # `for key, value in ...`).
+    # (args.file es ahora una lista de Path — ver parse_args() arriba.)
+    actors, repos, pairs, skipped_bot_events = extract(args.file)
+
+    # len(args.file) = cuántos archivos se han leído, p. ej.
+    #     Read 1 file(s). Skipped 1970 bot events. Writing to ...\data\csv:
+    # La creación de la carpeta y la escritura de los CSV que antes
+    # venían aquí viven ahora en write_all() (ver arriba).
+    print(f"Read {len(args.file)} file(s). Skipped {skipped_bot_events} bot events. Writing to {args.out_dir}:")
+    write_all(args.out_dir, actors, repos, pairs)
 
 
 # main() y la protección `if __name__ == "__main__":`: el mismo propósito

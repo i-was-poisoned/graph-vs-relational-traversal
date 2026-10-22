@@ -29,11 +29,21 @@
 # Está escrito en texto plano (no como un comentario que empieza con #)
 # precisamente para que pueda ser extraído y mostrado por otros programas,
 # no solo leído por un humano mirando el código fuente.
+#
+# QUÉ HAY DE NUEVO en esta versión: una función aparte, fetch_gz(), que
+# SOLO descarga el archivo comprimido .json.gz (con reintentos, un tiempo
+# máximo de espera (timeout) y un truco de seguridad: "escribir en .part
+# y luego renombrar"). El pipeline en vivo de 24 horas (pipeline.py) usa
+# fetch_gz() directamente, porque no necesita los enormes archivos .json
+# descomprimidos en disco. download() ahora simplemente llama a
+# fetch_gz() y después descomprime, exactamente igual que antes.
 ########################################################################
-"""Download and decompress a single GH Archive hourly dataset file.
+"""Download GH Archive hourly dataset files.
 
-Defaults to this project's fixed dataset hour (see README.md), but any
-date/hour can be requested for exploration.
+Defaults to this project's fixed benchmark hour (see README.md): downloads it
+and decompresses it to plain JSON Lines. Any date/hour can be requested for
+exploration. The live pipeline (pipeline.py) uses fetch_gz() to download
+hours without decompressing them.
 
 Usage:
     python scripts/download_gharchive.py
@@ -47,9 +57,9 @@ Usage:
 # La biblioteca estándar de Python viene con una enorme colección de
 # módulos ya hechos (archivos llenos de código previamente escrito) que
 # puedes traer a tu propio script con la palabra clave `import`, en lugar
-# de escribir esa funcionalidad tú mismo desde cero. Las cuatro
-# importaciones de abajo son todas de "biblioteca estándar" — es decir,
-# vienen incluidas con el propio Python. No hace falta instalar nada por
+# de escribir esa funcionalidad tú mismo desde cero. Todas las
+# importaciones de abajo son de "biblioteca estándar" — es decir, vienen
+# incluidas con el propio Python. No hace falta instalar nada por
 # separado (p. ej. no se necesita `pip install`) para ejecutar este
 # script.
 #
@@ -75,6 +85,20 @@ import gzip
 # archivo de alto nivel. Usamos una función de él: copyfileobj, que copia
 # datos de un archivo ya abierto a otro en fragmentos pequeños.
 import shutil
+
+# time: funciones relacionadas con el tiempo. Usamos solo una:
+# time.sleep(segundos), que pausa el script durante esos segundos.
+# fetch_gz() la usa para esperar un poco antes de reintentar una
+# descarga que ha fallado.
+import time
+
+# urllib.error: los tipos de excepción (error) que lanza urllib cuando
+# una petición sale mal — p. ej. HTTPError ("el servidor respondió, pero
+# con un código de error como 404 o 503") y URLError ("no se pudo llegar
+# al servidor en absoluto"). Lo importamos para que fetch_gz() pueda
+# capturar estos errores POR SU NOMBRE y reaccionar de forma distinta a
+# cada tipo.
+import urllib.error
 
 # urllib.request: la herramienta integrada de la biblioteca estándar para
 # hacer peticiones HTTP(S) — en nuestro caso, simplemente obtener un
@@ -167,15 +191,22 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 #      (p. ej. un futuro script que descargue varias horas en un bucle).
 #   3. Le da un nombre al bloque de lógica, lo que documenta la
 #      intención.
+#
+# Este archivo tiene ahora DOS funciones así, repartidas por tarea:
+#   fetch_gz()   solo DESCARGA el archivo comprimido .json.gz.
+#   download()   llama a fetch_gz() y después DESCOMPRIME el resultado.
+# El pipeline en vivo (pipeline.py) importa y llama a fetch_gz() por su
+# cuenta — el punto 2 de arriba, en la vida real.
 ########################################################################
 
 # ---------------------------------------------------------------------
 # Leyendo la firma de la función:
 #
-#   def download(date: str, hour: int, data_dir: Path = DATA_DIR) -> Path:
+#   def fetch_gz(date: str, hour: int, data_dir: Path = DATA_DIR,
+#                retries: int = 3) -> Path:
 #
 #   `def`            palabra clave que inicia la definición de una función.
-#   `download`       el nombre de la función — cómo la llamarás más adelante.
+#   `fetch_gz`       el nombre de la función — cómo la llamarás más adelante.
 #   `date: str`      un parámetro llamado `date`. El `: str` que le sigue
 #                    es una "anotación de tipo" (type hint) — una nota
 #                    (¡no impuesta por Python en tiempo de ejecución!) que
@@ -192,10 +223,33 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 #                    forma automática en DATA_DIR. Esto es lo que permite
 #                    que pruebas o código futuro sobreescriban dónde se
 #                    guardan los archivos sin cambiar la función en sí.
+#   `retries: int = 3`
+#                    cuántas veces INTENTAR la descarga antes de rendirse.
+#                    También tiene un valor por defecto, así que normalmente
+#                    quien llama escribe simplemente
+#                    fetch_gz("2026-08-27", 15).
 #   `-> Path`        una anotación de tipo de retorno: se espera que esta
-#                    función devuelva un objeto Path cuando termine.
+#                    función devuelva un objeto Path cuando termine (aquí:
+#                    la ruta del archivo .json.gz descargado).
 # ---------------------------------------------------------------------
-def download(date: str, hour: int, data_dir: Path = DATA_DIR) -> Path:
+def fetch_gz(date: str, hour: int, data_dir: Path = DATA_DIR, retries: int = 3) -> Path:
+    # ---------------------------------------------------------------
+    # UN DOCSTRING DE FUNCIÓN
+    #
+    # La misma idea que el docstring del módulo al principio del
+    # archivo, pero para una función: una cadena de texto que es lo
+    # primero dentro del `def` se convierte en el __doc__ de esa
+    # función. En una shell de Python, `help(fetch_gz)` la imprimiría.
+    # Resume las dos medidas de seguridad explicadas en detalle más
+    # abajo (archivo .part + reintentos).
+    # ---------------------------------------------------------------
+    """Download one hour's .json.gz file into data_dir and return its path.
+
+    The file is written to a temporary ".part" name and only renamed once the
+    download has finished, so an interrupted download never leaves a broken file
+    that looks complete. Network errors are retried; a missing hour (HTTP 404,
+    e.g. not published yet) is not.
+    """
     # ---------------------------------------------------------------
     # Asegurarse de que la carpeta de destino existe antes de intentar
     # guardar nada en ella.
@@ -219,6 +273,10 @@ def download(date: str, hour: int, data_dir: Path = DATA_DIR) -> Path:
     # Esta línea construye un nombre de archivo como
     # "2026-08-27-15.json.gz" sustituyendo los valores reales de `date`
     # y `hour` en la plantilla.
+    #
+    # Ojo: GH Archive escribe la hora SIN cero a la izquierda: la hora 5
+    # da "2026-08-27-5.json.gz", no "2026-08-27-05.json.gz". Como `hour`
+    # es un int, {hour} se imprime como "5" — justo lo que necesitamos.
     # ---------------------------------------------------------------
     filename = f"{date}-{hour}.json.gz"
 
@@ -233,54 +291,268 @@ def download(date: str, hour: int, data_dir: Path = DATA_DIR) -> Path:
     # guardará el archivo descargado (todavía comprimido).
     gz_path = data_dir / filename
 
-    # print() escribe texto en la terminal para que un humano que
-    # ejecute el script pueda ver qué está pasando, ya que la propia
-    # descarga (línea siguiente) puede tardar unos segundos sin ninguna
-    # retroalimentación visible en caso contrario.
-    print(f"Downloading {url} ...")
+    # ---------------------------------------------------------------
+    # EL TRUCO DEL ARCHIVO ".part"
+    #
+    # part_path es un nombre TEMPORAL junto al real, p. ej.
+    #   C:\dev\Research\data\2026-08-27-15.json.gz.part
+    # (filename + ".part" es simplemente pegar cadenas de texto: los
+    # paréntesis extra aseguran que las cadenas se unan PRIMERO, y solo
+    # después el resultado se une a data_dir con `/`.)
+    #
+    # ¿Por qué? Imagina que escribiéramos directamente en
+    # 2026-08-27-15.json.gz y el Wi-Fi se cayera a mitad. Nos quedaría
+    # un archivo escrito a medias que tiene el nombre final CORRECTO. El
+    # código posterior (o tú) vería "2026-08-27-15.json.gz existe" y
+    # supondría que está completo — y luego fallaría o, peor aún,
+    # cargaría en silencio media hora de datos.
+    #
+    # En su lugar descargamos en el archivo .part, y solo cuando la
+    # descarga ha terminado DEL TODO lo renombramos al nombre real (ver
+    # part_path.replace(...) más abajo). Así que: si existe un archivo
+    # con el nombre real, está garantizado que está completo. Los
+    # navegadores hacen lo mismo (".crdownload" en Chrome, ".part" en
+    # Firefox).
+    # ---------------------------------------------------------------
+    part_path = data_dir / (filename + ".part")
 
     # ---------------------------------------------------------------
-    # ¿Por qué no el más simple urllib.request.urlretrieve(url, gz_path)?
+    # EL BUCLE DE REINTENTOS
     #
-    # Ese era el enfoque original, y parece correcto — pero falla contra
-    # el servidor de GH Archive con "HTTP Error 403: Forbidden". Toda
-    # petición HTTP lleva un encabezado llamado User-Agent, que identifica
-    # qué tipo de cliente está haciendo la petición (un navegador, un
-    # script, etc.). urlretrieve envía un User-Agent por defecto que
-    # literalmente dice "Python-urllib/3.14" — y el servidor de GH
-    # Archive rechaza peticiones que no parezcan venir de un navegador
-    # real, como medida básica anti-bots. 403 significa específicamente
-    # "entendí tu petición y me niego a cumplirla" (a diferencia de 404,
-    # que significaría "ese archivo no existe").
+    # Las redes son poco fiables: una descarga puede fallar una vez y
+    # funcionar un minuto después. Así que en lugar de intentarlo solo
+    # una vez, lo intentamos hasta `retries` veces (3 por defecto).
     #
-    # La solución: construir la petición manualmente para poder fijar
-    # nuestro propio encabezado User-Agent, haciéndonos pasar por un
-    # navegador.
+    #   range(1, retries + 1)
+    #     range() se detiene ANTES de su valor final, así que
+    #     range(1, 4) da 1, 2, 3. Empezar en 1 (no en 0) hace que
+    #     `attempt` se lea de forma natural en el mensaje: "attempt 1/3",
+    #     "attempt 2/3", "attempt 3/3".
     #
-    #   urllib.request.Request(url, headers={...})
-    #     Crea un OBJETO Request — describiendo qué obtener y con qué
-    #     encabezados — sin enviar nada todavía. Esta es la versión
-    #     "manual" de lo que urlretrieve hacía automáticamente (y de
-    #     forma poco flexible) por debajo.
-    #
-    #   urllib.request.urlopen(request)
-    #     Realmente envía la petición por la red y devuelve un objeto de
-    #     respuesta, que se comporta como un archivo legible: puedes ir
-    #     extrayendo bytes de él igual que al leer de un archivo abierto.
-    #     Se usa aquí dentro del MISMO `with` que el archivo de salida,
-    #     así que tanto la respuesta de red como el archivo de destino se
-    #     cierran correctamente después.
-    #
-    #   shutil.copyfileobj(response, f_out)
-    #     La misma idea de copia en flujo (streaming) explicada más
-    #     adelante en este archivo para el paso de descompresión: leer de
-    #     `response` y escribir en `f_out` en fragmentos pequeños, en
-    #     lugar de traer toda la descarga a memoria primero.
+    # Cómo termina el bucle — solo hay tres salidas:
+    #   1. ÉXITO: el `return gz_path` dentro del `try` sale de toda la
+    #      función inmediatamente, bucle incluido.
+    #   2. RENDIRSE: en el último intento, `raise` vuelve a lanzar el
+    #      error, lo que también sale de la función (quien llama ve el
+    #      error).
+    #   3. 404: lanza FileNotFoundError de inmediato (sin reintentar).
+    # Si no ocurre ninguna de esas, el bucle da otra vuelta tras una
+    # pausa.
     # ---------------------------------------------------------------
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(request) as response, open(gz_path, "wb") as f_out:
-        shutil.copyfileobj(response, f_out)
-    print(f"Saved to {gz_path}")
+    for attempt in range(1, retries + 1):
+        # print() escribe texto en la terminal para que un humano que
+        # ejecute el script pueda ver qué está pasando, ya que la propia
+        # descarga puede tardar unos segundos sin ninguna
+        # retroalimentación visible en caso contrario. Ahora también
+        # muestra qué intento es, p. ej.
+        #   Downloading https://data.gharchive.org/2026-08-27-15.json.gz (attempt 1/3) ...
+        print(f"Downloading {url} (attempt {attempt}/{retries}) ...")
+
+        # -----------------------------------------------------------
+        # try / except: "intenta este bloque; si dentro ocurre un tipo
+        # concreto de error, no te caigas — salta al bloque `except`
+        # correspondiente." Cada `except` nombra los tipos de error que
+        # gestiona; cualquier OTRO error sigue haciendo fallar el
+        # programa como siempre (que es lo que queremos para bugs
+        # realmente inesperados).
+        # -----------------------------------------------------------
+        try:
+            # -------------------------------------------------------
+            # ¿Por qué no el más simple urllib.request.urlretrieve(url, gz_path)?
+            #
+            # Ese era el enfoque original, y parece correcto — pero falla
+            # contra el servidor de GH Archive con "HTTP Error 403:
+            # Forbidden". Toda petición HTTP lleva un encabezado llamado
+            # User-Agent, que identifica qué tipo de cliente está
+            # haciendo la petición (un navegador, un script, etc.).
+            # urlretrieve envía un User-Agent por defecto que
+            # literalmente dice "Python-urllib/3.14" — y el servidor de
+            # GH Archive rechaza peticiones que no parezcan venir de un
+            # navegador real, como medida básica anti-bots. 403 significa
+            # específicamente "entendí tu petición y me niego a
+            # cumplirla" (a diferencia de 404, que significaría "ese
+            # archivo no existe").
+            #
+            # La solución: construir la petición manualmente para poder
+            # fijar nuestro propio encabezado User-Agent, haciéndonos
+            # pasar por un navegador.
+            #
+            #   urllib.request.Request(url, headers={...})
+            #     Crea un OBJETO Request — describiendo qué obtener y con
+            #     qué encabezados — sin enviar nada todavía. Esta es la
+            #     versión "manual" de lo que urlretrieve hacía
+            #     automáticamente (y de forma poco flexible) por debajo.
+            #
+            #   urllib.request.urlopen(request, timeout=120)
+            #     Realmente envía la petición por la red y devuelve un
+            #     objeto de respuesta, que se comporta como un archivo
+            #     legible: puedes ir extrayendo bytes de él igual que al
+            #     leer de un archivo abierto. Se usa aquí dentro del
+            #     MISMO `with` que el archivo de salida, así que tanto la
+            #     respuesta de red como el archivo de destino se cierran
+            #     correctamente después.
+            #     NUEVO: `timeout=120` significa "si el servidor se queda
+            #     callado durante 120 segundos, abandona este intento con
+            #     un error" (TimeoutError — se captura más abajo y se
+            #     reintenta). Sin un timeout, una conexión atascada
+            #     podría dejar el script colgado para siempre, algo malo
+            #     para un pipeline que funciona sin supervisión.
+            #
+            #   open(part_path, "wb")
+            #     NUEVO: escribimos en el archivo temporal .part, NO en
+            #     el gz_path final (ver "EL TRUCO DEL ARCHIVO .part"
+            #     arriba).
+            #
+            #   shutil.copyfileobj(response, f_out)
+            #     La misma idea de copia en flujo (streaming) explicada
+            #     más adelante en este archivo para el paso de
+            #     descompresión: leer de `response` y escribir en `f_out`
+            #     en fragmentos pequeños, en lugar de traer toda la
+            #     descarga a memoria primero.
+            # -------------------------------------------------------
+            request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(request, timeout=120) as response, open(part_path, "wb") as f_out:
+                shutil.copyfileobj(response, f_out)
+
+            # -------------------------------------------------------
+            # Solo llegamos a esta línea si la descarga terminó sin
+            # ningún error. AHORA renombramos el archivo .part a su
+            # nombre real.
+            #
+            #   part_path.replace(gz_path)
+            #     Renombra (mueve) el archivo de part_path a gz_path. Si
+            #     ya existe un archivo llamado gz_path, se sobreescribe.
+            #     (Path también tiene .rename(), pero en Windows
+            #     .rename() FALLA si el destino ya existe; .replace()
+            #     funciona igual en todos los sistemas operativos.)
+            #
+            # Un renombrado en el mismo disco es casi instantáneo y o
+            # bien ocurre del todo o no ocurre en absoluto, así que nunca
+            # hay un momento en el que gz_path exista pero esté escrito
+            # solo a medias.
+            # -------------------------------------------------------
+            part_path.replace(gz_path)
+            print(f"Saved to {gz_path}")
+
+            # Éxito: devolvemos la ruta y salimos de la función (y por
+            # tanto del bucle de reintentos) de inmediato.
+            return gz_path
+
+        # -----------------------------------------------------------
+        # CASO DE ERROR 1: el servidor RESPONDIÓ, pero con un estado de
+        # error.
+        #
+        #   except urllib.error.HTTPError as error:
+        #     Se ejecuta si algo dentro del `try` lanzó un HTTPError. La
+        #     parte `as error` guarda el objeto de error en una variable
+        #     para que podamos inspeccionarlo — p. ej. error.code es el
+        #     número de estado HTTP (404, 403, 503, ...).
+        #
+        #   part_path.unlink(missing_ok=True)
+        #     "unlink" es el nombre tradicional (de Unix) para "borrar un
+        #     archivo". Tiramos cualquier archivo .part escrito a medias
+        #     para que no se quede en data/. missing_ok=True significa
+        #     "no te quejes si el archivo no está" — p. ej. si el error
+        #     ocurrió antes de que open() llegara a crearlo.
+        #
+        #   if error.code == 404:
+        #     404 = "Not Found" (no encontrado). En GH Archive esto suele
+        #     significar que la hora AÚN NO SE HA PUBLICADO (los archivos
+        #     aparecen un rato después de que termine la hora) — o que la
+        #     fecha simplemente está mal. Reintentar 10 o 20 segundos
+        #     después no servirá de nada, así que paramos de inmediato y
+        #     lanzamos FileNotFoundError, un tipo de error más claro que
+        #     quien llama (p. ej. pipeline.py) puede capturar con el
+        #     significado de "esta hora no está disponible, inténtalo más
+        #     tarde".
+        #
+        #   raise ... from error
+        #     Lanza nuestro error NUEVO pero lo enlaza con el ORIGINAL.
+        #     Si el programa falla, Python imprime ambos, unidos por "The
+        #     above exception was the direct cause of the following
+        #     exception" — así no se pierde información de depuración.
+        #
+        #   if attempt == retries: raise
+        #     Cualquier otro error HTTP (p. ej. 503 "Service
+        #     Unavailable") podría ser temporal, así que lo reintentamos...
+        #     salvo que este FUERA el último intento. Un `raise` a secas
+        #     (sin nombrar ningún error detrás) significa "vuelve a
+        #     lanzar el error que estoy gestionando ahora, sin cambios" —
+        #     es decir, rendirse y dejar que quien llama vea el error
+        #     real.
+        # -----------------------------------------------------------
+        except urllib.error.HTTPError as error:
+            part_path.unlink(missing_ok=True)
+            if error.code == 404:
+                raise FileNotFoundError(f"{url} does not exist (not published yet?)") from error
+            if attempt == retries:
+                raise
+
+        # -----------------------------------------------------------
+        # CASO DE ERROR 2: no pudimos hablar bien con el servidor en
+        # absoluto.
+        #
+        # Poner varios tipos de error en una tupla, (A, B, C), significa
+        # "captura cualquiera de estos":
+        #   urllib.error.URLError  p. ej. sin internet, falló la búsqueda DNS
+        #   TimeoutError           se agotó el timeout de 120 segundos de arriba
+        #   ConnectionError        p. ej. la conexión se cortó a mitad
+        #
+        # (El orden importa: HTTPError es en realidad un TIPO especial de
+        # URLError, así que el `except` de HTTPError tiene que ir
+        # primero — Python usa el primer `except` que encaja.)
+        #
+        # Mismo tratamiento que arriba: borrar el archivo parcial, y solo
+        # rendirse (volver a lanzar) si este era el último intento.
+        # -----------------------------------------------------------
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            part_path.unlink(missing_ok=True)
+            if attempt == retries:
+                raise
+
+        # -----------------------------------------------------------
+        # ESPERA PROGRESIVA (BACKOFF): si llegamos aquí, un intento ha
+        # fallado pero vamos a reintentar. Primero esperamos —
+        # reintentar al instante probablemente toparía con el mismo
+        # problema. La espera crece cada vez ("backoff"):
+        #   tras fallar el intento 1: dormir 10 * 1 = 10 segundos
+        #   tras fallar el intento 2: dormir 10 * 2 = 20 segundos
+        # (Tras el intento 3 nunca llegamos aquí: el `raise` de arriba ya
+        # ha salido de la función.)
+        # -----------------------------------------------------------
+        time.sleep(10 * attempt)  # esperar un poco más tras cada intento fallido
+
+    # ---------------------------------------------------------------
+    # raise RuntimeError("unreachable")
+    #
+    # Como se explica antes del bucle, todo camino a través de él
+    # termina en `return` o en `raise`, así que esta línea nunca puede
+    # ejecutarse de verdad. Entonces, ¿por qué escribirla?
+    #   - Los comprobadores de tipos / editores ven "la función promete
+    #     `-> Path`, pero llegar al final devolvería None" y avisarían.
+    #     Esta línea deja explícito que nunca se llega al final.
+    #   - Si alguien edita más tarde el bucle y rompe esa garantía (p.
+    #     ej. pone retries=0, ¡y el cuerpo del bucle nunca se ejecuta!),
+    #     el programa falla de forma ruidosa aquí en lugar de devolver
+    #     None en silencio.
+    # ---------------------------------------------------------------
+    raise RuntimeError("unreachable")
+
+
+########################################################################
+# download(): descargar, Y DESPUÉS descomprimir
+#
+# La misma firma que fetch_gz(), solo que sin `retries` (se usa el valor
+# por defecto de 3 de fetch_gz()). Todo el trabajo de descarga de arriba
+# lo hace ahora una sola llamada a fetch_gz(); lo que queda aquí es el
+# paso de descompresión, que no ha cambiado respecto a la versión
+# anterior.
+########################################################################
+def download(date: str, hour: int, data_dir: Path = DATA_DIR) -> Path:
+    # Descargar el archivo comprimido (con reintentos y el truco del
+    # .part) y obtener su ruta, p. ej.
+    # C:\dev\Research\data\2026-08-27-15.json.gz
+    gz_path = fetch_gz(date, hour, data_dir)
 
     # ---------------------------------------------------------------
     # gz_path.with_suffix(""):

@@ -14,6 +14,17 @@
 # CSV con COPY, las TRANSACCIONES y COMMIT, ANALYZE, y medir el tiempo
 # con time.perf_counter().
 #
+# QUÉ HAY DE NUEVO en esta versión: puedes elegir EN QUÉ base de datos
+# cargar (--database en la línea de comandos, o el parámetro `database`
+# de load()). Ahora se usan dos bases de datos:
+#   gharchive     la base de datos del benchmark — la de por defecto, y
+#                 CONGELADA: siempre contiene la hora fija del benchmark.
+#   gharchive24h  la base de datos del pipeline en vivo de 24 horas
+#                 (pipeline.py), que se recarga una y otra vez con las
+#                 últimas 24 horas.
+# Mantenerlas separadas significa que el pipeline en vivo nunca puede
+# sobreescribir los datos del benchmark.
+#
 # Ejecútalo a través de run.sh (necesita PGPASSWORD):
 #     ./run.sh scripts/load_postgres.py
 ########################################################################
@@ -34,6 +45,7 @@ At the end it checks that each table has exactly as many rows as its CSV file.
 Usage:
     ./run.sh scripts/load_postgres.py
     ./run.sh scripts/load_postgres.py --csv-dir data/csv
+    ./run.sh scripts/load_postgres.py --csv-dir data/live/csv --database gharchive24h
 """
 
 # ---------------------------------------------------------------------
@@ -50,9 +62,16 @@ import psycopg
 
 # Las mismas constantes que extract_csv.py (dónde están los CSV) y
 # check_connections.py (cómo llegar a PostgreSQL).
+#
+# NUEVO: el nombre de la base de datos ("dbname") ya no está dentro de
+# POSTGRES_SETTINGS. Ahora tiene su propia constante, DEFAULT_DATABASE,
+# y se pasa por separado al conectar (ver load() más abajo), para poder
+# cambiarlo por otro — p. ej. "gharchive24h" para el pipeline en vivo —
+# mientras el host y el usuario siguen siendo los mismos.
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CSV_DIR = PROJECT_DIR / "data" / "csv"
-POSTGRES_SETTINGS = {"host": "localhost", "dbname": "gharchive", "user": "postgres"}
+DEFAULT_DATABASE = "gharchive"
+POSTGRES_SETTINGS = {"host": "localhost", "user": "postgres"}
 
 # ---------------------------------------------------------------------
 # SCHEMA — el SQL que construye las tres tablas
@@ -221,10 +240,25 @@ def seconds_since(start: float) -> str:
 
 
 # ---------------------------------------------------------------------
-# def load(csv_dir) -> bool:
+# def load(csv_dir, database=DEFAULT_DATABASE) -> bool:
 #
 # Hace todo el trabajo y devuelve True si cada tabla ha acabado con
 # exactamente tantas filas como su archivo CSV.
+#
+# NUEVO: el parámetro `database` indica en qué base de datos cargar. Por
+# defecto vale DEFAULT_DATABASE ("gharchive"), así que load(csv_dir)
+# sigue cargando la base de datos del benchmark exactamente como antes;
+# pipeline.py, en cambio, llama a load(csv_dir, "gharchive24h").
+#
+# psycopg.connect(**POSTGRES_SETTINGS, dbname=database)
+#   `**POSTGRES_SETTINGS` DESEMPAQUETA el diccionario en argumentos con
+#   nombre: cada clave se convierte en el nombre de un argumento y cada
+#   valor en su valor. Así que, para el pipeline en vivo, esta línea
+#   equivale a escribir
+#       psycopg.connect(host="localhost", user="postgres",
+#                       dbname="gharchive24h")
+#   El diccionario aporta los ajustes que nunca cambian; dbname=database
+#   añade el que sí cambia.
 #
 # conn.cursor() — un CURSOR es el objeto que se usa para enviar SQL por
 # la conexión y leer las respuestas (check_connections.py usaba el atajo
@@ -237,9 +271,9 @@ def seconds_since(start: float) -> str:
 # desharía todo y las tablas quedarían como antes. Por eso nunca puede
 # quedar una carga a medio hacer.
 # ---------------------------------------------------------------------
-def load(csv_dir: Path) -> bool:
+def load(csv_dir: Path, database: str = DEFAULT_DATABASE) -> bool:
     all_match = True
-    with psycopg.connect(**POSTGRES_SETTINGS) as conn:
+    with psycopg.connect(**POSTGRES_SETTINGS, dbname=database) as conn:
         with conn.cursor() as cur:
             # El total empieza aquí, una vez conectados: conectarse no
             # forma parte de la carga.
@@ -307,10 +341,18 @@ def load(csv_dir: Path) -> bool:
 
 # parse_args(): el mismo patrón que extract_csv.py; --csv-dir permite
 # cargar desde otra carpeta.
+#
+# NUEVO: --database permite cargar en otra base de datos, p. ej.
+#     --csv-dir data/live/csv --database gharchive24h
+# No se indica ningún type=, así que el valor se queda como una cadena de
+# texto simple (un nombre). Sin el indicador, vale DEFAULT_DATABASE
+# ("gharchive"), la del benchmark.
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv-dir", type=Path, default=DEFAULT_CSV_DIR,
                          help=f"Folder with the CSV files from extract_csv.py (default: {DEFAULT_CSV_DIR})")
+    parser.add_argument("--database", default=DEFAULT_DATABASE,
+                         help=f"PostgreSQL database to load into (default: {DEFAULT_DATABASE})")
     return parser.parse_args()
 
 
@@ -319,7 +361,7 @@ def parse_args() -> argparse.Namespace:
 # check_connections.py).
 def main() -> None:
     args = parse_args()
-    if not load(args.csv_dir):
+    if not load(args.csv_dir, args.database):
         sys.exit("Some row counts don't match their CSV file.")
     print("\nPostgreSQL load complete.")
 

@@ -28,11 +28,20 @@
 # It is written in plain English (not a comment starting with #) precisely
 # so that it can be extracted and displayed by other programs, not just
 # read by a human looking at the source.
+#
+# WHAT'S NEW in this version: a separate function, fetch_gz(), that ONLY
+# downloads the compressed .json.gz file (with retries, a timeout, and a
+# "write to .part, then rename" safety trick). The live 24-hour pipeline
+# (pipeline.py) uses fetch_gz() directly, because it doesn't need the
+# huge decompressed .json files on disk. download() now simply calls
+# fetch_gz() and then decompresses, exactly as before.
 ########################################################################
-"""Download and decompress a single GH Archive hourly dataset file.
+"""Download GH Archive hourly dataset files.
 
-Defaults to this project's fixed dataset hour (see README.md), but any
-date/hour can be requested for exploration.
+Defaults to this project's fixed benchmark hour (see README.md): downloads it
+and decompresses it to plain JSON Lines. Any date/hour can be requested for
+exploration. The live pipeline (pipeline.py) uses fetch_gz() to download
+hours without decompressing them.
 
 Usage:
     python scripts/download_gharchive.py
@@ -46,7 +55,7 @@ Usage:
 # Python's standard library ships with a huge collection of ready-made
 # modules (files full of pre-written code) that you can pull into your own
 # script with the `import` keyword, instead of writing that functionality
-# yourself from scratch. All four imports below are "standard library" —
+# yourself from scratch. All the imports below are "standard library" —
 # meaning they come bundled with Python itself. Nothing needs to be
 # separately installed (e.g. no `pip install` required) to run this script.
 #
@@ -70,6 +79,18 @@ import gzip
 # We use one function from it: copyfileobj, which copies data from one
 # already-open file to another in small chunks.
 import shutil
+
+# time: functions related to time. We use just one: time.sleep(seconds),
+# which pauses the script for that many seconds. fetch_gz() uses it to
+# wait a little before retrying a download that failed.
+import time
+
+# urllib.error: the exception (error) types that urllib raises when a
+# request goes wrong — e.g. HTTPError ("the server answered, but with an
+# error code like 404 or 503") and URLError ("couldn't reach the server
+# at all"). We import it so fetch_gz() can catch these errors BY NAME and
+# react differently to each kind.
+import urllib.error
 
 # urllib.request: the standard library's built-in tool for making HTTP(S)
 # requests — in our case, just fetching a file from a URL, like what a web
@@ -157,15 +178,22 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 #   2. It could later be imported and reused by other scripts (e.g. a
 #      future script that downloads several hours in a loop).
 #   3. It gives the block of logic a name, which documents intent.
+#
+# This file now has TWO such functions, split by job:
+#   fetch_gz()   only DOWNLOADS the compressed .json.gz file.
+#   download()   calls fetch_gz(), then DECOMPRESSES the result.
+# The live pipeline (pipeline.py) imports and calls fetch_gz() on its
+# own — point 2 above, in real life.
 ########################################################################
 
 # ---------------------------------------------------------------------
 # Reading the function signature:
 #
-#   def download(date: str, hour: int, data_dir: Path = DATA_DIR) -> Path:
+#   def fetch_gz(date: str, hour: int, data_dir: Path = DATA_DIR,
+#                retries: int = 3) -> Path:
 #
 #   `def`            keyword that starts a function definition.
-#   `download`       the function's name — how you'll call it later.
+#   `fetch_gz`       the function's name — how you'll call it later.
 #   `date: str`      a parameter named `date`. The `: str` after it is a
 #                    "type hint" — a note (not enforced by Python at
 #                    runtime!) telling readers and editor tooling "this
@@ -180,10 +208,31 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 #                    back to DATA_DIR automatically. This is what lets
 #                    tests or future code override where files get saved
 #                    without changing the function itself.
+#   `retries: int = 3`
+#                    how many times to TRY the download before giving
+#                    up. Also has a default, so callers normally just
+#                    write fetch_gz("2026-08-27", 15).
 #   `-> Path`        a return type hint: this function is expected to
-#                    hand back a Path object when it finishes.
+#                    hand back a Path object when it finishes (here: the
+#                    path of the downloaded .json.gz file).
 # ---------------------------------------------------------------------
-def download(date: str, hour: int, data_dir: Path = DATA_DIR) -> Path:
+def fetch_gz(date: str, hour: int, data_dir: Path = DATA_DIR, retries: int = 3) -> Path:
+    # ---------------------------------------------------------------
+    # A FUNCTION DOCSTRING
+    #
+    # Same idea as the module docstring at the top of the file, but for
+    # one function: a string that is the very first thing inside the
+    # `def` becomes that function's __doc__. In a Python shell,
+    # `help(fetch_gz)` would print it. It summarises the two safety
+    # features explained in detail below (.part file + retries).
+    # ---------------------------------------------------------------
+    """Download one hour's .json.gz file into data_dir and return its path.
+
+    The file is written to a temporary ".part" name and only renamed once the
+    download has finished, so an interrupted download never leaves a broken file
+    that looks complete. Network errors are retried; a missing hour (HTTP 404,
+    e.g. not published yet) is not.
+    """
     # ---------------------------------------------------------------
     # Ensure the destination folder exists before we try to save
     # anything into it.
@@ -205,6 +254,10 @@ def download(date: str, hour: int, data_dir: Path = DATA_DIR) -> Path:
     # variable values directly inside `{curly braces}`. This line
     # builds a filename like "2026-08-27-15.json.gz" by substituting
     # the actual `date` and `hour` values into the template.
+    #
+    # Note GH Archive writes the hour WITHOUT a leading zero: hour 5
+    # gives "2026-08-27-5.json.gz", not "2026-08-27-05.json.gz". Since
+    # `hour` is an int, {hour} prints as "5" — exactly what we need.
     # ---------------------------------------------------------------
     filename = f"{date}-{hour}.json.gz"
 
@@ -218,53 +271,245 @@ def download(date: str, hour: int, data_dir: Path = DATA_DIR) -> Path:
     # downloaded (still-compressed) file will be saved.
     gz_path = data_dir / filename
 
-    # print() writes text to the terminal so a human running the
-    # script can see what's happening, since the download itself
-    # (next line) can take a few seconds with no visible feedback
-    # otherwise.
-    print(f"Downloading {url} ...")
+    # ---------------------------------------------------------------
+    # THE ".part" FILE TRICK
+    #
+    # part_path is a TEMPORARY name next to the real one, e.g.
+    #   C:\dev\Research\data\2026-08-27-15.json.gz.part
+    # (filename + ".part" is plain string gluing: the extra
+    # parentheses make sure the strings are joined FIRST, and only then
+    # is the result joined onto data_dir with `/`.)
+    #
+    # Why? Imagine we wrote straight into 2026-08-27-15.json.gz and the
+    # Wi-Fi dropped halfway through. We'd be left with a half-written
+    # file that has the CORRECT final name. Later code (or you) would
+    # see "2026-08-27-15.json.gz exists" and assume it's complete —
+    # then crash, or worse, silently load half an hour of data.
+    #
+    # Instead we download into the .part file, and only when the
+    # download has FULLY finished do we rename it to the real name (see
+    # part_path.replace(...) below). So: if a file with the real name
+    # exists, it is guaranteed complete. Browsers do the same thing
+    # (Chrome's ".crdownload", Firefox's ".part").
+    # ---------------------------------------------------------------
+    part_path = data_dir / (filename + ".part")
 
     # ---------------------------------------------------------------
-    # Why not the simpler urllib.request.urlretrieve(url, gz_path)?
+    # THE RETRY LOOP
     #
-    # That was the original approach, and it looks correct — but it
-    # fails against GH Archive's server with "HTTP Error 403: Forbidden".
-    # Every HTTP request carries a header called User-Agent, which
-    # identifies what kind of client is making the request (a browser,
-    # a script, etc.). urlretrieve sends a default User-Agent that
-    # literally says "Python-urllib/3.14" — and GH Archive's server
-    # rejects requests that don't look like they're coming from a real
-    # browser, as a basic anti-bot measure. 403 specifically means "I
-    # understood your request and I'm refusing it" (as opposed to 404,
-    # which would mean "that file doesn't exist").
+    # Networks are flaky: a download can fail once and succeed a minute
+    # later. So instead of trying just once, we try up to `retries`
+    # times (3 by default).
     #
-    # The fix: build the request manually so we can set our own
-    # User-Agent header, pretending to be a browser.
+    #   range(1, retries + 1)
+    #     range() stops BEFORE its end value, so range(1, 4) gives
+    #     1, 2, 3. Starting at 1 (not 0) makes `attempt` read naturally
+    #     in the message: "attempt 1/3", "attempt 2/3", "attempt 3/3".
     #
-    #   urllib.request.Request(url, headers={...})
-    #     Creates a Request OBJECT — describing what to fetch and with
-    #     what headers — without sending anything yet. This is the
-    #     "manual" version of what urlretrieve did automatically
-    #     (and inflexibly) under the hood.
-    #
-    #   urllib.request.urlopen(request)
-    #     Actually sends the request over the network and returns a
-    #     response object, which behaves like a readable file: you can
-    #     stream bytes out of it just like reading from an open file.
-    #     It's used here inside the SAME `with` statement as the output
-    #     file, so both the network response and the destination file
-    #     are properly closed afterward.
-    #
-    #   shutil.copyfileobj(response, f_out)
-    #     Same streaming-copy idea explained later in this file for the
-    #     decompression step: read from `response` and write to
-    #     `f_out` in small chunks, rather than pulling the entire
-    #     download into memory first.
+    # How the loop ends — there are only three ways out:
+    #   1. SUCCESS: the `return gz_path` inside `try` leaves the whole
+    #      function immediately, loop and all.
+    #   2. GIVE UP: on the last attempt, `raise` re-raises the error,
+    #      which also leaves the function (the caller sees the error).
+    #   3. 404: raises FileNotFoundError straight away (no retry).
+    # If none of those happen, the loop goes round again after a pause.
     # ---------------------------------------------------------------
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(request) as response, open(gz_path, "wb") as f_out:
-        shutil.copyfileobj(response, f_out)
-    print(f"Saved to {gz_path}")
+    for attempt in range(1, retries + 1):
+        # print() writes text to the terminal so a human running the
+        # script can see what's happening, since the download itself
+        # can take a few seconds with no visible feedback otherwise.
+        # It now also shows which attempt this is, e.g.
+        #   Downloading https://data.gharchive.org/2026-08-27-15.json.gz (attempt 1/3) ...
+        print(f"Downloading {url} (attempt {attempt}/{retries}) ...")
+
+        # -----------------------------------------------------------
+        # try / except: "try this block; if a particular kind of error
+        # happens inside it, don't crash — jump to the matching
+        # `except` block instead." Each `except` names the error types
+        # it handles; any OTHER error still crashes the program as
+        # usual (which is what we want for genuinely unexpected bugs).
+        # -----------------------------------------------------------
+        try:
+            # -------------------------------------------------------
+            # Why not the simpler urllib.request.urlretrieve(url, gz_path)?
+            #
+            # That was the original approach, and it looks correct — but
+            # it fails against GH Archive's server with "HTTP Error 403:
+            # Forbidden". Every HTTP request carries a header called
+            # User-Agent, which identifies what kind of client is making
+            # the request (a browser, a script, etc.). urlretrieve sends
+            # a default User-Agent that literally says
+            # "Python-urllib/3.14" — and GH Archive's server rejects
+            # requests that don't look like they're coming from a real
+            # browser, as a basic anti-bot measure. 403 specifically
+            # means "I understood your request and I'm refusing it" (as
+            # opposed to 404, which would mean "that file doesn't
+            # exist").
+            #
+            # The fix: build the request manually so we can set our own
+            # User-Agent header, pretending to be a browser.
+            #
+            #   urllib.request.Request(url, headers={...})
+            #     Creates a Request OBJECT — describing what to fetch and
+            #     with what headers — without sending anything yet. This
+            #     is the "manual" version of what urlretrieve did
+            #     automatically (and inflexibly) under the hood.
+            #
+            #   urllib.request.urlopen(request, timeout=120)
+            #     Actually sends the request over the network and returns
+            #     a response object, which behaves like a readable file:
+            #     you can stream bytes out of it just like reading from an
+            #     open file. It's used here inside the SAME `with`
+            #     statement as the output file, so both the network
+            #     response and the destination file are properly closed
+            #     afterward.
+            #     NEW: `timeout=120` means "if the server goes silent for
+            #     120 seconds, give up on this attempt with an error"
+            #     (TimeoutError — caught below and retried). Without a
+            #     timeout, a stalled connection could hang the script
+            #     forever, which is bad for a pipeline running unattended.
+            #
+            #   open(part_path, "wb")
+            #     NEW: we write into the temporary .part file, NOT the
+            #     final gz_path (see "THE .part FILE TRICK" above).
+            #
+            #   shutil.copyfileobj(response, f_out)
+            #     Same streaming-copy idea explained later in this file
+            #     for the decompression step: read from `response` and
+            #     write to `f_out` in small chunks, rather than pulling
+            #     the entire download into memory first.
+            # -------------------------------------------------------
+            request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(request, timeout=120) as response, open(part_path, "wb") as f_out:
+                shutil.copyfileobj(response, f_out)
+
+            # -------------------------------------------------------
+            # We only reach this line if the download finished without
+            # any error. NOW we rename the .part file to its real name.
+            #
+            #   part_path.replace(gz_path)
+            #     Renames (moves) the file at part_path to gz_path. If a
+            #     file called gz_path already exists, it is overwritten.
+            #     (Path also has .rename(), but on Windows .rename()
+            #     FAILS if the target already exists; .replace() works
+            #     the same on every operating system.)
+            #
+            # A rename on the same disk is near-instant and either fully
+            # happens or doesn't happen at all, so there's never a moment
+            # where gz_path exists but is only half-written.
+            # -------------------------------------------------------
+            part_path.replace(gz_path)
+            print(f"Saved to {gz_path}")
+
+            # Success: hand back the path and leave the function (and
+            # therefore the retry loop) right away.
+            return gz_path
+
+        # -----------------------------------------------------------
+        # ERROR CASE 1: the server ANSWERED, but with an error status.
+        #
+        #   except urllib.error.HTTPError as error:
+        #     Runs if anything in the `try` raised an HTTPError. The
+        #     `as error` part stores the error object in a variable so
+        #     we can inspect it — e.g. error.code is the HTTP status
+        #     number (404, 403, 503, ...).
+        #
+        #   part_path.unlink(missing_ok=True)
+        #     "unlink" is the traditional (Unix) name for "delete a
+        #     file". We throw away any half-written .part file so it
+        #     doesn't linger in data/. missing_ok=True means "don't
+        #     complain if the file isn't there" — e.g. if the error
+        #     happened before open() ever created it.
+        #
+        #   if error.code == 404:
+        #     404 = "Not Found". For GH Archive this usually means the
+        #     hour has NOT BEEN PUBLISHED YET (files appear some time
+        #     after the hour ends) — or the date is simply wrong.
+        #     Retrying 10 or 20 seconds later won't help, so we stop
+        #     immediately and raise FileNotFoundError, a clearer error
+        #     type that the caller (e.g. pipeline.py) can catch to mean
+        #     "this hour isn't available, try again later".
+        #
+        #   raise ... from error
+        #     Raises our NEW error but links it to the ORIGINAL one. If
+        #     the program crashes, Python prints both, joined by "The
+        #     above exception was the direct cause of the following
+        #     exception" — so no debugging information is lost.
+        #
+        #   if attempt == retries: raise
+        #     Any other HTTP error (e.g. 503 "Service Unavailable") might
+        #     be temporary, so we retry it... unless this WAS the last
+        #     attempt. A bare `raise` (no error named after it) means
+        #     "re-raise the error I'm currently handling, unchanged" —
+        #     i.e. give up and let the caller see the real error.
+        # -----------------------------------------------------------
+        except urllib.error.HTTPError as error:
+            part_path.unlink(missing_ok=True)
+            if error.code == 404:
+                raise FileNotFoundError(f"{url} does not exist (not published yet?)") from error
+            if attempt == retries:
+                raise
+
+        # -----------------------------------------------------------
+        # ERROR CASE 2: we couldn't talk to the server properly at all.
+        #
+        # Putting several error types in a tuple, (A, B, C), means
+        # "catch any of these":
+        #   urllib.error.URLError  e.g. no internet, DNS lookup failed
+        #   TimeoutError           the 120-second timeout above ran out
+        #   ConnectionError        e.g. the connection was reset midway
+        #
+        # (Order matters: HTTPError is actually a special KIND of
+        # URLError, so the HTTPError `except` has to come first —
+        # Python uses the first `except` that matches.)
+        #
+        # Same treatment as above: delete the partial file, and only
+        # give up (re-raise) if this was the last attempt.
+        # -----------------------------------------------------------
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            part_path.unlink(missing_ok=True)
+            if attempt == retries:
+                raise
+
+        # -----------------------------------------------------------
+        # BACKOFF: if we get here, an attempt failed but we're going to
+        # retry. Wait first — retrying instantly would probably hit the
+        # same problem. The wait grows each time ("backoff"):
+        #   after attempt 1 fails: sleep 10 * 1 = 10 seconds
+        #   after attempt 2 fails: sleep 10 * 2 = 20 seconds
+        # (After attempt 3 we never get here: the `raise` above has
+        # already left the function.)
+        # -----------------------------------------------------------
+        time.sleep(10 * attempt)  # wait a bit longer after each failed attempt
+
+    # ---------------------------------------------------------------
+    # raise RuntimeError("unreachable")
+    #
+    # As explained above the loop, every path through it ends in either
+    # `return` or `raise`, so this line can never actually run. Why
+    # write it, then?
+    #   - Type checkers / editors see "function promises `-> Path`, but
+    #     falling off the end would return None" and would warn. This
+    #     line makes it explicit that the end is never reached.
+    #   - If someone later edits the loop and breaks that guarantee
+    #     (e.g. sets retries=0, so the loop body never runs!), the
+    #     program fails loudly here instead of quietly returning None.
+    # ---------------------------------------------------------------
+    raise RuntimeError("unreachable")
+
+
+########################################################################
+# download(): download, THEN decompress
+#
+# Same signature as fetch_gz(), just without `retries` (fetch_gz()'s
+# default of 3 is used). All the downloading work above is now done
+# by one call to fetch_gz(); what's left here is the decompression step,
+# which is unchanged from the previous version.
+########################################################################
+def download(date: str, hour: int, data_dir: Path = DATA_DIR) -> Path:
+    # Download the compressed file (with retries and the .part trick)
+    # and get back its path, e.g. C:\dev\Research\data\2026-08-27-15.json.gz
+    gz_path = fetch_gz(date, hour, data_dir)
 
     # ---------------------------------------------------------------
     # gz_path.with_suffix(""):

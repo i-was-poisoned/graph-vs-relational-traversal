@@ -13,6 +13,7 @@ result. At the end it checks that the node and edge counts match the CSV files.
 Usage:
     ./run.sh scripts/load_neo4j.py
     ./run.sh scripts/load_neo4j.py --csv-dir data/csv
+    ./run.sh scripts/load_neo4j.py --csv-dir data/live/csv --database gharchive24h
 """
 
 import argparse
@@ -28,7 +29,7 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CSV_DIR = PROJECT_DIR / "data" / "csv"
 NEO4J_URI = "neo4j://localhost:7687"
 NEO4J_USER = "neo4j"
-NEO4J_DATABASE = "gharchive"
+DEFAULT_DATABASE = "gharchive"
 BATCH_SIZE = 5000
 
 CONSTRAINTS = [
@@ -63,17 +64,17 @@ def read_csv(path: Path, int_columns: tuple[str, ...]) -> list[dict]:
     return rows
 
 
-def run_in_batches(driver, query: str, rows: list[dict]) -> None:
+def run_in_batches(driver, query: str, rows: list[dict], database: str) -> None:
     # Send the rows a few thousand at a time rather than all in one huge request.
     for start in range(0, len(rows), BATCH_SIZE):
-        driver.execute_query(query, rows=rows[start:start + BATCH_SIZE], database_=NEO4J_DATABASE)
+        driver.execute_query(query, rows=rows[start:start + BATCH_SIZE], database_=database)
 
 
 def seconds_since(start: float) -> str:
     return f"{time.perf_counter() - start:6.2f} s"
 
 
-def load(csv_dir: Path) -> bool:
+def load(csv_dir: Path, database: str = DEFAULT_DATABASE) -> bool:
     step = time.perf_counter()
     actors = read_csv(csv_dir / "actors.csv", ("id",))
     repos = read_csv(csv_dir / "repos.csv", ("id",))
@@ -87,9 +88,9 @@ def load(csv_dir: Path) -> bool:
         load_start = time.perf_counter()
 
         step = time.perf_counter()
-        driver.execute_query("MATCH (n) DETACH DELETE n", database_=NEO4J_DATABASE)
+        driver.execute_query("MATCH (n) DETACH DELETE n", database_=database)
         for constraint in CONSTRAINTS:
-            driver.execute_query(constraint, database_=NEO4J_DATABASE)
+            driver.execute_query(constraint, database_=database)
         print(f"Database emptied; unique constraints in place   {seconds_since(step)}")
 
         # Nodes first: the edges step looks each actor and repo up by id.
@@ -97,7 +98,7 @@ def load(csv_dir: Path) -> bool:
                                    ("Repo nodes", CREATE_REPOS, repos),
                                    ("INTERACTED_WITH edges", CREATE_EDGES, edges)):
             step = time.perf_counter()
-            run_in_batches(driver, query, rows)
+            run_in_batches(driver, query, rows, database)
             print(f"Created {label:<22}                  {seconds_since(step)}")
 
         print(f"Total load time                                 {seconds_since(load_start)}")
@@ -105,7 +106,7 @@ def load(csv_dir: Path) -> bool:
         print("\nLoaded (database vs. CSV file):")
         csv_counts = {"actors.csv": len(actors), "repos.csv": len(repos), "actor_repo.csv": len(edges)}
         for label, query, csv_name in COUNTS:
-            records, _, _ = driver.execute_query(query, database_=NEO4J_DATABASE)
+            records, _, _ = driver.execute_query(query, database_=database)
             in_db = records[0]["n"]
             in_csv = csv_counts[csv_name]
             status = "OK" if in_db == in_csv else "MISMATCH"
@@ -118,12 +119,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv-dir", type=Path, default=DEFAULT_CSV_DIR,
                          help=f"Folder with the CSV files from extract_csv.py (default: {DEFAULT_CSV_DIR})")
+    parser.add_argument("--database", default=DEFAULT_DATABASE,
+                         help=f"Neo4j database to load into (default: {DEFAULT_DATABASE})")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if not load(args.csv_dir):
+    if not load(args.csv_dir, args.database):
         sys.exit("Some counts don't match their CSV file.")
     print("\nNeo4j load complete.")
 

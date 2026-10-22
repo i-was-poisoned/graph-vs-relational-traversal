@@ -6,6 +6,9 @@
 # Never commit this file.
 /secrets.sh
 
+# Live pipeline logs (scripts/pipeline.py)
+/logs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

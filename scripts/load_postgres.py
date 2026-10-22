@@ -14,6 +14,7 @@ At the end it checks that each table has exactly as many rows as its CSV file.
 Usage:
     ./run.sh scripts/load_postgres.py
     ./run.sh scripts/load_postgres.py --csv-dir data/csv
+    ./run.sh scripts/load_postgres.py --csv-dir data/live/csv --database gharchive24h
 """
 
 import argparse
@@ -25,7 +26,8 @@ import psycopg
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CSV_DIR = PROJECT_DIR / "data" / "csv"
-POSTGRES_SETTINGS = {"host": "localhost", "dbname": "gharchive", "user": "postgres"}
+DEFAULT_DATABASE = "gharchive"
+POSTGRES_SETTINGS = {"host": "localhost", "user": "postgres"}
 
 # Dropped child-first (actor_repo points at actor and repo), created parent-first.
 SCHEMA = """
@@ -80,9 +82,9 @@ def seconds_since(start: float) -> str:
     return f"{time.perf_counter() - start:6.2f} s"
 
 
-def load(csv_dir: Path) -> bool:
+def load(csv_dir: Path, database: str = DEFAULT_DATABASE) -> bool:
     all_match = True
-    with psycopg.connect(**POSTGRES_SETTINGS) as conn:
+    with psycopg.connect(**POSTGRES_SETTINGS, dbname=database) as conn:
         with conn.cursor() as cur:
             load_start = time.perf_counter()
 
@@ -118,12 +120,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv-dir", type=Path, default=DEFAULT_CSV_DIR,
                          help=f"Folder with the CSV files from extract_csv.py (default: {DEFAULT_CSV_DIR})")
+    parser.add_argument("--database", default=DEFAULT_DATABASE,
+                         help=f"PostgreSQL database to load into (default: {DEFAULT_DATABASE})")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if not load(args.csv_dir):
+    if not load(args.csv_dir, args.database):
         sys.exit("Some row counts don't match their CSV file.")
     print("\nPostgreSQL load complete.")
 

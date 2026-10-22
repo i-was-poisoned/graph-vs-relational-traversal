@@ -14,6 +14,13 @@
 # parámetros), las RESTRICCIONES de unicidad, leer un CSV como
 # diccionarios con csv.DictReader, y enviar los datos por LOTES.
 #
+# QUÉ HAY DE NUEVO en esta versión: igual que en load_postgres.py, puedes
+# elegir EN QUÉ base de datos cargar (--database, o el parámetro
+# `database` de load()). La de por defecto sigue siendo "gharchive", la
+# base de datos congelada del benchmark; el pipeline en vivo de 24 horas
+# (pipeline.py) carga en "gharchive24h", así que nunca toca los datos
+# del benchmark.
+#
 # Ejecútalo a través de run.sh (necesita NEO4J_PASSWORD):
 #     ./run.sh scripts/load_neo4j.py
 ########################################################################
@@ -33,6 +40,7 @@ result. At the end it checks that the node and edge counts match the CSV files.
 Usage:
     ./run.sh scripts/load_neo4j.py
     ./run.sh scripts/load_neo4j.py --csv-dir data/csv
+    ./run.sh scripts/load_neo4j.py --csv-dir data/live/csv --database gharchive24h
 """
 
 # Todo ya explicado en los scripts anteriores (csv en extract_csv.py, time
@@ -49,11 +57,23 @@ from neo4j import GraphDatabase
 # ---------------------------------------------------------------------
 # Constantes
 #
-# NEO4J_DATABASE = "gharchive" — la decisión del proyecto: trabajar
-# siempre en la base de datos llamada gharchive, en los dos lados.
-# check_connections.py no indicaba ninguna base de datos, así que usaba
-# la predeterminada de la instancia ("neo4j"). Aquí cada consulta pasa
-# database_=NEO4J_DATABASE de forma explícita.
+# DEFAULT_DATABASE = "gharchive" — la decisión del proyecto: el
+# benchmark trabaja siempre en la base de datos llamada gharchive, en los
+# dos lados. check_connections.py no indicaba ninguna base de datos, así
+# que usaba la predeterminada de la instancia ("neo4j"). Aquí cada
+# consulta pasa database_=... de forma explícita.
+#
+# NUEVO: esta constante antes se llamaba NEO4J_DATABASE y la usaban
+# directamente todas las consultas. Ahora es DEFAULT_DATABASE (el mismo
+# nombre que en load_postgres.py) porque solo es el valor POR DEFECTO:
+# load() recibe un parámetro `database`, y el pipeline en vivo pasa
+# "gharchive24h".
+#
+# ¿Por qué "gharchive24h" y no "gharchive_24h"? Los nombres de base de
+# datos de Neo4j solo pueden contener letras, dígitos, puntos (.) y
+# guiones (-) — NADA de guiones bajos —, así que "gharchive_24h" sería
+# rechazado. En el lado de PostgreSQL se usa también el mismo nombre,
+# para que los dos coincidan.
 #
 # BATCH_SIZE = 5000 — cuántas filas van en cada petición (ver
 # run_in_batches()).
@@ -62,7 +82,7 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CSV_DIR = PROJECT_DIR / "data" / "csv"
 NEO4J_URI = "neo4j://localhost:7687"
 NEO4J_USER = "neo4j"
-NEO4J_DATABASE = "gharchive"
+DEFAULT_DATABASE = "gharchive"
 BATCH_SIZE = 5000
 
 # ---------------------------------------------------------------------
@@ -183,7 +203,7 @@ def read_csv(path: Path, int_columns: tuple[str, ...]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------
-# def run_in_batches(driver, query, rows) -> None:
+# def run_in_batches(driver, query, rows, database) -> None:
 #
 # En lugar de enviar 15.053 filas en una sola petición enorme, las envía
 # en LOTES de BATCH_SIZE (5.000): las peticiones más pequeñas usan menos
@@ -199,15 +219,21 @@ def read_csv(path: Path, int_columns: tuple[str, ...]) -> list[dict]:
 # database_= lleva un guion bajo al final para que no se confunda con un
 # parámetro de la consulta que casualmente se llamara "database".
 #
+# NUEVO: `database` es ahora un parámetro (lo pasa load()) en lugar de
+# la constante fija, así que los lotes van a la base de datos que se le
+# haya pedido llenar a load(). Fíjate en los dos nombres distintos de esa
+# línea:
+#   database_=database   la opción del driver (con _) = nuestra variable.
+#
 # El COPY de PostgreSQL lo envía todo como un único flujo continuo; Neo4j
 # lo recibe por lotes. Las dos son la forma habitual de hacer una carga
 # masiva en cada base de datos.
 # ---------------------------------------------------------------------
-def run_in_batches(driver, query: str, rows: list[dict]) -> None:
+def run_in_batches(driver, query: str, rows: list[dict], database: str) -> None:
     # Envía las filas unos pocos miles cada vez, en lugar de todas en una
     # sola petición enorme.
     for start in range(0, len(rows), BATCH_SIZE):
-        driver.execute_query(query, rows=rows[start:start + BATCH_SIZE], database_=NEO4J_DATABASE)
+        driver.execute_query(query, rows=rows[start:start + BATCH_SIZE], database_=database)
 
 
 # La misma función auxiliar de tiempo que en load_postgres.py — ver su
@@ -216,7 +242,22 @@ def seconds_since(start: float) -> str:
     return f"{time.perf_counter() - start:6.2f} s"
 
 
-def load(csv_dir: Path) -> bool:
+# ---------------------------------------------------------------------
+# def load(csv_dir, database=DEFAULT_DATABASE) -> bool:
+#
+# NUEVO: el parámetro `database`, con la misma idea que en
+# load_postgres.py. Por defecto vale DEFAULT_DATABASE ("gharchive"), así
+# que load(csv_dir) se comporta exactamente como antes. Todas las
+# consultas de abajo usan ahora database_=database, y a run_in_batches()
+# se le pasa el mismo nombre, así que TODO el trabajo (vaciar,
+# restricciones, cargar, contar) ocurre en la base de datos elegida.
+#
+# Una diferencia con PostgreSQL: aquí el driver se conecta al SERVIDOR
+# de Neo4j (NEO4J_URI) y la base de datos se elige en cada consulta, con
+# database_=...; en psycopg la base de datos se elige una sola vez, al
+# conectar.
+# ---------------------------------------------------------------------
+def load(csv_dir: Path, database: str = DEFAULT_DATABASE) -> bool:
     # La lectura de los CSV en Python se cronometra por separado y se deja
     # FUERA del total: es preparación, no carga en la base de datos.
     step = time.perf_counter()
@@ -241,9 +282,9 @@ def load(csv_dir: Path) -> bool:
         # ejecución empieza con la base de datos vacía.
         # -------------------------------------------------------------
         step = time.perf_counter()
-        driver.execute_query("MATCH (n) DETACH DELETE n", database_=NEO4J_DATABASE)
+        driver.execute_query("MATCH (n) DETACH DELETE n", database_=database)
         for constraint in CONSTRAINTS:
-            driver.execute_query(constraint, database_=NEO4J_DATABASE)
+            driver.execute_query(constraint, database_=database)
         print(f"Database emptied; unique constraints in place   {seconds_since(step)}")
 
         # -------------------------------------------------------------
@@ -259,7 +300,7 @@ def load(csv_dir: Path) -> bool:
                                    ("Repo nodes", CREATE_REPOS, repos),
                                    ("INTERACTED_WITH edges", CREATE_EDGES, edges)):
             step = time.perf_counter()
-            run_in_batches(driver, query, rows)
+            run_in_batches(driver, query, rows, database)
             print(f"Created {label:<22}                  {seconds_since(step)}")
 
         # Aquí no hay commit explícito: execute_query() confirma cada
@@ -275,7 +316,7 @@ def load(csv_dir: Path) -> bool:
         print("\nLoaded (database vs. CSV file):")
         csv_counts = {"actors.csv": len(actors), "repos.csv": len(repos), "actor_repo.csv": len(edges)}
         for label, query, csv_name in COUNTS:
-            records, _, _ = driver.execute_query(query, database_=NEO4J_DATABASE)
+            records, _, _ = driver.execute_query(query, database_=database)
             in_db = records[0]["n"]
             in_csv = csv_counts[csv_name]
             status = "OK" if in_db == in_csv else "MISMATCH"
@@ -284,17 +325,20 @@ def load(csv_dir: Path) -> bool:
     return all_match
 
 
-# parse_args() y main(): igual que en load_postgres.py.
+# parse_args() y main(): igual que en load_postgres.py, incluida la NUEVA
+# opción --database (p. ej. --database gharchive24h).
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv-dir", type=Path, default=DEFAULT_CSV_DIR,
                          help=f"Folder with the CSV files from extract_csv.py (default: {DEFAULT_CSV_DIR})")
+    parser.add_argument("--database", default=DEFAULT_DATABASE,
+                         help=f"Neo4j database to load into (default: {DEFAULT_DATABASE})")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if not load(args.csv_dir):
+    if not load(args.csv_dir, args.database):
         sys.exit("Some counts don't match their CSV file.")
     print("\nNeo4j load complete.")
 

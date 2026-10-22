@@ -2932,3 +2932,300 @@ zéro.
 3. **Database** → **`gharchive`** (ou `:use gharchive`). Vérifier que le
    panneau affiche **Nodes (29,510)**.
 4. Taper la requête dans la barre `gharchive$` → **Ctrl + Entrée**.
+
+
+## La pipeline de 24 heures (pipeline.py) : une perspective d'ingénierie des données
+
+Jusqu'ici, tout le projet travaillait avec **une seule heure choisie à la
+main** (2026-08-27, 15:00 UTC). Elle est parfaite pour le benchmark, car
+elle ne change jamais, mais ce n'est pas ainsi qu'on travaille avec de
+vraies données : en ingénierie des données, les données arrivent en
+continu, et ce qui compte, c'est d'avoir un **processus reproductible**.
+Cette étape ajoute ce processus : une **pipeline** (une chaîne d'étapes
+automatique) qui reconstruit une base de données avec les **dernières 24
+heures** de GH Archive.
+
+### Deux processus, chacun avec sa base de données
+
+Désormais, le projet a **deux processus séparés** :
+
+| | Benchmark | Pipeline de 24 heures |
+|---|---|---|
+| **Données** | Une heure fixe : 2026-08-27, 15:00 UTC | Les dernières 24 heures, avec un jour de retard |
+| **Base de données** (dans PostgreSQL et dans Neo4j) | `gharchive` | `gharchive24h` |
+| **Comment elle est chargée** | À la main : `extract_csv.py`, `load_postgres.py`, `load_neo4j.py` | Automatiquement : `pipeline.py` |
+| **Change-t-elle ?** | **Jamais.** Elle est figée | Elle est reconstruite à chaque exécution |
+| **À quoi elle sert** | Mesurer et comparer des requêtes dans des conditions reproductibles | Avoir des données récentes et abondantes, avec un processus d'ingénierie des données |
+
+Au total, il y a **quatre bases de données**, deux sur chaque serveur :
+
+```
+PostgreSQL (port 5432)                 Neo4j (instance "gharchive", port 7687)
+├── gharchive      ← benchmark          ├── gharchive      ← benchmark
+└── gharchive24h   ← pipeline           └── gharchive24h   ← pipeline
+```
+
+**Pourquoi séparées :** si la pipeline utilisait `gharchive`, chaque
+exécution effacerait les données du benchmark, et les mesures ne seraient
+plus reproductibles. C'est pourquoi `pipeline.py` **refuse** de travailler
+sur `gharchive`, même si on le lui demande par erreur.
+
+**Pourquoi `gharchive24h` et pas `gharchive_24h` :** Neo4j n'accepte pas
+le tiret bas dans les noms de bases de données (seulement des lettres, des
+chiffres, des points et des tirets). Pour que le nom soit le même des deux
+côtés, on utilise `gharchive24h`.
+
+### La fenêtre : 24 heures glissantes, avec un jour de retard, en UTC
+
+À chaque exécution, la pipeline calcule quelles 24 heures charger :
+
+1. Elle prend l'heure actuelle **en UTC** et l'arrondit à l'heure pile
+   inférieure.
+2. Elle retire **24 heures de retard** : c'est là que la fenêtre se
+   **termine**.
+3. Elle retire encore **24 heures** : c'est là qu'elle **commence**.
+
+**Exemple :** le 22 octobre à 11:15 UTC, la fenêtre va du **20/10 à 11:00
+au 21/10 à 11:00**. Cela fait 24 fichiers de GH Archive, de
+`2026-10-20-11.json.gz` à `2026-10-21-10.json.gz` (le dernier couvre de
+10:00 à 11:00).
+
+- **Pourquoi UTC :** GH Archive nomme ses fichiers en heure UTC. Au
+  Portugal, l'heure est en avance sur UTC (d'une heure en été), donc
+  utiliser l'heure locale décalerait la fenêtre.
+- **Pourquoi le jour de retard :** GH Archive publie chaque heure peu après
+  sa fin, mais parfois avec du retard. Avec un jour de marge, toutes les
+  heures de la fenêtre sont publiées à coup sûr. Le retard est un paramètre
+  (`--lag-hours`), on peut donc le réduire plus tard.
+- **« Glissante » :** chaque heure, la fenêtre avance d'une heure. La plus
+  ancienne sort et une nouvelle entre.
+
+### Tout reconstruire à chaque exécution
+
+À chaque exécution, la pipeline **vide et remplit à nouveau** les deux
+bases `gharchive24h` à partir des 24 heures. Cela paraît beaucoup de
+travail, mais c'est plus simple et plus fiable que d'ajouter la nouvelle
+heure et de retirer l'ancienne : avec le schéma actuel (une connexion par
+paire acteur–dépôt, sans date), on ne saurait pas quelles connexions
+apparaissaient *seulement* dans l'heure qui sort.
+
+Ce qui se fait bien de façon incrémentale, c'est le **téléchargement** :
+les fichiers sont gardés dans `data/live/raw/`, et à chaque exécution on ne
+télécharge que la nouvelle heure et on supprime celle qui est sortie de la
+fenêtre.
+
+### Une tâche planifiée toutes les heures, pas un processus qui tourne en permanence
+
+| | Processus qui tourne en permanence | Tâche planifiée toutes les heures |
+|---|---|---|
+| Comment ça marche | Un programme qui ne se termine jamais : il traite, attend une heure, recommence | Un programme normal qui fait son travail et **se termine** ; le système le lance toutes les heures |
+| S'il échoue une fois | Il reste arrêté jusqu'à ce que quelqu'un le relance | L'heure suivante, il réessaie tout seul |
+| Où on l'utilise | Le *streaming* (par exemple, Kafka) | Les processus *batch* (cron, Airflow, le Planificateur de tâches de Windows) |
+
+Comme GH Archive publie les données **par heure**, le choix naturel est un
+processus *batch* planifié. Sous Windows, c'est le **Planificateur de
+tâches** (*Task Scheduler*) qui le lance. Tant que la pipeline vit sur le
+portable, elle ne s'exécutera que si l'ordinateur est allumé et **Neo4j
+Desktop ouvert** (PostgreSQL démarre tout seul, en tant que service). Pour
+qu'elle fonctionne sans le portable, il faudrait la déplacer sur un serveur
+toujours allumé ; les options sont à la fin de cette section.
+
+### Ce que fait chaque exécution
+
+1. **Calcule la fenêtre** (voir plus haut).
+2. **Synchronise les fichiers :** supprime de `data/live/raw/` ceux qui
+   sont sortis de la fenêtre et télécharge seulement ceux qui manquent.
+3. **Extrait les CSV** des 24 heures dans `data/live/csv/`, avec le même
+   code que le benchmark (`extract_csv.py`) : sans bots, sans connexions
+   répétées et avec le nom le plus récent de chaque `id`.
+4. **Vérifie les serveurs et crée les bases si elles n'existent pas :** si
+   l'un d'eux ne répond pas, elle s'arrête là, **avant de vider quoi que ce
+   soit**.
+5. **Reconstruit PostgreSQL puis Neo4j** avec les mêmes scripts de
+   chargement que le benchmark, mais dans `gharchive24h`, et compare les
+   comptages avec les CSV.
+6. **Note le résultat :** dans `logs/pipeline.log`, tout ce qui s'est
+   passé ; et, si tout s'est bien passé, la fenêtre chargée dans
+   `data/live/current_window.txt`.
+
+| Dossier ou fichier | Ce qu'il contient | Sur GitHub ? |
+|---|---|---|
+| `data/live/raw/` | Les 24 fichiers `.json.gz` de la fenêtre | Non (`data/` est dans le `.gitignore`) |
+| `data/live/csv/` | Les trois CSV de la fenêtre | Non |
+| `data/live/current_window.txt` | La dernière fenêtre chargée avec succès, avec ses comptages | Non |
+| `data/live/pipeline.lock` | N'existe que pendant qu'une exécution est en cours | Non |
+| `logs/pipeline.log` | L'historique de toutes les exécutions | Non (`logs/` est dans le `.gitignore`) |
+
+### Les pratiques d'ingénierie des données utilisées par la pipeline
+
+| Pratique | Ce que cela signifie | Comment c'est appliqué ici |
+|---|---|---|
+| **Idempotence** | Exécuter quelque chose une fois ou dix fois donne le même résultat | Les bases ne sont créées que si elles n'existent pas (`IF NOT EXISTS`) ; le contenu est toujours reconstruit de la même façon à partir de la même fenêtre |
+| **Vérification préalable** (*pre-flight check*) | Vérifier que tout est prêt avant de modifier quoi que ce soit | Téléchargements, extraction et connexion aux deux serveurs passent **avant** de vider la moindre base |
+| **Écriture atomique** | Un fichier est complet ou n'existe pas ; jamais à moitié | Les téléchargements sont enregistrés en `.part` et ne sont renommés qu'une fois terminés |
+| **Nouvelles tentatives** | Une panne réseau passagère ne doit pas faire tomber le processus | Chaque téléchargement est tenté jusqu'à 3 fois, en attendant un peu plus à chaque fois |
+| **Échouer clairement** | Un vrai problème se remarque, il n'est pas caché | Si une heure n'existe pas (erreur 404), la pipeline le dit et ne charge pas de données incomplètes |
+| **Verrou** (*lock*) | Deux exécutions ne peuvent pas se marcher dessus | Un fichier `pipeline.lock` ; si une exécution dure plus d'une heure, la suivante est sautée |
+| **Journalisation** (*logging*) | Chaque exécution laisse une trace, avec date et niveau | `logs/pipeline.log`, avec l'heure en UTC, pour la comparer directement à la fenêtre |
+| **Codes de sortie** | Le programme indique s'il s'est bien terminé (0) ou mal (1) | Le Planificateur de tâches affiche ce code comme résultat de la dernière exécution |
+| **Qualité des données** | Ne pas écarter de données en silence | Les événements sans `id` sont comptés et signalés dans le journal |
+| **Réutiliser, pas copier** | Une seule version de chaque logique | La pipeline **importe** les scripts du benchmark (`import extract_csv`...) au lieu de copier leur code |
+| **Protection** | Impossible de casser l'essentiel par erreur | La pipeline refuse de toucher à la base `gharchive` du benchmark |
+
+### Les scripts de cette étape
+
+| Script | Ce qu'il fait maintenant | Changements de cette étape |
+|---|---|---|
+| **`pipeline.py`** (nouveau) | Coordonne toute la pipeline : fenêtre, téléchargements, extraction, chargements, journal | Nouveau. [Copie annotée](pipeline.py) |
+| `download_gharchive.py` | Télécharge des heures de GH Archive | Nouvelle fonction `fetch_gz()` : télécharge sans décompresser, avec nouvelles tentatives, écriture atomique et avertissement clair si l'heure n'existe pas. Par défaut, elle fait la même chose qu'avant. [Copie annotée](download_gharchive.py) |
+| `extract_csv.py` | Crée les trois CSV | Accepte **plusieurs fichiers**, y compris des `.json.gz` non décompressés ; écarte et compte les événements sans `id` ; l'écriture des CSV passe dans une fonction (`write_all()`) que la pipeline réutilise. [Copie annotée](extract_csv.py) |
+| `load_postgres.py` | Charge les CSV dans PostgreSQL | Nouvelle option `--database` (par défaut, `gharchive`). [Copie annotée](load_postgres.py) |
+| `load_neo4j.py` | Charge les CSV dans Neo4j | Nouvelle option `--database` (par défaut, `gharchive`). [Copie annotée](load_neo4j.py) |
+
+**Le benchmark n'a pas changé :** on a vérifié que `extract_csv.py`
+produit des CSV du benchmark **identiques octet par octet** à ceux
+d'avant, et les chargements utilisent toujours `gharchive` par défaut.
+
+**Comment fonctionne `import` entre nos scripts :** chaque fichier `.py`
+est aussi un **module** qu'un autre script peut importer. L'importer charge
+ses fonctions, mais n'exécute **pas** son `main()`, grâce à la protection
+`if __name__ == "__main__":` qu'ils ont tous. Ainsi, `pipeline.py` peut
+appeler `extract_csv.extract()` ou `load_postgres.load()` comme si
+c'étaient les siennes.
+
+### Comment l'exécuter
+
+Avec PostgreSQL et Neo4j en marche :
+
+```bash
+./run.sh scripts/pipeline.py --dry-run    # affiche la fenêtre et ce qu'elle téléchargerait ; ne change rien
+./run.sh scripts/pipeline.py              # l'exécution réelle
+```
+
+Options (toutes ont une valeur par défaut) :
+
+| Option | Par défaut | À quoi elle sert |
+|---|---|---|
+| `--window-hours` | 24 | Taille de la fenêtre (par exemple, 6 pour un test rapide) |
+| `--lag-hours` | 24 | Combien de temps en arrière se termine la fenêtre |
+| `--database` | `gharchive24h` | Quelle base reconstruire des deux côtés (jamais `gharchive`) |
+| `--dry-run` | — | Seulement montrer le plan |
+
+### La première exécution réelle : un problème de qualité des données
+
+La première exécution a téléchargé les 24 heures (environ 240 Mo) en **28
+secondes**, mais a échoué à l'extraction :
+
+```
+KeyError: 'id'
+    remember_latest(repos, repo["id"], ...)
+```
+
+Autrement dit : un événement avait un `repo` **sans la clé `id`**. En
+cherchant dans les données : **2 événements sur 1 250 059** avaient
+`"repo": {}`, un dépôt complètement vide. Les deux étaient des
+`ForkEvent` ; probablement des forks de dépôts supprimés ou passés en privé
+par la suite, dont GH Archive n'a pas pu enregistrer les données. Dans
+l'heure du benchmark (69 429 événements), il n'y en avait aucun.
+
+**Leçon :** un cas rare qui n'apparaît pas dans un petit échantillon
+apparaît quand on traite des données réelles et abondantes. C'est pour cela
+qu'on teste les pipelines avec des données réelles.
+
+**Solution :** l'extraction **écarte les événements sans `id` d'acteur ou
+de dépôt** (sans `id`, on ne peut créer ni le nœud ni la connexion), mais
+**les compte et le signale**, et l'avertissement reste dans le journal :
+
+```
+WARNING  Skipped 2 event(s) without an actor or repo id
+```
+
+### Résultat de la première exécution complète
+
+`Status: SUCCESS` en **160 secondes** au total, et les **six vérifications
+à OK** :
+
+| Étape | Temps |
+|---|---|
+| Téléchargement (les 24 heures étaient déjà là) | 0,0 s (la première fois : 28 s) |
+| Extraction de 1 250 059 événements | 25,3 s |
+| Chargement dans PostgreSQL | 31,5 s |
+| Chargement dans Neo4j | 90,0 s |
+
+**Les 24 heures face à l'heure du benchmark :**
+
+| | Heure du benchmark (27/08, 15:00) | 24 heures (20/10 12:00 → 21/10 12:00) |
+|---|---|---|
+| Événements | 69 429 | **1 250 059** |
+| Événements de bots écartés | 1 970 (**2,8 %**) | 297 733 (**23,8 %**) |
+| Événements sans `id` écartés | 0 | 2 |
+| Acteurs | 14 515 | **362 730** |
+| Dépôts | 14 995 | **406 603** |
+| Connexions | 15 053 | **424 098** |
+| Nœuds dans Neo4j | 29 510 | **769 333** |
+
+**Ce que disent ces chiffres :**
+
+- **Les bots pèsent beaucoup plus sur ces 24 heures :** presque un quart
+  des événements, contre 2,8 % dans l'heure du benchmark. Une seule heure
+  choisie à la main peut donner une image trompeuse : c'est justement la
+  raison d'être de cette pipeline.
+- **Le volume est environ 26 fois plus grand :** utile pour l'axe
+  « volume de données » de la question de recherche.
+- **Il y a toujours à peine plus d'une connexion par acteur** (424 098 pour
+  362 730 acteurs) : le graphe reste très fragmenté, même s'il y aura plus
+  de dépôts partagés que sur une heure. On pourra le mesurer avec
+  `summarize_data.py`.
+
+**À propos des temps de chargement** (qui, comme ceux du benchmark, sont
+indicatifs et ne sont pas des résultats du benchmark) :
+
+- Dans PostgreSQL, `actor_repo` a pris **27 secondes**, contre 1 seconde
+  pour `actor` et `repo`. C'est attendu : pour chaque ligne, PostgreSQL
+  vérifie les deux **clés étrangères** (que l'acteur et le dépôt existent)
+  et met à jour **deux index**.
+- Dans Neo4j, créer les arêtes (45 s) est le plus lent, car chaque arête
+  **cherche** d'abord ses deux nœuds.
+
+**Un message qui n'est pas une erreur :** pendant cette exécution, une
+longue ligne de Neo4j est apparue à l'écran, `Received notification from
+DBMS server ... has caught up`, juste après la création de la base
+`gharchive24h`. C'est un avis **informatif** du driver : la nouvelle base
+est prête. Pour ne pas encombrer le journal, la pipeline n'enregistre
+désormais que les avertissements et les erreurs du driver de Neo4j.
+
+### Voir les données de `gharchive24h`
+
+- **pgAdmin 4 :** dans **Databases**, `gharchive24h` apparaît à côté de
+  `gharchive` (sinon, clic droit → **Refresh**). Les tables sont dans
+  **gharchive24h** → **Schemas** → **public** → **Tables**.
+- **Neo4j Desktop (Query) :** dans le sélecteur **Database**, choisissez
+  **`gharchive24h`** (ou `:use gharchive24h`). Le panneau devrait afficher
+  **Nodes (769,333)** et **Relationships (424,098)**. Avec autant de nœuds,
+  il est encore plus important d'utiliser `LIMIT` pour dessiner.
+- **Le journal :** `logs/pipeline.log` garde toutes les exécutions, et
+  `data/live/current_window.txt` la dernière fenêtre chargée avec succès.
+
+### Ce qui reste à faire
+
+1. **La planifier toutes les heures** dans le Planificateur de tâches de
+   Windows.
+2. **Qu'elle fonctionne sans que le portable soit allumé.** Il faudrait
+   déplacer la pipeline et les deux bases `gharchive24h` vers un endroit
+   toujours allumé :
+
+   | Option | Ce que c'est | Coût | À prendre en compte |
+   |---|---|---|---|
+   | Serveur dans le cloud | Une machine Linux toujours allumée, avec PostgreSQL, Neo4j et la pipeline planifiée avec cron | Gratuit (Oracle Cloud *Always Free*) ou environ 5 €/mois | Il faut l'entretenir et le sécuriser ; c'est ce qui ressemble le plus à un vrai travail |
+   | GitHub Actions + bases dans le cloud | GitHub exécute la pipeline toutes les heures ; PostgreSQL sur Neon ou Supabase | En grande partie gratuit | Neo4j AuraDB Free accepte environ 200 000 nœuds, et ces 24 heures en ont **769 333** : ce n'est pas suffisant |
+   | Rester sur le portable | Le Planificateur de tâches | Gratuit | Ne fonctionne que si le portable est allumé et Neo4j Desktop ouvert |
+
+   Le benchmark resterait sur le portable dans tous les cas, car pour
+   mesurer des temps, il vaut mieux une machine contrôlée et sans réseau
+   entre les deux.
+3. **Une amélioration possible : la bascule *blue-green*.** Actuellement,
+   pendant la reconstruction, PostgreSQL affiche les données précédentes
+   jusqu'à la fin (car le chargement est une seule transaction), mais Neo4j
+   apparaît à moitié rempli pendant une minute et demie. Dans les systèmes
+   réels, on charge dans une nouvelle base et, une fois terminé, on bascule
+   de l'une à l'autre d'un seul coup.

@@ -2,6 +2,29 @@
 
 At what traversal depth, and at what data volume, does a property graph model outperform an equivalent normalized relational model for the same query?
 
+## Two processes, four databases
+
+The project runs two separate processes, each with its own database on both
+servers:
+
+| | Benchmark | 24-hour pipeline |
+|---|---|---|
+| **Data** | One fixed hour: 2026-08-27, 15:00 UTC | A rolling 24-hour window, ending 24 hours ago |
+| **Database** (PostgreSQL and Neo4j) | `gharchive` | `gharchive24h` |
+| **Built by** | Hand: `extract_csv.py`, `load_postgres.py`, `load_neo4j.py` | `pipeline.py`, scheduled every hour |
+| **Changes?** | **Never** — frozen, so every measurement can be repeated on the same data | Rebuilt on every run |
+| **Purpose** | Measuring and comparing queries under repeatable conditions | Fresh, larger data through a repeatable data-engineering process |
+
+```
+PostgreSQL (port 5432)               Neo4j (instance "gharchive", port 7687)
+├── gharchive      <- benchmark      ├── gharchive      <- benchmark
+└── gharchive24h   <- pipeline       └── gharchive24h   <- pipeline
+```
+
+The pipeline refuses to touch `gharchive`. (The live database is
+`gharchive24h`, not `gharchive_24h`, because Neo4j doesn't allow underscores
+in database names.)
+
 ## Dataset
 
 Data source: [GH Archive](https://www.gharchive.org/), which publishes hourly
@@ -9,7 +32,7 @@ dumps of every public GitHub event. See
 [docs_english/gh-archive-guide.md](docs_english/gh-archive-guide.md) for a full explanation of
 what GH Archive is and how it works.
 
-This project uses a single, fixed hour for reproducibility:
+The **benchmark** uses a single, fixed hour for reproducibility:
 
 - **Date/hour:** 2026-08-27, 15:00 UTC
 - **URL:** https://data.gharchive.org/2026-08-27-15.json.gz
@@ -45,7 +68,8 @@ Stage) for the full analysis.
 | Connection | table `actor_repo` (`actor_id`, `repo_id`) | edge `(:Actor)-[:INTERACTED_WITH]->(:Repo)` |
 | Unique keys / indexes | primary keys on `actor.id`, `repo.id`, `(actor_id, repo_id)`, plus an index on `actor_repo.repo_id` | uniqueness constraints on `Actor.id`, `Repo.id` |
 
-- Both sides use a database called `gharchive`.
+- The benchmark uses a database called `gharchive` on both sides (the
+  24-hour pipeline uses the same schema in `gharchive24h`).
 - Keys use GitHub's numeric ids (`event["actor"]["id"]`, `event["repo"]["id"]`),
   not names: a user can change their login, but their id never changes.
 - **One connection per actor–repo pair**, never repeated: ten pushes by the
@@ -59,13 +83,55 @@ Stage) for the full analysis.
 |---|---|---|---|
 | PostgreSQL and Neo4j (2026-08-27, 15:00 UTC, no bots) | 14,515 | 14,995 | 15,053 |
 
-The pipeline that builds them:
+How the benchmark databases are built:
 
 ```bash
 ./run.sh scripts/extract_csv.py      # JSON -> data/csv/{actors,repos,actor_repo}.csv
 ./run.sh scripts/load_postgres.py    # CSVs -> PostgreSQL (tables, keys, index, ANALYZE)
 ./run.sh scripts/load_neo4j.py       # same CSVs -> Neo4j (nodes, edges, constraints)
 ```
+
+## The 24-hour pipeline
+
+[scripts/pipeline.py](scripts/pipeline.py) rebuilds the `gharchive24h`
+databases (PostgreSQL and Neo4j) from the last 24 complete UTC hours, ending
+24 hours ago so every hour is surely published. For example, at
+2026-10-22 11:15 UTC it loads 2026-10-20 11:00 → 2026-10-21 11:00. Each run:
+
+1. computes the window (in UTC, like GH Archive's file names);
+2. downloads only the missing hours to `data/live/raw/` and deletes those that
+   left the window (with retries; a missing hour stops the run);
+3. extracts the CSVs with the same code as the benchmark (`extract_csv.py`);
+4. checks both servers and creates `gharchive24h` if it doesn't exist —
+   before emptying anything;
+5. rebuilds both databases with the same loaders as the benchmark and checks
+   the counts;
+6. logs everything to `logs/pipeline.log` (UTC times) and records the loaded
+   window in `data/live/current_window.txt`.
+
+A lock file stops two runs from overlapping, and the exit code (0/1) tells
+the scheduler whether the run succeeded.
+
+```bash
+./run.sh scripts/pipeline.py --dry-run   # show the window and planned downloads only
+./run.sh scripts/pipeline.py             # real run
+./run.sh scripts/pipeline.py --window-hours 6 --lag-hours 2   # other window
+```
+
+First full run (window 2026-10-20 12:00 → 2026-10-21 12:00 UTC): 160 s in
+total, all counts matching.
+
+| | Benchmark hour | 24-hour window |
+|---|---|---|
+| Events | 69,429 | 1,250,059 |
+| Bot events skipped | 1,970 (2.8%) | 297,733 (23.8%) |
+| Events without an id skipped | 0 | 2 |
+| Actors / repos / connections | 14,515 / 14,995 / 15,053 | 362,730 / 406,603 / 424,098 |
+
+The pipeline is meant to run every hour with Windows Task Scheduler (only
+while the computer is on and Neo4j Desktop is running). The full design,
+decisions and results are in [docs_english/project-notes.md](docs_english/project-notes.md),
+section "The 24-hour pipeline".
 
 ## Tools and versions
 
