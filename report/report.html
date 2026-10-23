@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Graph vs. Relational Traversal</title>
+<style>
+  /* ---------- Page setup ---------- */
+  @page {
+    size: A4;
+    margin: 25mm 25mm 22mm 25mm;
+    @bottom-center {
+      content: counter(page);
+      font-family: "Cambria", "Georgia", serif;
+      font-size: 10pt;
+      color: #555;
+    }
+  }
+
+  /* No page number on the title page. */
+  @page :first {
+    @bottom-center { content: none; }
+  }
+
+  /* ---------- Base typography (classic academic) ---------- */
+  body {
+    font-family: "Cambria", "Georgia", "Times New Roman", serif;
+    font-size: 11pt;
+    line-height: 1.5;
+    color: #111;
+    margin: 0;
+    text-align: justify;
+    hyphens: auto;
+  }
+
+  h1, h2, h3 {
+    font-weight: normal;
+    text-align: left;
+    page-break-after: avoid;
+  }
+
+  h2 { font-size: 16pt; margin: 0 0 4mm 0; }
+  h3 { font-size: 12.5pt; font-style: italic; margin: 6mm 0 2mm 0; }
+
+  table {
+    border-collapse: collapse;
+    margin: 4mm auto;
+    font-size: 10pt;
+  }
+  th, td { padding: 1.5mm 3mm; text-align: left; }
+  thead th { border-top: 1.2pt solid #111; border-bottom: 0.6pt solid #111; }
+  tbody tr:last-child td { border-bottom: 1.2pt solid #111; }
+
+  /* ---------- Title page ---------- */
+  .title-page {
+    height: 250mm; /* A4 height (297 mm) minus the top and bottom margins */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    page-break-after: always;
+  }
+
+  .title-page .top-space    { flex: 3; }
+  .title-page .middle-space { flex: 4; }
+  .title-page .bottom-space { flex: 2; }
+
+  .title-page h1 {
+    font-size: 24pt;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    text-align: center;
+    margin: 0;
+  }
+
+  .title-page .rule {
+    width: 120mm;
+    border: none;
+    border-top: 0.8pt solid #111;
+    margin: 7mm 0;
+  }
+
+  .title-page .subtitle {
+    font-size: 13pt;
+    font-style: italic;
+    line-height: 1.45;
+    max-width: 125mm;
+    margin: 0;
+    text-align: center;
+  }
+
+  .title-page .author {
+    font-size: 14pt;
+    letter-spacing: 0.04em;
+    margin: 0 0 6mm 0;
+  }
+
+  .title-page .meta {
+    font-size: 11pt;
+    line-height: 1.7;
+    margin: 0;
+  }
+</style>
+</head>
+<body>
+
+<section class="title-page">
+  <div class="top-space"></div>
+
+  <h1>Graph vs. Relational Traversal</h1>
+  <hr class="rule">
+  <p class="subtitle">
+    At what traversal depth, and at what data volume, does a property graph
+    model outperform an equivalent normalized relational model for the same
+    query?
+  </p>
+
+  <div class="middle-space"></div>
+
+  <p class="author">Pedro Santos Faustino</p>
+  <p class="meta">
+    Interim report<br>
+    October 2026
+  </p>
+
+  <div class="bottom-space"></div>
+</section>
+
+</body>
+</html>

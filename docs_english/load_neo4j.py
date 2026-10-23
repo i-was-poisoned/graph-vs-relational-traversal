@@ -113,15 +113,60 @@ CONSTRAINTS = [
 #   -[:INTERACTED_WITH]->     an EDGE: square brackets, a type, and an
 #                             arrow showing its direction
 #
-# $rows is a PARAMETER: a placeholder whose value Python sends separately
-# (here, a list of dicts). Sending data as parameters, instead of pasting
-# it into the query text, is safer and lets Neo4j reuse the same query
-# plan for every batch.
+# $rows: a PARAMETER, i.e. a "placeholder" that Python fills in
 #
-# UNWIND $rows AS row
-#   Takes the LIST and turns it into one row per element, so the rest of
-#   the query runs once per element — like a `for row in rows:` loop, but
-#   inside the database, in a single request.
+#   The query is FIXED TEXT with a gap, $rows, like a form. Python sends
+#   Neo4j TWO things separately: the query (the text with the gap) and the
+#   gap's value (the data). It happens in run_in_batches():
+#
+#       driver.execute_query(query, rows=rows[start:start + BATCH_SIZE], ...)
+#       #                    └ the query    └ the value of $rows
+#
+#   It's like calling a function: $rows is the parameter, and what Python
+#   sends is the argument. For example, $rows could be this list of 3
+#   dicts (in reality each batch has 5,000):
+#
+#       [{"id": 19,        "login": "brynary"},
+#        {"id": 452,       "login": "yrashk"},
+#        {"id": 321725054, "login": "peitongshi"}]
+#
+#   Why not paste the data straight into the query text?
+#     - It's SAFER. If a login contained a quote (') or a malicious piece
+#       of text, pasting it into the query could break it or change what
+#       it does (an attack known as "injection"). As a parameter, Neo4j
+#       always treats it as DATA, never as part of the command.
+#     - It's FASTER. Before running a query, Neo4j analyses it and decides
+#       how to do it (its "plan"). If the text is always the same and only
+#       the data changes, it prepares the plan ONCE and reuses it for
+#       every batch. If the data were pasted in, every batch would be
+#       different text, and the plan would have to be prepared each time.
+#
+# UNWIND $rows AS row: turns the LIST into one row per element
+#
+#   Neo4j receives ONE thing: the whole list. But CREATE has to run ONCE
+#   PER ACTOR. UNWIND "unrolls" the list into one row per element, and
+#   calls each one "row" (AS row):
+#
+#     $rows (1 list with 3 elements)
+#        │  UNWIND $rows AS row
+#        ▼
+#     row 1: row = {id: 19, login: "brynary"}           -> CREATE (:Actor ...)
+#     row 2: row = {id: 452, login: "yrashk"}           -> CREATE (:Actor ...)
+#     row 3: row = {id: 321725054, login: "peitongshi"} -> CREATE (:Actor ...)
+#
+#   row.id and row.login read each dict's keys, like row["id"] in Python.
+#   So the query is the same as this loop, but run INSIDE Neo4j, in a
+#   single request:
+#
+#       for row in rows:
+#           create_actor_node(id=row["id"], login=row["login"])
+#
+#   Why not run that loop in Python, with one query per actor? Because
+#   that would be 14,515 requests, each one a round trip between Python
+#   and Neo4j. It's like sending 14,515 letters, each with one actor,
+#   instead of a few boxes with 5,000 actors each and the instruction
+#   "for every actor in this list, create a node". With UNWIND and the
+#   batches, the actors arrive in 3 boxes (14,515 / 5,000).
 #
 # CREATE (:Actor {id: row.id, login: row.login})
 #   Creates one node per row. row.id reads the "id" key of the dict.

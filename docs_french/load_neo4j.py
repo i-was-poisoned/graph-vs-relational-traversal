@@ -123,17 +123,63 @@ CONSTRAINTS = [
 #   -[:INTERACTED_WITH]->     une ARÊTE : crochets, un type, et une
 #                             flèche qui indique son sens
 #
-# $rows est un PARAMÈTRE : un emplacement réservé dont Python envoie la
-# valeur à part (ici, une liste de dict). Envoyer les données en
-# paramètres, au lieu de les coller dans le texte de la requête, est plus
-# sûr et permet à Neo4j de réutiliser le même plan de requête pour chaque
-# lot.
+# $rows : un PARAMÈTRE, c'est-à-dire un « trou » que Python remplit
 #
-# UNWIND $rows AS row
-#   Prend la LISTE et la transforme en une rangée par élément, pour que
-#   le reste de la requête s'exécute une fois par élément — comme une
-#   boucle `for row in rows:`, mais à l'intérieur de la base de données,
-#   en une seule requête.
+#   La requête est un TEXTE FIXE avec un trou, $rows, comme un formulaire.
+#   Python envoie à Neo4j DEUX choses séparément : la requête (le texte
+#   avec le trou) et la valeur du trou (les données). Cela se passe dans
+#   run_in_batches() :
+#
+#       driver.execute_query(query, rows=rows[start:start + BATCH_SIZE], ...)
+#       #                    └ la requête   └ la valeur de $rows
+#
+#   C'est comme appeler une fonction : $rows est le paramètre, et ce
+#   qu'envoie Python est l'argument. Par exemple, $rows pourrait valoir
+#   cette liste de 3 dict (en réalité, chaque lot en contient 5 000) :
+#
+#       [{"id": 19,        "login": "brynary"},
+#        {"id": 452,       "login": "yrashk"},
+#        {"id": 321725054, "login": "peitongshi"}]
+#
+#   Pourquoi ne pas coller les données directement dans le texte ?
+#     - C'est PLUS SÛR. Si un login contenait une apostrophe (') ou un
+#       texte malveillant, le coller dans la requête pourrait la casser ou
+#       changer ce qu'elle fait (une attaque appelée « injection »). En
+#       paramètre, Neo4j le traite toujours comme une DONNÉE, jamais comme
+#       une partie de l'ordre.
+#     - C'est PLUS RAPIDE. Avant d'exécuter une requête, Neo4j l'analyse
+#       et décide comment la faire (son « plan »). Si le texte est
+#       toujours le même et que seules les données changent, il prépare le
+#       plan UNE fois et le réutilise pour chaque lot. Si on collait les
+#       données, chaque lot serait un texte différent, et il faudrait
+#       préparer le plan à chaque fois.
+#
+# UNWIND $rows AS row : transforme la LISTE en une rangée par élément
+#
+#   Neo4j reçoit UNE seule chose : la liste entière. Mais CREATE doit
+#   s'exécuter UNE FOIS PAR ACTEUR. UNWIND (« dérouler ») déroule la liste
+#   en une rangée par élément, et appelle chacune « row » (AS row) :
+#
+#     $rows (1 liste de 3 éléments)
+#        │  UNWIND $rows AS row
+#        ▼
+#     rangée 1 : row = {id: 19, login: "brynary"}           -> CREATE (:Actor ...)
+#     rangée 2 : row = {id: 452, login: "yrashk"}           -> CREATE (:Actor ...)
+#     rangée 3 : row = {id: 321725054, login: "peitongshi"} -> CREATE (:Actor ...)
+#
+#   row.id et row.login lisent les clés de chaque dict, comme row["id"] en
+#   Python. La requête équivaut donc à cette boucle, mais exécutée DANS
+#   Neo4j, en une seule requête :
+#
+#       for row in rows:
+#           creer_noeud_acteur(id=row["id"], login=row["login"])
+#
+#   Pourquoi ne pas faire cette boucle en Python, avec une requête par
+#   acteur ? Parce que cela ferait 14 515 requêtes, chacune un aller-retour
+#   entre Python et Neo4j. C'est comme envoyer 14 515 lettres, chacune avec
+#   un acteur, au lieu de quelques cartons de 5 000 acteurs chacun et la
+#   consigne « pour chaque acteur de cette liste, crée un nœud ». Avec
+#   UNWIND et les lots, les acteurs arrivent en 3 cartons (14 515 / 5 000).
 #
 # CREATE (:Actor {id: row.id, login: row.login})
 #   Crée un nœud par rangée. row.id lit la clé "id" du dict.

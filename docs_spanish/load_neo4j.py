@@ -119,16 +119,60 @@ CONSTRAINTS = [
 #   -[:INTERACTED_WITH]->     una ARISTA: corchetes, un tipo y una
 #                             flecha que indica su dirección
 #
-# $rows es un PARÁMETRO: un hueco cuyo valor Python envía por separado
-# (aquí, una lista de diccionarios). Enviar los datos como parámetros, en
-# lugar de pegarlos en el texto de la consulta, es más seguro y permite
-# que Neo4j reutilice el mismo plan de consulta para cada lote.
+# $rows: un PARÁMETRO, es decir, un "hueco" que Python rellena
 #
-# UNWIND $rows AS row
-#   Toma la LISTA y la convierte en una fila por elemento, así que el
-#   resto de la consulta se ejecuta una vez por elemento — como un bucle
-#   `for row in rows:`, pero dentro de la base de datos, en una sola
-#   petición.
+#   La consulta es un TEXTO FIJO con un hueco, $rows, como un formulario.
+#   Python envía a Neo4j DOS cosas por separado: la consulta (el texto con
+#   el hueco) y el valor del hueco (los datos). Pasa en run_in_batches():
+#
+#       driver.execute_query(query, rows=rows[start:start + BATCH_SIZE], ...)
+#       #                    └ la consulta  └ el valor de $rows
+#
+#   Es como llamar a una función: $rows es el parámetro, y lo que envía
+#   Python es el argumento. Por ejemplo, $rows podría valer esta lista de
+#   3 diccionarios (en realidad, cada lote tiene 5.000):
+#
+#       [{"id": 19,        "login": "brynary"},
+#        {"id": 452,       "login": "yrashk"},
+#        {"id": 321725054, "login": "peitongshi"}]
+#
+#   ¿Por qué no pegar los datos directamente en el texto de la consulta?
+#     - Es MÁS SEGURO. Si un login tuviera una comilla (') o un texto con
+#       mala intención, pegado en la consulta podría romperla o cambiar lo
+#       que hace (un ataque conocido como "inyección"). Como parámetro,
+#       Neo4j lo trata siempre como un DATO, nunca como parte de la orden.
+#     - Es MÁS RÁPIDO. Antes de ejecutar una consulta, Neo4j la analiza y
+#       decide cómo hacerla (su "plan"). Si el texto es siempre el mismo y
+#       solo cambian los datos, prepara el plan UNA vez y lo reutiliza en
+#       cada lote. Si pegáramos los datos, cada lote sería un texto
+#       distinto y habría que preparar el plan cada vez.
+#
+# UNWIND $rows AS row: convierte la LISTA en una fila por elemento
+#
+#   Neo4j recibe UNA sola cosa: la lista entera. Pero CREATE tiene que
+#   ejecutarse UNA VEZ POR ACTOR. UNWIND ("desenrollar") desenrolla la
+#   lista en una fila por elemento, y llama "row" a cada una (AS row):
+#
+#     $rows (1 lista con 3 elementos)
+#        │  UNWIND $rows AS row
+#        ▼
+#     fila 1: row = {id: 19, login: "brynary"}           -> CREATE (:Actor ...)
+#     fila 2: row = {id: 452, login: "yrashk"}           -> CREATE (:Actor ...)
+#     fila 3: row = {id: 321725054, login: "peitongshi"} -> CREATE (:Actor ...)
+#
+#   row.id y row.login leen las claves de cada diccionario, como row["id"]
+#   en Python. Así que la consulta equivale a este bucle, pero ejecutado
+#   DENTRO de Neo4j, en una sola petición:
+#
+#       for row in rows:
+#           crear_nodo_actor(id=row["id"], login=row["login"])
+#
+#   ¿Por qué no hacer ese bucle en Python, con una consulta por actor?
+#   Porque serían 14.515 peticiones, y cada una es un viaje de ida y
+#   vuelta entre Python y Neo4j. Es como mandar 14.515 cartas, cada una
+#   con un actor, en lugar de unas pocas cajas con 5.000 actores cada una
+#   y la instrucción "por cada actor de esta lista, crea un nodo". Con
+#   UNWIND y los lotes, los actores llegan en 3 cajas (14.515 / 5.000).
 #
 # CREATE (:Actor {id: row.id, login: row.login})
 #   Crea un nodo por fila. row.id lee la clave "id" del diccionario.
