@@ -3905,3 +3905,148 @@ errors from the Neo4j driver.
    minute and a half. In real systems the data is loaded into a new
    database and, once finished, the switch from one to the other happens
    all at once.
+
+
+## Data pipelines and CI/CD: concepts and plan
+
+> ⚠️ **This section is about concepts and plans.** It explains ideas and next
+> steps that **have not been built yet** (except what is marked as done in
+> the status table). It is meant to make clear what each thing is before
+> building it.
+
+### Two different things called "pipeline"
+
+In data engineering, the word **pipeline** ("a pipe": an automatic chain
+of steps) is used for two very different things:
+
+| | **Data pipeline** | **CI/CD pipeline** |
+|---|---|---|
+| **What moves** | The **data**: from GH Archive to the databases | The **code**: from your computer to GitHub, and from there to where it runs |
+| **When it runs** | On a **schedule** (for example, every hour) | **Every time the code changes** (with each `git push`) |
+| **What it is for** | Keeping the data **up to date** | Automatically checking that a change **has not broken anything** (CI), and taking the new code to where it runs (CD) |
+| **In this project** | `pipeline.py` | Does not exist yet |
+
+A simple way to remember it: the data pipeline **works with the data**;
+the CI/CD pipeline **watches over the code** that works with the data.
+
+### Triggers
+
+A **trigger** is what makes something run **on its own**, without anyone
+launching it by hand:
+
+| Type of trigger | When it runs | Example in this project |
+|---|---|---|
+| **Scheduled** (*schedule*) | At a fixed time or at regular intervals | The data pipeline, every hour (with the Windows Task Scheduler, or `cron` on Linux) |
+| **Event-based** (*event*) | When something specific happens | CI, every time a `git push` is made to GitHub |
+| **Manual** | When someone runs it | `./run.sh scripts/pipeline.py` typed by hand in the terminal |
+
+### The actual status of the project
+
+| | Status |
+|---|---|
+| **The data in the databases** | ✅ Loaded: the benchmark (`gharchive`) and the 24 hours (`gharchive24h`), in PostgreSQL and in Neo4j |
+| **The data pipeline** (`pipeline.py`) | ✅ **It exists and works.** It was run **once by hand**, on 22/10, and it was the one that loaded the `gharchive24h` databases |
+| **The pipeline trigger** (every hour) | ⏳ **Missing**: scheduling it. Until then, `gharchive24h` does not update on its own |
+| **Automated tests** | ⏳ Do not exist yet |
+| **CI/CD** | ⏳ Does not exist yet |
+
+In other words: **the pipeline is done**; what is missing is **the
+trigger** that runs it on its own, and, separately, CI/CD.
+
+### What CI and CD are
+
+- **CI** (*Continuous Integration*): every time a change is pushed to
+  GitHub, a server **automatically runs the project's tests**. If a change
+  breaks something, GitHub marks it with a red ❌ and you find out right
+  away, before the error reaches the data. If everything goes well, a
+  green ✅ appears.
+- **CD** (*Continuous Delivery / Deployment*): if the tests pass, the new
+  code **is installed automatically** where the pipeline runs (for
+  example, a cloud server). That way nobody has to copy the code by hand.
+
+In this project, **CI already makes sense**; **CD will make sense later**,
+when the pipeline lives on a server and not on the laptop.
+
+**Important:** each code change **does not run the full data pipeline**
+(no 240 MB are downloaded and the real databases are not touched).
+**Tests** are run instead, quick and with little data. For three reasons:
+GitHub cannot reach the databases on the laptop; that much volume is not
+needed to know whether something has broken; and tests have to take
+seconds or a few minutes so they can warn you right away.
+
+### What tests are
+
+A **test** is a small program that **automatically checks** that another
+part of the code does what it should. There are two main types:
+
+| Type | What it checks | Example in this project |
+|---|---|---|
+| **Unit test** (*unit test*) | A single piece, on its own, without databases | That the window is calculated correctly (on 22/10 at 11:15 UTC → from 20/10 11:00 to 21/10 11:00); that bots and events without an `id` are discarded; that the most recent name is kept; that connections are not repeated |
+| **Integration test** (*integration test*) | That **several pieces work together**, with real databases | Loading a few test events into a temporary PostgreSQL and Neo4j, and checking that the counts match |
+
+The test data would be **a few events prepared by hand** that include the
+**tricky cases we already know about** from the real data: a bot, an
+empty repo (`"repo": {}`), a user who changes login, a repeated event. In
+Python, the standard tool for writing tests is **`pytest`**.
+
+### Images and containers (Docker)
+
+The integration test needs databases, but **disposable** ones. That is
+what **Docker** is used for:
+
+| Concept | What it is | Analogy |
+|---|---|---|
+| **Image** | A **sealed package** with a program and **everything it needs** to run (system, libraries, configuration). It is a **template**: it is not run, it is used to create | The **mould** for a cake |
+| **Container** | A **running copy** of an image: an **isolated environment** where that program runs, separate from the rest of the computer. When deleted, it leaves no trace | Each **cake** made with the mould |
+
+PostgreSQL and Neo4j publish **official images**. In the integration
+test, GitHub Actions would create a container from each one, the code
+would load the test events into them, check the counts and, when
+finished, everything would be deleted:
+
+```
+GitHub Actions server (a temporary machine)
+├── The project code: Python + the packages from requirements.txt
+├── PostgreSQL container  (from the official image)  ← temporary database
+└── Neo4j container       (from the official image)  ← temporary database
+```
+
+In that case the images are **the databases' images**, not one for the
+code. Later on, for CD, you could also create **your own image with the
+pipeline** (Python, the packages and the scripts): that way the cloud
+server would only have to download it and run it.
+
+**Image versus virtual environment (`.venv`):** the `.venv` isolates
+**only the Python packages**; an image isolates **everything** (Python,
+the packages, the system and the configuration), which is why it works
+the same on any machine.
+
+**A technical detail:** the free Neo4j image (*Community* edition) does
+not allow creating databases with another name, so in the integration
+test the load would go into the default database, `neo4j` (the loading
+scripts already accept `--database`).
+
+### GitHub Actions
+
+**GitHub Actions** is GitHub's service for running CI/CD. It is
+configured with a text file (in YAML format) inside the repository, in
+`.github/workflows/`, which says **when** to run (for example, on every
+`push`) and **what** to run (install Python, install `requirements.txt`,
+run `pytest`...). It is free for public repositories. The result can be
+seen on GitHub, on each commit (✅ or ❌), and a **badge** ("CI passing")
+can be shown in the README.
+
+### The plan, step by step
+
+1. **Unit tests with `pytest`**, with the tricky cases already known.
+2. **CI with GitHub Actions:** on every `push`, run those tests.
+3. **Integration test** in GitHub Actions, with temporary PostgreSQL and
+   Neo4j containers.
+4. **Schedule the data pipeline** every hour (the trigger).
+5. **CD**, when the pipeline is moved to a cloud server: every change
+   that passes the tests is installed automatically on that server (for
+   example, with the pipeline's own image).
+
+Besides checking the code, all of this is a good sign for anyone looking
+at the repository: a project with tests and CI demonstrates real
+data-engineering practices.

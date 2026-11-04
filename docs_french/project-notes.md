@@ -4162,3 +4162,156 @@ désormais que les avertissements et les erreurs du driver de Neo4j.
    apparaît à moitié rempli pendant une minute et demie. Dans les systèmes
    réels, on charge dans une nouvelle base et, une fois terminé, on bascule
    de l'une à l'autre d'un seul coup.
+
+
+## Data pipelines et CI/CD : concepts et plan
+
+> ⚠️ **Cette section porte sur des concepts et un plan.** Elle explique des
+> idées et des prochaines étapes qui **ne sont pas encore construites**
+> (sauf ce qui est indiqué comme fait dans le tableau de l'état). Elle sert
+> à bien comprendre ce qu'est chaque chose avant de la construire.
+
+### Deux choses différentes qu'on appelle « pipeline »
+
+En ingénierie des données, on utilise le mot **pipeline** (« tuyau » : une
+chaîne d'étapes automatique) pour deux choses très différentes :
+
+| | **Pipeline de données** | **Pipeline de CI/CD** |
+|---|---|---|
+| **Ce qui se déplace** | Les **données** : de GH Archive vers les bases de données | Le **code** : de votre ordinateur vers GitHub, et de là vers l'endroit où il s'exécute |
+| **Quand elle s'exécute** | Selon un **horaire** (par exemple, toutes les heures) | **À chaque modification du code** (à chaque `git push`) |
+| **À quoi elle sert** | Avoir des données **à jour** | Vérifier automatiquement qu'une modification **n'a rien cassé** (CI), et amener le nouveau code là où il s'exécute (CD) |
+| **Dans ce projet** | `pipeline.py` | N'existe pas encore |
+
+Une façon simple de s'en souvenir : la pipeline de données **travaille avec
+les données** ; la pipeline de CI/CD **surveille le code** qui travaille
+avec les données.
+
+### Les déclencheurs (*triggers*)
+
+Un **déclencheur** est ce qui fait qu'une chose s'exécute **toute seule**,
+sans que personne la lance à la main :
+
+| Type de déclencheur | Quand il s'exécute | Exemple dans ce projet |
+|---|---|---|
+| **Par horaire** (*schedule*) | À une heure fixe ou à intervalles réguliers | La pipeline de données, toutes les heures (avec le Planificateur de tâches de Windows, ou `cron` sous Linux) |
+| **Par événement** (*event*) | Quand quelque chose de précis se produit | La CI, à chaque `git push` vers GitHub |
+| **Manuel** | Quand quelqu'un l'exécute | `./run.sh scripts/pipeline.py` tapé à la main dans le terminal |
+
+### L'état réel du projet
+
+| | État |
+|---|---|
+| **Les données dans les bases** | ✅ Chargées : le benchmark (`gharchive`) et les 24 heures (`gharchive24h`), dans PostgreSQL et dans Neo4j |
+| **La pipeline de données** (`pipeline.py`) | ✅ **Elle existe et fonctionne.** Elle a été exécutée **une fois à la main**, le 22/10, et c'est elle qui a chargé les bases `gharchive24h` |
+| **Le déclencheur de la pipeline** (toutes les heures) | ⏳ **Reste à faire** : la planifier. D'ici là, `gharchive24h` ne se met pas à jour toute seule |
+| **Tests automatiques** | ⏳ N'existent pas encore |
+| **CI/CD** | ⏳ N'existe pas encore |
+
+Autrement dit : **la pipeline est faite** ; ce qui manque, c'est **le
+déclencheur** qui l'exécute toute seule, et, à part, la CI/CD.
+
+### Ce que sont la CI et le CD
+
+- **CI** (*Continuous Integration*, « intégration continue ») : chaque fois
+  qu'une modification est envoyée sur GitHub, un serveur **exécute
+  automatiquement les tests** du projet. Si une modification casse quelque
+  chose, GitHub la marque d'une ❌ rouge et vous le savez tout de suite,
+  avant que l'erreur n'atteigne les données. Si tout va bien, un ✅ vert
+  apparaît.
+- **CD** (*Continuous Delivery / Deployment*, « livraison continue ») : si
+  les tests passent, le nouveau code **s'installe tout seul** à l'endroit
+  où s'exécute la pipeline (par exemple, un serveur dans le cloud). Ainsi,
+  personne n'a besoin de copier le code à la main.
+
+Dans ce projet, **la CI a déjà du sens** ; **le CD en aura plus tard**,
+quand la pipeline vivra sur un serveur et non sur le portable.
+
+**Important :** à chaque modification du code, **on n'exécute pas la
+pipeline de données complète** (on ne télécharge pas 240 Mo et on ne touche
+pas aux vraies bases de données). On exécute des **tests**, rapides et avec
+peu de données. Pour trois raisons : GitHub ne peut pas atteindre les bases
+de données du portable ; il n'y a pas besoin d'autant de volume pour savoir
+si quelque chose est cassé ; et les tests doivent durer quelques secondes
+ou quelques minutes pour prévenir tout de suite.
+
+### Ce que sont les tests
+
+Un **test** est un petit programme qui **vérifie automatiquement** qu'une
+autre partie du code fait ce qu'elle doit. Il y en a deux types
+principaux :
+
+| Type | Ce qu'il vérifie | Exemple dans ce projet |
+|---|---|---|
+| **Test unitaire** (*unit test*) | Une seule pièce, isolément, sans bases de données | Que la fenêtre est bien calculée (le 22/10 à 11:15 UTC → du 20/10 à 11:00 au 21/10 à 11:00) ; que les bots et les événements sans `id` sont écartés ; que le nom le plus récent est conservé ; que les connexions ne sont pas répétées |
+| **Test d'intégration** (*integration test*) | Que **plusieurs pièces fonctionnent ensemble**, avec de vraies bases de données | Charger quelques événements de test dans un PostgreSQL et un Neo4j temporaires, et vérifier que les comptages correspondent |
+
+Les données de test seraient **quelques événements préparés à la main**
+qui incluent les **cas difficiles que nous connaissons déjà** dans les
+données réelles : un bot, un dépôt vide (`"repo": {}`), un utilisateur qui
+change de login, un événement répété. En Python, l'outil standard pour
+écrire des tests est **`pytest`**.
+
+### Images et conteneurs (Docker)
+
+Le test d'intégration a besoin de bases de données, mais **jetables**.
+C'est à cela que sert **Docker** :
+
+| Concept | Ce que c'est | Analogie |
+|---|---|---|
+| **Image** | Un **paquet fermé** contenant un programme et **tout ce dont il a besoin** pour fonctionner (système, bibliothèques, configuration). C'est un **modèle** : on ne l'exécute pas, on s'en sert pour créer | Le **moule** d'un gâteau |
+| **Conteneur** | Une **copie en marche** d'une image : un **environnement isolé** où ce programme fonctionne, séparé du reste de l'ordinateur. Quand on le supprime, il ne laisse aucune trace | Chaque **gâteau** fait avec le moule |
+
+PostgreSQL et Neo4j publient des **images officielles**. Dans le test
+d'intégration, GitHub Actions créerait un conteneur à partir de chacune,
+le code y chargerait les événements de test, vérifierait les comptages et,
+à la fin, tout serait supprimé :
+
+```
+Serveur de GitHub Actions (une machine temporaire)
+├── Le code du projet : Python + les paquets de requirements.txt
+├── Conteneur PostgreSQL  (depuis l'image officielle)  ← base de données temporaire
+└── Conteneur Neo4j       (depuis l'image officielle)  ← base de données temporaire
+```
+
+Dans ce cas, les images sont **celles des bases de données**, pas celle du
+code. Plus tard, pour le CD, on pourrait aussi créer **une image propre
+avec la pipeline** (Python, les paquets et les scripts) : ainsi, le
+serveur dans le cloud n'aurait qu'à la télécharger et l'exécuter.
+
+**Image ou environnement virtuel (`.venv`) :** le `.venv` isole **seulement
+les paquets Python** ; une image isole **tout** (Python, les paquets, le
+système et la configuration), c'est pourquoi elle fonctionne de la même
+façon sur n'importe quelle machine.
+
+**Un détail technique :** l'image gratuite de Neo4j (édition *Community*)
+ne permet pas de créer des bases de données avec un autre nom, donc dans
+le test d'intégration, le chargement se ferait dans la base par défaut,
+`neo4j` (les scripts de chargement acceptent déjà `--database`).
+
+### GitHub Actions
+
+**GitHub Actions** est le service de GitHub pour exécuter la CI/CD. Il se
+configure avec un fichier texte (au format YAML) dans le dépôt, dans
+`.github/workflows/`, qui indique **quand** exécuter (par exemple, à chaque
+`push`) et **quoi** exécuter (installer Python, installer
+`requirements.txt`, exécuter `pytest`...). C'est gratuit pour les dépôts
+publics. Le résultat se voit sur GitHub, sur chaque commit (✅ ou ❌), et on
+peut afficher un **badge** (« CI passing ») dans le README.
+
+### Le plan, étape par étape
+
+1. **Tests unitaires avec `pytest`**, avec les cas difficiles déjà
+   connus.
+2. **CI avec GitHub Actions :** à chaque `push`, exécuter ces tests.
+3. **Test d'intégration** dans GitHub Actions, avec des conteneurs
+   temporaires de PostgreSQL et de Neo4j.
+4. **Planifier la pipeline de données** toutes les heures (le
+   déclencheur).
+5. **CD**, quand la pipeline sera déplacée sur un serveur dans le cloud :
+   chaque modification qui passe les tests s'installe toute seule sur ce
+   serveur (par exemple, avec une image propre de la pipeline).
+
+En plus de vérifier le code, tout cela est un bon signal pour qui regarde
+le dépôt : un projet avec des tests et une CI démontre de vraies pratiques
+d'ingénierie des données.

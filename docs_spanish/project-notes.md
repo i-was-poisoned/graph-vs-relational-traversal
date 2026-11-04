@@ -4012,3 +4012,151 @@ driver de Neo4j.
    (porque la carga es una sola transacción), pero Neo4j se ve a medio
    llenar durante un minuto y medio. En sistemas reales se carga en una
    base nueva y, al terminar, se cambia de una a otra de golpe.
+
+
+## Data pipelines y CI/CD: conceptos y plan
+
+> ⚠️ **Esta sección es de conceptos y plan.** Explica ideas y próximos
+> pasos que **todavía no están construidos** (salvo lo que se indica como
+> hecho en la tabla del estado). Sirve para tener claro qué es cada cosa
+> antes de construirla.
+
+### Dos cosas distintas que se llaman "pipeline"
+
+En ingeniería de datos se usa la palabra **pipeline** ("tubería": una
+cadena de pasos automática) para dos cosas muy distintas:
+
+| | **Pipeline de datos** | **Pipeline de CI/CD** |
+|---|---|---|
+| **Qué se mueve** | Los **datos**: de GH Archive a las bases de datos | El **código**: de tu ordenador a GitHub, y de ahí a donde se ejecuta |
+| **Cuándo se ejecuta** | Según un **horario** (por ejemplo, cada hora) | **Cada vez que cambia el código** (con cada `git push`) |
+| **Para qué sirve** | Tener los datos **al día** | Comprobar automáticamente que un cambio **no ha roto nada** (CI), y llevar el código nuevo a donde se ejecuta (CD) |
+| **En este proyecto** | `pipeline.py` | Todavía no existe |
+
+Una forma sencilla de recordarlo: la pipeline de datos **trabaja con los
+datos**; la pipeline de CI/CD **vigila el código** que trabaja con los
+datos.
+
+### Los disparadores (*triggers*)
+
+Un **disparador** es lo que hace que algo se ejecute **solo**, sin que
+nadie lo lance a mano:
+
+| Tipo de disparador | Cuándo se ejecuta | Ejemplo en este proyecto |
+|---|---|---|
+| **Por horario** (*schedule*) | A una hora fija o cada cierto tiempo | La pipeline de datos, cada hora (con el Programador de tareas de Windows, o `cron` en Linux) |
+| **Por evento** (*event*) | Cuando pasa algo concreto | El CI, cada vez que se hace `git push` a GitHub |
+| **Manual** | Cuando alguien lo ejecuta | `./run.sh scripts/pipeline.py` escrito a mano en la terminal |
+
+### El estado real del proyecto
+
+| | Estado |
+|---|---|
+| **Los datos en las bases** | ✅ Cargados: el benchmark (`gharchive`) y las 24 horas (`gharchive24h`), en PostgreSQL y en Neo4j |
+| **La pipeline de datos** (`pipeline.py`) | ✅ **Existe y funciona.** Se ejecutó **una vez a mano**, el 22/10, y fue ella la que cargó las bases `gharchive24h` |
+| **El disparador de la pipeline** (cada hora) | ⏳ **Falta**: programarla. Hasta entonces, `gharchive24h` no se actualiza sola |
+| **Pruebas automáticas** | ⏳ Todavía no existen |
+| **CI/CD** | ⏳ Todavía no existe |
+
+Es decir: **la pipeline está hecha**; lo que falta es **el disparador**
+que la ejecuta sola, y aparte, el CI/CD.
+
+### Qué son CI y CD
+
+- **CI** (*Continuous Integration*, "integración continua"): cada vez que
+  se sube un cambio a GitHub, un servidor **ejecuta automáticamente las
+  pruebas** del proyecto. Si un cambio rompe algo, GitHub lo marca con una
+  ❌ roja y te enteras al momento, antes de que el error llegue a los
+  datos. Si todo va bien, aparece un ✅ verde.
+- **CD** (*Continuous Delivery / Deployment*, "entrega continua"): si las
+  pruebas pasan, el código nuevo **se instala solo** en el sitio donde se
+  ejecuta la pipeline (por ejemplo, un servidor en la nube). Así nadie
+  tiene que copiar el código a mano.
+
+En este proyecto, **CI tiene sentido ya**; **CD tendrá sentido más
+adelante**, cuando la pipeline viva en un servidor y no en el portátil.
+
+**Importante:** con cada cambio del código **no se ejecuta la pipeline de
+datos completa** (no se descargan 240 MB ni se tocan las bases de datos
+reales). Se ejecutan **pruebas**, rápidas y con pocos datos. Por tres
+razones: GitHub no puede llegar a las bases de datos del portátil; no hace
+falta tanto volumen para saber si algo se ha roto; y las pruebas tienen
+que tardar segundos o pocos minutos para avisar enseguida.
+
+### Qué son las pruebas (*tests*)
+
+Una **prueba** es un pequeño programa que **comprueba automáticamente**
+que otra parte del código hace lo que debe. Hay dos tipos principales:
+
+| Tipo | Qué comprueba | Ejemplo en este proyecto |
+|---|---|---|
+| **Prueba unitaria** (*unit test*) | Una sola pieza, por separado, sin bases de datos | Que la ventana se calcula bien (el 22/10 a las 11:15 UTC → del 20/10 11:00 al 21/10 11:00); que se descartan los bots y los eventos sin `id`; que se guarda el nombre más reciente; que no se repiten conexiones |
+| **Prueba de integración** (*integration test*) | Que **varias piezas funcionan juntas**, con bases de datos de verdad | Cargar unos pocos eventos de prueba en un PostgreSQL y un Neo4j temporales, y comprobar que los conteos coinciden |
+
+Los datos de prueba serían **unos pocos eventos preparados a mano** que
+incluyan los **casos difíciles que ya conocemos** de los datos reales: un
+bot, un repo vacío (`"repo": {}`), un usuario que cambia de login, un
+evento repetido. En Python, la herramienta estándar para escribir pruebas
+es **`pytest`**.
+
+### Imágenes y contenedores (Docker)
+
+Para la prueba de integración hacen falta bases de datos, pero **de usar y
+tirar**. Para eso se usa **Docker**:
+
+| Concepto | Qué es | Analogía |
+|---|---|---|
+| **Imagen** | Un **paquete cerrado** con un programa y **todo lo que necesita** para funcionar (sistema, librerías, configuración). Es una **plantilla**: no se ejecuta, se usa para crear | El **molde** de un pastel |
+| **Contenedor** | Una **copia en marcha** de una imagen: un **ambiente aislado** donde ese programa funciona, separado del resto del ordenador. Al borrarlo, no deja rastro | Cada **pastel** hecho con el molde |
+
+PostgreSQL y Neo4j publican **imágenes oficiales**. En la prueba de
+integración, GitHub Actions crearía un contenedor de cada una, el código
+cargaría en ellos los eventos de prueba, comprobaría los conteos y, al
+terminar, todo se borraría:
+
+```
+Servidor de GitHub Actions (una máquina temporal)
+├── El código del proyecto: Python + los paquetes de requirements.txt
+├── Contenedor de PostgreSQL  (desde la imagen oficial)  ← base de datos temporal
+└── Contenedor de Neo4j       (desde la imagen oficial)  ← base de datos temporal
+```
+
+En ese caso las imágenes son las **de las bases de datos**, no la del
+código. Más adelante, para el CD, también se podría crear **una imagen
+propia con la pipeline** (Python, los paquetes y los scripts): así el
+servidor en la nube solo tendría que descargarla y ejecutarla.
+
+**Imagen frente a entorno virtual (`.venv`):** el `.venv` aísla **solo los
+paquetes de Python**; una imagen aísla **todo** (Python, los paquetes, el
+sistema y la configuración), por eso funciona igual en cualquier máquina.
+
+**Un detalle técnico:** la imagen gratuita de Neo4j (edición *Community*)
+no permite crear bases de datos con otro nombre, así que en la prueba de
+integración la carga se haría en la base por defecto, `neo4j` (los
+scripts de carga ya aceptan `--database`).
+
+### GitHub Actions
+
+**GitHub Actions** es el servicio de GitHub para ejecutar CI/CD. Se
+configura con un archivo de texto (en formato YAML) dentro del
+repositorio, en `.github/workflows/`, que dice **cuándo** ejecutar
+(por ejemplo, en cada `push`) y **qué** ejecutar (instalar Python, instalar
+`requirements.txt`, ejecutar `pytest`...). Es gratuito en repositorios
+públicos. El resultado se ve en GitHub, en cada commit (✅ o ❌), y se
+puede mostrar una **insignia** ("CI passing") en el README.
+
+### El plan, por pasos
+
+1. **Pruebas unitarias con `pytest`**, con los casos difíciles ya
+   conocidos.
+2. **CI con GitHub Actions:** en cada `push`, ejecutar esas pruebas.
+3. **Prueba de integración** en GitHub Actions, con contenedores
+   temporales de PostgreSQL y Neo4j.
+4. **Programar la pipeline de datos** cada hora (el disparador).
+5. **CD**, cuando la pipeline se lleve a un servidor en la nube: cada
+   cambio que pase las pruebas se instala solo en ese servidor (por
+   ejemplo, con una imagen propia de la pipeline).
+
+Además de comprobar el código, todo esto es una buena señal para quien
+mire el repositorio: un proyecto con pruebas y CI demuestra prácticas
+reales de ingeniería de datos.
