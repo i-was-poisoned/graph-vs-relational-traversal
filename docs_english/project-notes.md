@@ -4075,6 +4075,44 @@ changes:
 - **Dependencies:** if a package publishes a new version with a bug, the
   code stops working without anyone having changed it. In this project the
   versions are pinned (`==`), so this risk is smaller.
+
+  **How is that possible, if the versions are pinned?** You have to
+  separate two moments:
+
+  | Moment | Uses the internet? | What happens |
+  |---|---|---|
+  | **Installing** (`pip install -r requirements.txt`) | Yes | `pip` asks **PyPI** (the *Python Package Index*, the big public store of Python packages) for the packages and copies their files into `.venv` (in `.venv/Lib/site-packages`) |
+  | **Running** (`./run.sh scripts/...`) | No | Python reads the packages **from disk**, from that folder. It doesn't ask anyone anything |
+
+  In other words: packages **are** fetched from a server over the internet
+  (PyPI works like an API that `pip` sends requests to), but **only when
+  they're installed, not every time the application runs**. Once
+  installed, they're a local copy that doesn't change. If tomorrow the
+  creators of `psycopg` publish a version 3.3.7 with a bug, your `.venv`
+  still has 3.3.6 and everything works the same… until you **install
+  again**.
+
+  **So where's the risk?** In the moments when things get installed again:
+
+  1. **CI always installs.** Every GitHub Actions run starts on an **empty**
+     machine that is destroyed at the end, so one of its first steps is
+     `pip install -r requirements.txt`. CI downloads the packages from PyPI
+     **on every run**.
+  2. **What isn't pinned.** `requirements.txt` pins the two packages we
+     asked for, but **not** those packages' own dependencies.
+     `python -m pip freeze` shows there are four more: `psycopg-binary` is
+     pinned because `psycopg` requires exactly its own version, but
+     `tzdata` (needed by `psycopg`) and `pytz` (needed by `neo4j`) aren't.
+     On every fresh install, `pip` picks the **latest** version of those
+     two. If one comes out with a bug, the next CI run will use it without
+     anyone having changed anything.
+  3. **A new computer**, or deleting and re-creating `.venv`: same as CI.
+
+  That's why the risk is smaller, but not zero, and a scheduled CI would
+  catch it. To remove it completely you can also pin the dependencies'
+  dependencies, by saving the full output of `python -m pip freeze` to a
+  file. That file, which pins **everything** installed, is called a
+  ***lock file***.
 - **External services:** this project has a very clear one, **GH
   Archive**. If its file format changed one day (for example, if the empty
   `repo` found in 2 events appeared in all of them), the pipeline would

@@ -4342,6 +4342,47 @@ Parce que le code peut se casser **même si personne n'y touche**, quand
   bogue, le code cesse de fonctionner sans que personne ne l'ait modifié.
   Dans ce projet, les versions sont fixées (`==`), donc ce risque est
   moindre.
+
+  **Comment est-ce possible, si les versions sont fixées ?** Il faut
+  distinguer deux moments :
+
+  | Moment | Utilise Internet ? | Ce qui se passe |
+  |---|---|---|
+  | **Installer** (`pip install -r requirements.txt`) | Oui | `pip` demande les paquets à **PyPI** (*Python Package Index*, le grand dépôt public de paquets Python) et copie leurs fichiers dans `.venv` (dans `.venv/Lib/site-packages`) |
+  | **Exécuter** (`./run.sh scripts/...`) | Non | Python lit les paquets **sur le disque**, dans ce dossier. Il ne demande rien à personne |
+
+  Autrement dit : les paquets **sont** bien récupérés depuis un serveur
+  par Internet (PyPI fonctionne comme une API à laquelle `pip` envoie des
+  requêtes), mais **seulement au moment de l'installation, pas à chaque
+  exécution de l'application**. Une fois installés, ce sont une copie
+  locale qui ne change pas. Si demain les créateurs de `psycopg` publient
+  une version 3.3.7 avec un bogue, votre `.venv` garde la 3.3.6 et tout
+  fonctionne pareil… jusqu'à ce que vous **réinstalliez**.
+
+  **Alors, où est le risque ?** Dans les moments où l'on réinstalle :
+
+  1. **La CI installe toujours.** Chaque exécution de GitHub Actions
+     démarre sur une machine **vide** qui est détruite à la fin ; l'une de
+     ses premières étapes est donc `pip install -r requirements.txt`. La
+     CI télécharge les paquets depuis PyPI **à chaque exécution**.
+  2. **Ce qui n'est pas fixé.** `requirements.txt` fixe les deux paquets
+     demandés, mais **pas** leurs propres dépendances.
+     `python -m pip freeze` montre qu'il y en a quatre de plus :
+     `psycopg-binary` est fixé parce que `psycopg` exige exactement sa
+     propre version, mais `tzdata` (requis par `psycopg`) et `pytz`
+     (requis par `neo4j`) ne le sont pas. À chaque nouvelle installation,
+     `pip` choisit la version **la plus récente** de ces deux-là. Si l'une
+     sort avec un bogue, la CI suivante l'utilisera sans que personne
+     n'ait rien changé.
+  3. **Un nouvel ordinateur**, ou si vous supprimez et recréez `.venv` :
+     même chose que la CI.
+
+  C'est pourquoi le risque est moindre, mais pas nul, et une CI planifiée
+  le détecterait. Pour le supprimer complètement, on peut aussi fixer les
+  dépendances des dépendances, en enregistrant dans un fichier la sortie
+  complète de `python -m pip freeze`. Ce fichier, qui fixe **tout** ce
+  qui est installé, s'appelle un ***lock file*** (« fichier de
+  verrouillage »).
 - **Les services externes :** ce projet en a un très clair, **GH Archive**.
   Si un jour le format de ses fichiers changeait (par exemple, si le
   `repo` vide trouvé dans 2 événements apparaissait dans tous), la

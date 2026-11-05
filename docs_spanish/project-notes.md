@@ -4186,6 +4186,46 @@ Porque el código puede romperse **aunque nadie lo toque**, cuando cambia
   fallo, el código deja de funcionar sin que nadie lo haya cambiado. En
   este proyecto las versiones están fijadas (`==`), así que este riesgo es
   menor.
+
+  **¿Cómo es posible, si las versiones están fijadas?** Hay que separar
+  dos momentos:
+
+  | Momento | ¿Usa internet? | Qué pasa |
+  |---|---|---|
+  | **Instalar** (`pip install -r requirements.txt`) | Sí | `pip` pide los paquetes a **PyPI** (*Python Package Index*, el gran almacén público de paquetes de Python) y copia sus archivos dentro de `.venv` (en `.venv/Lib/site-packages`) |
+  | **Ejecutar** (`./run.sh scripts/...`) | No | Python lee los paquetes **del disco**, de esa carpeta. No le pregunta nada a nadie |
+
+  Es decir: los paquetes **sí** se obtienen de un servidor por internet
+  (PyPI funciona como una API a la que `pip` hace peticiones), pero **solo
+  al instalarlos, no cada vez que la aplicación se ejecuta**. Una vez
+  instalados, son una copia local que no cambia. Si mañana los creadores
+  de `psycopg` publican una versión 3.3.7 con un fallo, tu `.venv` sigue
+  teniendo la 3.3.6 y todo funciona igual… hasta que **vuelvas a
+  instalar**.
+
+  **Entonces, ¿dónde está el riesgo?** En los momentos en que se vuelve a
+  instalar:
+
+  1. **En el CI se instala siempre.** Cada ejecución de GitHub Actions
+     empieza en una máquina **vacía** que se destruye al terminar, así que
+     uno de sus primeros pasos es `pip install -r requirements.txt`. El CI
+     descarga los paquetes de PyPI **en cada ejecución**.
+  2. **Lo que no está fijado.** `requirements.txt` fija los dos paquetes
+     que pedimos, pero **no** las dependencias de esos paquetes. Con
+     `python -m pip freeze` se ve que hay cuatro más: `psycopg-binary`
+     queda fijado porque `psycopg` exige exactamente su misma versión,
+     pero `tzdata` (que necesita `psycopg`) y `pytz` (que necesita
+     `neo4j`) no. En cada instalación nueva, `pip` elige la versión **más
+     reciente** de esos dos. Si sale una con un fallo, el siguiente CI la
+     usará sin que nadie haya cambiado nada.
+  3. **Un ordenador nuevo**, o si borras y vuelves a crear `.venv`: lo
+     mismo que el CI.
+
+  Por eso el riesgo es menor, pero no es cero, y un CI por horario lo
+  detectaría. Para eliminarlo del todo se pueden fijar también las
+  dependencias de las dependencias, guardando en un archivo la salida
+  completa de `python -m pip freeze`. Ese archivo, que fija **todo** lo
+  instalado, se llama ***lock file*** ("archivo de bloqueo").
 - **Los servicios externos:** en este proyecto hay uno muy claro, **GH
   Archive**. Si un día cambia el formato de sus archivos (por ejemplo, si
   el `repo` vacío que encontramos en 2 eventos apareciera en todos), la
