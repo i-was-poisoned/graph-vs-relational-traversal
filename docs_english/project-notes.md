@@ -4355,3 +4355,58 @@ wrong test gives a false sense of safety.
   GitHub Actions runs these 24 tests on every `push`.
 - Later, if needed: tests for `acquire_lock` (the lock file) and for
   `fetch_gz` by simulating the network.
+
+### What pytest does when you type `python -m pytest`
+
+`pytest` isn't just a command: it's a **testing framework**. A
+*framework* is a tool that already does the repetitive work for you: you
+only write the tests, and it takes care of finding them, running them and
+counting the results. That's why typing `python -m pytest` is enough,
+without naming any file. This is what it does, in order:
+
+1. **It reads `pytest.ini`.** That's where it learns that the tests are in
+   `tests/` (`testpaths`) and the scripts are in `scripts/`
+   (`pythonpath`).
+2. **It finds the tests on its own.** This is called ***test
+   discovery***. It goes through `tests/`, keeps the **files** whose name
+   starts with `test_` and, inside them, the **functions** whose name
+   starts with `test_`. That's how it finds the 24.
+3. **It runs each test separately.** If a test asks for a *fixture*
+   (`tmp_path`, `caplog`), it prepares it just before.
+4. **It records each result** (`.` if it passes, `F` if it fails) and at
+   the end prints the summary, for example `24 passed`.
+
+> ⚠️ **The naming rule isn't optional.** If a function were called
+> `check_bot()` instead of `test_...`, `pytest` wouldn't find it and **it
+> would never run, without any warning**: the summary would still say
+> `24 passed`, and it would look as if everything had been checked.
+
+`pytest` and `python -m pytest` do the same thing when `.venv` is
+activated. Here `python -m pytest` is used because it makes sure
+`.venv`'s Python is the one used, just like `python -m pip`.
+
+### Running only some of the tests
+
+By default all of them run, but you can tell `pytest` what to run.
+Always from the project folder, with `.venv` activated:
+
+| You want to run | Command |
+|---|---|
+| Everything | `python -m pytest` |
+| Everything, showing each test's name | `python -m pytest -v` |
+| A single file | `python -m pytest tests/test_pipeline.py` |
+| A single test (file `::` function) | `python -m pytest tests/test_pipeline.py::test_hour_file_name_midnight` |
+| The tests whose name contains some text | `python -m pytest -k bot` |
+
+**Careful with `-k`:** it looks for the text **inside** the name, not for
+whole words. `python -m pytest -k bot` runs **5** tests, not 4: the three
+`is_bot` ones, `test_extract_skips_bots`, and also
+`test_read_csv_converts_both_columns_of_connections`, because
+"**bot**h" contains "bot". The other 19 show up as `deselected`:
+
+```
+5 passed, 19 deselected in 0.76s
+```
+
+To keep only the `is_bot` ones, be more precise:
+`python -m pytest -k is_bot` runs 3.

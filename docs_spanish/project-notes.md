@@ -4477,3 +4477,61 @@ seguridad.
   GitHub Actions ejecute estas 24 pruebas en cada `push`.
 - Más adelante, si hace falta: pruebas de `acquire_lock` (el archivo de
   bloqueo) y de `fetch_gz` simulando la red.
+
+### Qué hace pytest cuando escribes `python -m pytest`
+
+`pytest` no es solo un comando: es un **framework de pruebas** (*testing
+framework*). Un *framework* es una herramienta que ya trae hecho el
+trabajo repetitivo: tú solo escribes las pruebas, y él se encarga de
+encontrarlas, ejecutarlas y contar el resultado. Por eso basta con
+escribir `python -m pytest`, sin nombrar ningún archivo. Esto es lo que
+hace, en orden:
+
+1. **Lee `pytest.ini`.** Ahí aprende que las pruebas están en `tests/`
+   (`testpaths`) y que los scripts están en `scripts/` (`pythonpath`).
+2. **Busca las pruebas él solo.** Esto se llama ***test discovery***
+   ("descubrimiento de pruebas"). Recorre `tests/`, se queda con los
+   **archivos** cuyo nombre empieza por `test_` y, dentro de ellos, con
+   las **funciones** cuyo nombre empieza por `test_`. Así encuentra las
+   24.
+3. **Ejecuta cada prueba por separado.** Si una prueba pide una
+   *fixture* (`tmp_path`, `caplog`), se la prepara justo antes.
+4. **Apunta el resultado** de cada una (`.` si pasa, `F` si falla) y al
+   final escribe el resumen, por ejemplo `24 passed`.
+
+> ⚠️ **La regla de los nombres no es opcional.** Si una función se
+> llamara `comprobar_bot()` en lugar de `test_...`, `pytest` no la
+> encontraría y **nunca se ejecutaría, sin avisarte**: el resumen diría
+> `24 passed` igualmente, y parecería que todo está comprobado.
+
+`pytest` y `python -m pytest` hacen lo mismo cuando el `.venv` está
+activado. Aquí se usa `python -m pytest` porque así es seguro que se usa
+el Python del `.venv`, igual que con `python -m pip`.
+
+### Ejecutar solo una parte de las pruebas
+
+Por defecto se ejecutan todas, pero se le puede decir a `pytest` qué
+ejecutar. Siempre desde la carpeta del proyecto y con el `.venv`
+activado:
+
+| Quieres ejecutar | Comando |
+|---|---|
+| Todo | `python -m pytest` |
+| Todo, con el nombre de cada prueba | `python -m pytest -v` |
+| Un solo archivo | `python -m pytest tests/test_pipeline.py` |
+| Una sola prueba (archivo `::` función) | `python -m pytest tests/test_pipeline.py::test_hour_file_name_midnight` |
+| Las pruebas cuyo nombre contiene un texto | `python -m pytest -k bot` |
+
+**Cuidado con `-k`:** busca el texto **dentro** del nombre, no palabras
+enteras. `python -m pytest -k bot` ejecuta **5** pruebas, no 4: las tres
+de `is_bot`, `test_extract_skips_bots` y también
+`test_read_csv_converts_both_columns_of_connections`, porque "**bot**h"
+contiene "bot". Las otras 19 aparecen como `deselected` ("no
+seleccionadas"):
+
+```
+5 passed, 19 deselected in 0.76s
+```
+
+Para quedarse solo con las de `is_bot`, hay que ser más preciso:
+`python -m pytest -k is_bot` ejecuta 3.

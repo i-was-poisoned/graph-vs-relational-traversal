@@ -4637,3 +4637,63 @@ examinées : un test faux donne un faux sentiment de sécurité.
   GitHub Actions lance ces 24 tests à chaque `push`.
 - Plus tard, si nécessaire : des tests de `acquire_lock` (le fichier de
   verrou) et de `fetch_gz` en simulant le réseau.
+
+### Ce que fait pytest quand vous tapez `python -m pytest`
+
+`pytest` n'est pas qu'une commande : c'est un **framework de tests**
+(*testing framework*). Un *framework* est un outil qui fait déjà le
+travail répétitif à votre place : vous écrivez seulement les tests, et
+lui se charge de les trouver, de les lancer et de compter les résultats.
+C'est pour cela qu'il suffit de taper `python -m pytest`, sans nommer
+aucun fichier. Voici ce qu'il fait, dans l'ordre :
+
+1. **Il lit `pytest.ini`.** C'est là qu'il apprend que les tests sont
+   dans `tests/` (`testpaths`) et les scripts dans `scripts/`
+   (`pythonpath`).
+2. **Il trouve les tests tout seul.** Cela s'appelle la ***test
+   discovery*** (« découverte des tests »). Il parcourt `tests/`, garde
+   les **fichiers** dont le nom commence par `test_` et, à l'intérieur,
+   les **fonctions** dont le nom commence par `test_`. C'est ainsi qu'il
+   trouve les 24.
+3. **Il lance chaque test séparément.** Si un test demande une *fixture*
+   (`tmp_path`, `caplog`), il la prépare juste avant.
+4. **Il note le résultat** de chacun (`.` s'il passe, `F` s'il échoue) et
+   affiche à la fin le résumé, par exemple `24 passed`.
+
+> ⚠️ **La règle des noms n'est pas facultative.** Si une fonction
+> s'appelait `verifier_bot()` au lieu de `test_...`, `pytest` ne la
+> trouverait pas et **elle ne serait jamais lancée, sans aucun
+> avertissement** : le résumé dirait quand même `24 passed`, et on
+> croirait que tout a été vérifié.
+
+`pytest` et `python -m pytest` font la même chose quand le `.venv` est
+activé. Ici on utilise `python -m pytest` parce qu'on est ainsi sûr
+d'utiliser le Python du `.venv`, comme avec `python -m pip`.
+
+### Lancer seulement une partie des tests
+
+Par défaut, tous les tests sont lancés, mais on peut indiquer à `pytest`
+ce qu'il doit lancer. Toujours depuis le dossier du projet, avec le
+`.venv` activé :
+
+| Vous voulez lancer | Commande |
+|---|---|
+| Tout | `python -m pytest` |
+| Tout, avec le nom de chaque test | `python -m pytest -v` |
+| Un seul fichier | `python -m pytest tests/test_pipeline.py` |
+| Un seul test (fichier `::` fonction) | `python -m pytest tests/test_pipeline.py::test_hour_file_name_midnight` |
+| Les tests dont le nom contient un texte | `python -m pytest -k bot` |
+
+**Attention avec `-k` :** il cherche le texte **à l'intérieur** du nom, pas
+des mots entiers. `python -m pytest -k bot` lance **5** tests, pas 4 :
+les trois de `is_bot`, `test_extract_skips_bots` et aussi
+`test_read_csv_converts_both_columns_of_connections`, parce que
+« **bot**h » contient « bot ». Les 19 autres apparaissent comme
+`deselected` (« non sélectionnés ») :
+
+```
+5 passed, 19 deselected in 0.76s
+```
+
+Pour ne garder que ceux de `is_bot`, il faut être plus précis :
+`python -m pytest -k is_bot` en lance 3.
