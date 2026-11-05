@@ -3922,7 +3922,7 @@ of steps) is used for two very different things:
 | | **Data pipeline** | **CI/CD pipeline** |
 |---|---|---|
 | **What moves** | The **data**: from GH Archive to the databases | The **code**: from your computer to GitHub, and from there to where it runs |
-| **When it runs** | On a **schedule** (for example, every hour) | **Every time the code changes** (with each `git push`) |
+| **When it runs** | When a **trigger fires** it: a **schedule** (for example, every hour), an **event** (for example, a new file arriving) or **by hand**. In this project, the plan is a **schedule** | Usually **every time the code changes** (with each `git push`), which is also an event. It can also be on a schedule (for example, nightly tests) or by hand |
 | **What it is for** | Keeping the data **up to date** | Automatically checking that a change **has not broken anything** (CI), and taking the new code to where it runs (CD) |
 | **In this project** | `pipeline.py` | Does not exist yet |
 
@@ -3939,6 +3939,15 @@ launching it by hand:
 | **Scheduled** (*schedule*) | At a fixed time or at regular intervals | The data pipeline, every hour (with the Windows Task Scheduler, or `cron` on Linux) |
 | **Event-based** (*event*) | When something specific happens | CI, every time a `git push` is made to GitHub |
 | **Manual** | When someone runs it | `./run.sh scripts/pipeline.py` typed by hand in the terminal |
+
+**Any pipeline can use any trigger.** Schedules aren't exclusive to data
+pipelines, nor events to CI/CD. For example, this project's data pipeline
+could be triggered **by an event**, "when GH Archive publishes a new
+hour", instead of blindly every hour. Many real platforms work like
+that: a pipeline starts when a new file lands in a folder or a message
+arrives in a queue. A **schedule** was chosen here because it's the
+simplest: GH Archive doesn't announce when it publishes, so it would have
+to be asked every so often, which in practice is the same as a schedule.
 
 ### The actual status of the project
 
@@ -4036,14 +4045,60 @@ run `pytest`...). It is free for public repositories. The result can be
 seen on GitHub, on each commit (✅ or ❌), and a **badge** ("CI passing")
 can be shown in the README.
 
+### What triggers a CI: not just `git push`
+
+CI is usually associated with `git push`, because that's its most common
+trigger, but a CI can run on **any** trigger. In GitHub Actions, the
+*workflow* file says when it runs, in a section called `on:`, and several
+can be combined:
+
+```yaml
+on:
+  push:                    # every time code is pushed
+  pull_request:            # every time someone proposes a change for review
+  schedule:
+    - cron: "0 3 * * *"    # every day at 03:00 UTC
+  workflow_dispatch:       # a button on GitHub to run it by hand
+```
+
+| Trigger | When it runs |
+|---|---|
+| `push` | Every time code is pushed. **It's the most common one**, which is why CI is usually associated with `git push` |
+| `pull_request` | When someone proposes a change, to review it before it's merged into the main code |
+| `schedule` | **On a schedule**, with the same `cron` syntax used on Linux |
+| `workflow_dispatch` | **By hand**, with a "Run workflow" button on GitHub |
+
+**Why run tests on a schedule if the code hasn't changed?** Because code
+can break **even if nobody touches it**, when **what's around it**
+changes:
+
+- **Dependencies:** if a package publishes a new version with a bug, the
+  code stops working without anyone having changed it. In this project the
+  versions are pinned (`==`), so this risk is smaller.
+- **External services:** this project has a very clear one, **GH
+  Archive**. If its file format changed one day (for example, if the empty
+  `repo` found in 2 events appeared in all of them), the pipeline would
+  start failing. A daily test that downloads a recent hour and checks its
+  shape would catch it **before** the data gets damaged.
+- **Long tests:** some take too long to run on every `push`, so they're
+  left for the night (*nightly builds*).
+
+In short, the question each one answers:
+
+| CI on `push` | CI on a schedule |
+|---|---|
+| "Has **my change** broken something?" | "Has **the world** changed and broken something?" |
+
 ### The plan, step by step
 
 1. **Unit tests with `pytest`**, with the tricky cases already known.
 2. **CI with GitHub Actions:** on every `push`, run those tests.
 3. **Integration test** in GitHub Actions, with temporary PostgreSQL and
    Neo4j containers.
-4. **Schedule the data pipeline** every hour (the trigger).
-5. **CD**, when the pipeline is moved to a cloud server: every change
+4. **A daily scheduled check** (`schedule`) that downloads a recent GH
+   Archive hour and checks that its format is still as expected.
+5. **Schedule the data pipeline** every hour (the trigger).
+6. **CD**, when the pipeline is moved to a cloud server: every change
    that passes the tests is installed automatically on that server (for
    example, with the pipeline's own image).
 

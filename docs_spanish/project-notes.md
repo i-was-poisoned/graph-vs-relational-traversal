@@ -4029,7 +4029,7 @@ cadena de pasos automática) para dos cosas muy distintas:
 | | **Pipeline de datos** | **Pipeline de CI/CD** |
 |---|---|---|
 | **Qué se mueve** | Los **datos**: de GH Archive a las bases de datos | El **código**: de tu ordenador a GitHub, y de ahí a donde se ejecuta |
-| **Cuándo se ejecuta** | Según un **horario** (por ejemplo, cada hora) | **Cada vez que cambia el código** (con cada `git push`) |
+| **Cuándo se ejecuta** | Cuando la **dispara un *trigger***: un **horario** (por ejemplo, cada hora), un **evento** (por ejemplo, la llegada de un archivo nuevo) o **a mano**. En este proyecto, el plan es **por horario** | Normalmente, **cada vez que cambia el código** (con cada `git push`), que también es un evento. También puede ser por horario (por ejemplo, pruebas cada noche) o a mano |
 | **Para qué sirve** | Tener los datos **al día** | Comprobar automáticamente que un cambio **no ha roto nada** (CI), y llevar el código nuevo a donde se ejecuta (CD) |
 | **En este proyecto** | `pipeline.py` | Todavía no existe |
 
@@ -4047,6 +4047,16 @@ nadie lo lance a mano:
 | **Por horario** (*schedule*) | A una hora fija o cada cierto tiempo | La pipeline de datos, cada hora (con el Programador de tareas de Windows, o `cron` en Linux) |
 | **Por evento** (*event*) | Cuando pasa algo concreto | El CI, cada vez que se hace `git push` a GitHub |
 | **Manual** | Cuando alguien lo ejecuta | `./run.sh scripts/pipeline.py` escrito a mano en la terminal |
+
+**Cualquier pipeline puede usar cualquier disparador.** El horario no es
+exclusivo de las pipelines de datos, ni los eventos de las de CI/CD. Por
+ejemplo, la pipeline de datos de este proyecto podría dispararse **por
+evento**, "cuando GH Archive publique una hora nueva", en lugar de cada
+hora a ciegas. Muchas plataformas reales funcionan así: una pipeline
+arranca cuando llega un archivo nuevo a una carpeta o un mensaje a una
+cola. Aquí se eligió el **horario** porque es lo más sencillo: GH
+Archive no avisa cuando publica, así que habría que preguntarle cada
+cierto tiempo, que en la práctica es lo mismo que un horario.
 
 ### El estado real del proyecto
 
@@ -4145,6 +4155,52 @@ repositorio, en `.github/workflows/`, que dice **cuándo** ejecutar
 públicos. El resultado se ve en GitHub, en cada commit (✅ o ❌), y se
 puede mostrar una **insignia** ("CI passing") en el README.
 
+### Los disparadores de un CI: no solo `git push`
+
+Es habitual asociar CI con `git push`, porque es su disparador más común,
+pero un CI puede ejecutarse por **cualquier** disparador. En GitHub
+Actions, el archivo del *workflow* indica en qué casos se ejecuta, en un
+apartado llamado `on:` ("cuando..."), y se pueden combinar varios:
+
+```yaml
+on:
+  push:                    # cada vez que se sube código
+  pull_request:            # cada vez que alguien propone un cambio para revisar
+  schedule:
+    - cron: "0 3 * * *"    # todos los días a las 03:00 UTC
+  workflow_dispatch:       # un botón en GitHub para lanzarlo a mano
+```
+
+| Disparador | Cuándo se ejecuta |
+|---|---|
+| `push` | Cada vez que se sube código. **Es el más común**, y por eso se suele asociar CI con `git push` |
+| `pull_request` | Cuando alguien propone un cambio para revisarlo antes de juntarlo con el código principal |
+| `schedule` | **Por horario**, con la misma sintaxis `cron` que se usa en Linux |
+| `workflow_dispatch` | **A mano**, con un botón "Run workflow" en GitHub |
+
+**¿Para qué ejecutar pruebas por horario, si el código no ha cambiado?**
+Porque el código puede romperse **aunque nadie lo toque**, cuando cambia
+**lo que hay a su alrededor**:
+
+- **Las dependencias:** si un paquete publica una versión nueva con un
+  fallo, el código deja de funcionar sin que nadie lo haya cambiado. En
+  este proyecto las versiones están fijadas (`==`), así que este riesgo es
+  menor.
+- **Los servicios externos:** en este proyecto hay uno muy claro, **GH
+  Archive**. Si un día cambia el formato de sus archivos (por ejemplo, si
+  el `repo` vacío que encontramos en 2 eventos apareciera en todos), la
+  pipeline empezaría a fallar. Una prueba diaria que descargue una hora
+  reciente y compruebe su forma lo detectaría **antes** de que se
+  estropeen los datos.
+- **Las pruebas largas:** algunas tardan demasiado para ejecutarlas en cada
+  `push`, así que se dejan para la noche (las *nightly builds*).
+
+En resumen, las dos preguntas que responde cada uno:
+
+| CI por `push` | CI por horario |
+|---|---|
+| "¿**Mi cambio** ha roto algo?" | "¿**El mundo** ha cambiado y ha roto algo?" |
+
 ### El plan, por pasos
 
 1. **Pruebas unitarias con `pytest`**, con los casos difíciles ya
@@ -4152,8 +4208,11 @@ puede mostrar una **insignia** ("CI passing") en el README.
 2. **CI con GitHub Actions:** en cada `push`, ejecutar esas pruebas.
 3. **Prueba de integración** en GitHub Actions, con contenedores
    temporales de PostgreSQL y Neo4j.
-4. **Programar la pipeline de datos** cada hora (el disparador).
-5. **CD**, cuando la pipeline se lleve a un servidor en la nube: cada
+4. **Una comprobación diaria por horario** (`schedule`) que descargue una
+   hora reciente de GH Archive y compruebe que su formato sigue siendo
+   el esperado.
+5. **Programar la pipeline de datos** cada hora (el disparador).
+6. **CD**, cuando la pipeline se lleve a un servidor en la nube: cada
    cambio que pase las pruebas se instala solo en ese servidor (por
    ejemplo, con una imagen propia de la pipeline).
 

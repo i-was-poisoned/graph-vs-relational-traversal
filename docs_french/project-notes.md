@@ -4179,7 +4179,7 @@ chaîne d'étapes automatique) pour deux choses très différentes :
 | | **Pipeline de données** | **Pipeline de CI/CD** |
 |---|---|---|
 | **Ce qui se déplace** | Les **données** : de GH Archive vers les bases de données | Le **code** : de votre ordinateur vers GitHub, et de là vers l'endroit où il s'exécute |
-| **Quand elle s'exécute** | Selon un **horaire** (par exemple, toutes les heures) | **À chaque modification du code** (à chaque `git push`) |
+| **Quand elle s'exécute** | Quand un ***trigger* la déclenche** : un **horaire** (par exemple, toutes les heures), un **événement** (par exemple, l'arrivée d'un nouveau fichier) ou **à la main**. Dans ce projet, le plan est **par horaire** | En général, **à chaque modification du code** (à chaque `git push`), ce qui est aussi un événement. Elle peut aussi tourner selon un horaire (par exemple, des tests chaque nuit) ou à la main |
 | **À quoi elle sert** | Avoir des données **à jour** | Vérifier automatiquement qu'une modification **n'a rien cassé** (CI), et amener le nouveau code là où il s'exécute (CD) |
 | **Dans ce projet** | `pipeline.py` | N'existe pas encore |
 
@@ -4197,6 +4197,17 @@ sans que personne la lance à la main :
 | **Par horaire** (*schedule*) | À une heure fixe ou à intervalles réguliers | La pipeline de données, toutes les heures (avec le Planificateur de tâches de Windows, ou `cron` sous Linux) |
 | **Par événement** (*event*) | Quand quelque chose de précis se produit | La CI, à chaque `git push` vers GitHub |
 | **Manuel** | Quand quelqu'un l'exécute | `./run.sh scripts/pipeline.py` tapé à la main dans le terminal |
+
+**N'importe quelle pipeline peut utiliser n'importe quel déclencheur.**
+L'horaire n'est pas réservé aux pipelines de données, ni les événements
+au CI/CD. Par exemple, la pipeline de données de ce projet pourrait être
+déclenchée **par un événement**, « quand GH Archive publie une nouvelle
+heure », au lieu de toutes les heures à l'aveugle. Beaucoup de
+plateformes réelles fonctionnent ainsi : une pipeline démarre quand un
+nouveau fichier arrive dans un dossier ou un message dans une file. Ici,
+on a choisi l'**horaire** parce que c'est le plus simple : GH Archive ne
+prévient pas quand il publie, il faudrait donc l'interroger de temps en
+temps, ce qui revient en pratique à un horaire.
 
 ### L'état réel du projet
 
@@ -4299,6 +4310,53 @@ configure avec un fichier texte (au format YAML) dans le dépôt, dans
 publics. Le résultat se voit sur GitHub, sur chaque commit (✅ ou ❌), et on
 peut afficher un **badge** (« CI passing ») dans le README.
 
+### Ce qui déclenche une CI : pas seulement `git push`
+
+On associe souvent la CI à `git push`, parce que c'est son déclencheur le
+plus courant, mais une CI peut s'exécuter avec **n'importe quel**
+déclencheur. Dans GitHub Actions, le fichier du *workflow* indique quand
+il s'exécute, dans une section appelée `on:` (« quand... »), et on peut en
+combiner plusieurs :
+
+```yaml
+on:
+  push:                    # à chaque envoi de code
+  pull_request:            # quand quelqu'un propose une modification à relire
+  schedule:
+    - cron: "0 3 * * *"    # tous les jours à 03:00 UTC
+  workflow_dispatch:       # un bouton sur GitHub pour la lancer à la main
+```
+
+| Déclencheur | Quand il s'exécute |
+|---|---|
+| `push` | À chaque envoi de code. **C'est le plus courant**, d'où l'association habituelle entre CI et `git push` |
+| `pull_request` | Quand quelqu'un propose une modification, pour la relire avant de l'intégrer au code principal |
+| `schedule` | **Selon un horaire**, avec la même syntaxe `cron` que sous Linux |
+| `workflow_dispatch` | **À la main**, avec un bouton « Run workflow » sur GitHub |
+
+**Pourquoi lancer des tests selon un horaire si le code n'a pas changé ?**
+Parce que le code peut se casser **même si personne n'y touche**, quand
+**ce qui l'entoure** change :
+
+- **Les dépendances :** si un paquet publie une nouvelle version avec un
+  bogue, le code cesse de fonctionner sans que personne ne l'ait modifié.
+  Dans ce projet, les versions sont fixées (`==`), donc ce risque est
+  moindre.
+- **Les services externes :** ce projet en a un très clair, **GH Archive**.
+  Si un jour le format de ses fichiers changeait (par exemple, si le
+  `repo` vide trouvé dans 2 événements apparaissait dans tous), la
+  pipeline commencerait à échouer. Un test quotidien qui télécharge une
+  heure récente et vérifie sa forme le détecterait **avant** que les
+  données ne soient abîmées.
+- **Les tests longs :** certains prennent trop de temps pour être lancés à
+  chaque `push`, alors on les garde pour la nuit (les *nightly builds*).
+
+En résumé, la question à laquelle répond chacune :
+
+| CI à chaque `push` | CI selon un horaire |
+|---|---|
+| « **Ma modification** a-t-elle cassé quelque chose ? » | « **Le monde** a-t-il changé et cassé quelque chose ? » |
+
 ### Le plan, étape par étape
 
 1. **Tests unitaires avec `pytest`**, avec les cas difficiles déjà
@@ -4306,9 +4364,12 @@ peut afficher un **badge** (« CI passing ») dans le README.
 2. **CI avec GitHub Actions :** à chaque `push`, exécuter ces tests.
 3. **Test d'intégration** dans GitHub Actions, avec des conteneurs
    temporaires de PostgreSQL et de Neo4j.
-4. **Planifier la pipeline de données** toutes les heures (le
+4. **Une vérification quotidienne planifiée** (`schedule`) qui télécharge
+   une heure récente de GH Archive et vérifie que son format est toujours
+   celui attendu.
+5. **Planifier la pipeline de données** toutes les heures (le
    déclencheur).
-5. **CD**, quand la pipeline sera déplacée sur un serveur dans le cloud :
+6. **CD**, quand la pipeline sera déplacée sur un serveur dans le cloud :
    chaque modification qui passe les tests s'installe toute seule sur ce
    serveur (par exemple, avec une image propre de la pipeline).
 
