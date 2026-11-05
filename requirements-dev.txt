@@ -1,0 +1,9 @@
+# Extra packages for developing the project (not needed to run the pipeline):
+#     python -m pip install -r requirements-dev.txt
+#
+# The first line also installs everything in requirements.txt, so this one
+# command is enough on a new computer and in CI.
+-r requirements.txt
+
+# Runs the unit tests in tests/:  python -m pytest
+pytest==9.2.0

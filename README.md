@@ -190,3 +190,21 @@ Step-by-step installation of PostgreSQL, Neo4j and the virtual environment
 (with checks and troubleshooting) is in
 [docs_english/project-notes.md](docs_english/project-notes.md), section
 "Installing the software".
+
+## Tests
+
+Unit tests for the parts of the pipeline with their own logic (bot filtering,
+empty-repo events, latest names, unique connections, the rolling window, GH
+Archive file names, CSV reading) live in [tests/](tests/). They use tiny
+made-up events in a temporary folder, so they need neither the internet nor
+the databases (and no passwords):
+
+```bash
+source .venv/Scripts/activate
+python -m pip install -r requirements-dev.txt   # pytest, pinned; once
+python -m pytest
+```
+
+Which functions are tested, which aren't and why is explained in
+[docs_english/project-notes.md](docs_english/project-notes.md), section
+"Unit tests with pytest".

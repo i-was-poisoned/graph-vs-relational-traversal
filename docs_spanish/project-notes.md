@@ -4259,3 +4259,221 @@ En resumen, las dos preguntas que responde cada uno:
 Además de comprobar el código, todo esto es una buena señal para quien
 mire el repositorio: un proyecto con pruebas y CI demuestra prácticas
 reales de ingeniería de datos.
+
+## Pruebas unitarias con pytest (paso 1 del plan)
+
+Este es el **paso 1** del plan de la sección anterior: unas pruebas
+unitarias que comprueban, en un par de segundos y sin internet ni bases
+de datos, que las piezas con lógica propia de la pipeline hacen lo que
+deben.
+
+Archivos nuevos:
+
+| Archivo | Para qué sirve |
+|---|---|
+| `tests/test_extract_csv.py` | Pruebas de `extract_csv.py` (bots, repo vacío, nombres, conexiones, CSV) |
+| `tests/test_pipeline.py` | Pruebas de `compute_window` y `hour_file_name` de `pipeline.py` |
+| `tests/test_loaders.py` | Pruebas de cómo leen los CSV `load_neo4j.py` y `load_postgres.py` |
+| `pytest.ini` | La configuración de `pytest`: dónde están las pruebas y dónde los scripts |
+| `requirements-dev.txt` | Los paquetes para **desarrollar** (por ahora, solo `pytest`) |
+
+Las copias comentadas línea por línea de los tres archivos de pruebas
+están en esta misma carpeta (`test_extract_csv.py`, `test_pipeline.py`,
+`test_loaders.py`).
+
+### Qué funciones probar y cuáles no (y por qué)
+
+Una idea muy natural es "probar **todas** las funciones, con **3 pruebas
+cada una**". No es una buena regla, por dos razones:
+
+- **El número de pruebas no se fija de antemano.** Sale del número de
+  **comportamientos distintos** que tiene una función. `is_bot` tiene
+  tres casos que vale la pena comprobar; `extract` tiene seis. Lo
+  importante no es contar pruebas, sino que **cada caso difícil** tenga
+  la suya.
+- **No todas las funciones merecen una prueba unitaria.** Algunas no
+  tienen nada que pueda fallar en silencio, y otras necesitan el mundo
+  exterior, así que se prueban de otra manera.
+
+**Cómo decidir.** Una prueba unitaria compensa cuando la función:
+
+1. **tiene lógica propia**, con decisiones, reglas o casos raros;
+2. **no depende del mundo exterior**: ni internet ni bases de datos;
+3. **puede fallar sin que lo notes**: no da error, pero da un resultado
+   incorrecto.
+
+Con ese criterio, en este proyecto quedan **fuera**:
+
+| Funciones | Por qué no tienen pruebas unitarias |
+|---|---|
+| `parse_args`, `main` | Solo leen opciones y llaman a otras funciones |
+| `check_postgres`, `ensure_databases`, `copy_csv`, `load`, `run_in_batches` | Necesitan una base de datos real. Eso es la **prueba de integración** (paso 3 del plan) |
+| `fetch_gz`, `sync_raw_files` | Necesitan internet. Se pueden probar simulando la red, pero mejor más adelante |
+| `peek_data`, `profile_schema`, `summarize_data` | Son scripts de exploración, no forman parte de la pipeline |
+| `seconds_since`, `pct`, `print_*` | Son tan simples o tan visuales que una prueba no aporta casi nada |
+
+> 🎯 **Idea central:** se prueba lo que tiene **reglas** y puede
+> equivocarse **en silencio**. Una función que se equivoca en silencio es
+> la peor: la pipeline termina "bien", pero los datos están mal.
+
+### Qué se prueba: 24 pruebas
+
+Cada prueba es un caso que **ya conocemos de verdad**, no un número
+elegido al azar.
+
+**`tests/test_extract_csv.py`**, el corazón de la pipeline (13 pruebas):
+
+| Función | Casos |
+|---|---|
+| `is_bot` | `dependabot[bot]` → sí · `pedro` → no · `robot` y `bot-builder` → no (solo cuenta el **final** `[bot]`) |
+| `remember_latest` | Un id nuevo se guarda · un nombre más reciente sustituye al anterior · uno más antiguo **no** lo sustituye (los eventos pueden llegar desordenados) |
+| `extract` | Un evento normal → 1 actor, 1 repo, 1 conexión · un bot se excluye y se cuenta · un `"repo": {}` se salta y aparece el aviso en el log (el fallo real del 22/10) · el mismo par repetido cuenta **una sola vez** · un usuario renombrado se queda con el login más reciente · lee varios archivos, `.json` y `.json.gz` |
+| `write_all` / `write_csv` | Cada CSV tiene su cabecera y las filas **ordenadas por id** |
+
+**`tests/test_pipeline.py`** (6 pruebas):
+
+| Función | Casos |
+|---|---|
+| `compute_window` | El ejemplo del README (a las 11:15 del 22/10 → de 20/10 11:00 a 21/10 11:00, 24 horas) · las horas van seguidas, de una en una · una hora en punto, con otra ventana y otro retraso (6 h y 2 h) |
+| `hour_file_name` | La hora 5 da `...-5.json.gz` y **no** `...-05` (con `-05`, GH Archive daría 404 en todas las horas de 0 a 9) · una hora de dos cifras · la medianoche (`-0`) |
+
+**`tests/test_loaders.py`** (5 pruebas):
+
+| Función | Casos |
+|---|---|
+| `read_csv` (Neo4j) | Convierte los ids en **números** (en Neo4j, `1` y `"1"` son valores distintos y nunca coincidirían) · deja como **texto** las demás columnas, aunque un login sea `12345` · convierte las dos columnas de las conexiones |
+| `count_csv_rows` (PostgreSQL) | No cuenta la cabecera · un CSV con solo la cabecera tiene 0 filas |
+
+### Cómo se escribe una prueba
+
+Una prueba de `pytest` es una **función normal de Python** con dos
+reglas:
+
+- su nombre **empieza por `test_`** (y está en un archivo que también
+  empieza por `test_`). Así `pytest` la encuentra sola, sin tener que
+  registrarla en ningún sitio;
+- dentro usa **`assert`**: "afirmo que esto es verdad". Si lo es, no pasa
+  nada; si no, la prueba **falla**.
+
+```python
+def test_is_bot_true_for_bot_suffix():
+    assert is_bot("dependabot[bot]")
+```
+
+Para `extract` hace falta un archivo de entrada. En lugar de usar los
+datos reales (grandes, y que no están en el repositorio), cada prueba
+crea un archivo **diminuto**, con 2 o 3 eventos inventados que tienen
+solo los campos que lee `extract_csv.py`. Para eso hay dos herramientas
+que `pytest` da gratis, solo con **poner su nombre como parámetro** de la
+prueba (se llaman *fixtures*):
+
+| Fixture | Qué da |
+|---|---|
+| `tmp_path` | Una **carpeta temporal** nueva y vacía para cada prueba. `pytest` la crea antes y nadie tiene que borrarla a mano |
+| `caplog` | Captura lo que se escribe en el **log**, para comprobar que aparece un aviso (lo usa la prueba del `"repo": {}`) |
+
+Así cada prueba tarda milisegundos y funciona igual en tu ordenador que
+en el CI, sin descargar nada.
+
+### Por qué hace falta `pytest.ini`
+
+Los scripts se importan entre sí por su nombre: `pipeline.py` hace
+`import extract_csv`. Eso funciona cuando ejecutas un script, porque
+Python busca los módulos **en la carpeta del script que ejecutas**
+(`scripts/`). Pero las pruebas están en `tests/`, así que Python no los
+encontraría. La línea `pythonpath = scripts` de `pytest.ini` le dice a
+`pytest`: "añade también `scripts/` a los sitios donde buscar". Y
+`testpaths = tests` le dice dónde están las pruebas.
+
+### Por qué un `requirements-dev.txt` aparte
+
+`pytest` se necesita para **desarrollar** el proyecto, no para que la
+pipeline funcione. Por eso no está en `requirements.txt`, sino en un
+archivo aparte. Su primera línea, `-r requirements.txt`, significa
+"instala también todo lo de `requirements.txt`", así que en un ordenador
+nuevo (o en el CI) basta un solo comando:
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
+
+La versión va fijada (`pytest==9.2.0`), como las demás. Al instalarlo,
+`pip freeze` muestra cinco paquetes más (`colorama`, `iniconfig`,
+`packaging`, `pluggy`, `Pygments`): son las **dependencias de `pytest`**,
+y no están fijadas, el mismo caso que `tzdata` y `pytz` explicado en
+"Los disparadores de un CI".
+
+### Cómo ejecutarlas
+
+Las pruebas **no necesitan contraseñas** (no tocan ninguna base de
+datos), así que no hace falta `run.sh`: basta con activar el entorno
+virtual, desde la carpeta del proyecto.
+
+```bash
+source .venv/Scripts/activate
+python -m pip install -r requirements-dev.txt   # solo la primera vez
+python -m pytest
+```
+
+El resultado:
+
+```
+collected 24 items
+
+tests\test_extract_csv.py .............                                  [ 54%]
+tests\test_loaders.py .....                                              [ 75%]
+tests\test_pipeline.py ......                                            [100%]
+
+============================= 24 passed in 1.70s ==============================
+```
+
+Cada punto (`.`) es una prueba que pasa. Con `python -m pytest -v`
+(*verbose*, "detallado") se ve el nombre de cada prueba seguido de
+`PASSED`.
+
+### Qué se ve cuando una prueba falla
+
+Para ver cómo es un fallo, se ejecutó (fuera del repositorio) una prueba
+**equivocada a propósito**: afirmaba que el nombre de la hora 5 era
+`2026-10-20-05.json.gz`, con cero delante. Esto es lo que muestra
+`pytest`:
+
+```
+test_demo.py F                                                           [100%]
+
+================================== FAILURES ===================================
+___________________ test_hour_file_name_has_no_leading_zero ___________________
+
+    def test_hour_file_name_has_no_leading_zero():
+>       assert hour_file_name(datetime(2026, 10, 20, 5, tzinfo=timezone.utc)) == "2026-10-20-05.json.gz"
+E       AssertionError: assert '2026-10-20-5.json.gz' == '2026-10-20-05.json.gz'
+E
+E         - 2026-10-20-05.json.gz
+E         ?            -
+E         + 2026-10-20-5.json.gz
+
+============================== 1 failed in 0.65s ==============================
+```
+
+Cómo leerlo:
+
+- `F` en lugar de `.`: esa prueba **falló**.
+- La línea con `>` es el `assert` que no se cumplió.
+- La línea `E AssertionError` muestra **los dos valores**: a la
+  izquierda, lo que devolvió la función (`...-5...`); a la derecha, lo
+  que la prueba esperaba (`...-05...`).
+- Las líneas `-`, `?`, `+` señalan **la diferencia exacta**: `-` es lo
+  esperado, `+` lo obtenido, y el `?` marca debajo el carácter que
+  cambia, el `0`.
+
+Cuando una prueba falla hay dos posibilidades: **el código tiene un
+fallo**, o **la prueba está mal** (como aquí, a propósito). Las dos
+merecen mirarse: una prueba equivocada da una falsa sensación de
+seguridad.
+
+### Lo que falta
+
+- **Paso 2 del plan:** el archivo `.github/workflows/ci.yml`, para que
+  GitHub Actions ejecute estas 24 pruebas en cada `push`.
+- Más adelante, si hace falta: pruebas de `acquire_lock` (el archivo de
+  bloqueo) y de `fetch_gz` simulando la red.

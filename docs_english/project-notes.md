@@ -4143,3 +4143,215 @@ In short, the question each one answers:
 Besides checking the code, all of this is a good sign for anyone looking
 at the repository: a project with tests and CI demonstrates real
 data-engineering practices.
+
+## Unit tests with pytest (step 1 of the plan)
+
+This is **step 1** of the plan in the previous section: unit tests that
+check, in a couple of seconds and with no internet or databases, that the
+parts of the pipeline with their own logic do what they should.
+
+New files:
+
+| File | What it's for |
+|---|---|
+| `tests/test_extract_csv.py` | Tests for `extract_csv.py` (bots, empty repo, names, connections, CSV) |
+| `tests/test_pipeline.py` | Tests for `compute_window` and `hour_file_name` in `pipeline.py` |
+| `tests/test_loaders.py` | Tests for how `load_neo4j.py` and `load_postgres.py` read the CSV files |
+| `pytest.ini` | `pytest`'s settings: where the tests are and where the scripts are |
+| `requirements-dev.txt` | The packages for **developing** the project (for now, only `pytest`) |
+
+The line-by-line annotated copies of the three test files are in this
+same folder (`test_extract_csv.py`, `test_pipeline.py`, `test_loaders.py`).
+
+### Which functions to test and which not (and why)
+
+A very natural idea is "test **every** function, with **3 tests each**".
+It's not a good rule, for two reasons:
+
+- **The number of tests isn't fixed in advance.** It comes from the
+  number of **distinct behaviours** a function has. `is_bot` has three
+  cases worth checking; `extract` has six. What matters isn't counting
+  tests, but that **every tricky case** has its own.
+- **Not every function deserves a unit test.** Some have nothing that
+  could fail silently, and others need the outside world, so they're
+  tested in a different way.
+
+**How to decide.** A unit test is worth it when the function:
+
+1. **has its own logic**, with decisions, rules or unusual cases;
+2. **doesn't depend on the outside world**: no internet, no databases;
+3. **can fail without you noticing**: it doesn't raise an error, but it
+   gives a wrong result.
+
+With that rule, these are **left out** in this project:
+
+| Functions | Why they don't have unit tests |
+|---|---|
+| `parse_args`, `main` | They only read options and call other functions |
+| `check_postgres`, `ensure_databases`, `copy_csv`, `load`, `run_in_batches` | They need a real database. That's the **integration test** (step 3 of the plan) |
+| `fetch_gz`, `sync_raw_files` | They need the internet. They can be tested by simulating the network, but better later |
+| `peek_data`, `profile_schema`, `summarize_data` | They're exploration scripts, not part of the pipeline |
+| `seconds_since`, `pct`, `print_*` | So simple, or so visual, that a test adds almost nothing |
+
+> 🎯 **Central idea:** you test what has **rules** and can go wrong
+> **silently**. A function that goes wrong silently is the worst kind:
+> the pipeline finishes "fine", but the data is wrong.
+
+### What is tested: 24 tests
+
+Each test is a case we **actually know about**, not a number picked at
+random.
+
+**`tests/test_extract_csv.py`**, the heart of the pipeline (13 tests):
+
+| Function | Cases |
+|---|---|
+| `is_bot` | `dependabot[bot]` → yes · `pedro` → no · `robot` and `bot-builder` → no (only the **ending** `[bot]` counts) |
+| `remember_latest` | A new id is stored · a more recent name replaces the previous one · an older one does **not** replace it (events can arrive out of order) |
+| `extract` | A normal event → 1 actor, 1 repo, 1 connection · a bot is excluded and counted · a `"repo": {}` is skipped and the warning appears in the log (the real failure of 22/10) · the same pair repeated counts **only once** · a renamed user keeps the most recent login · it reads several files, `.json` and `.json.gz` |
+| `write_all` / `write_csv` | Each CSV has its header and its rows **sorted by id** |
+
+**`tests/test_pipeline.py`** (6 tests):
+
+| Function | Cases |
+|---|---|
+| `compute_window` | The README example (at 11:15 on 22/10 → from 20/10 11:00 to 21/10 11:00, 24 hours) · the hours are consecutive, one by one · exactly on the hour, with another window and another lag (6 h and 2 h) |
+| `hour_file_name` | Hour 5 gives `...-5.json.gz` and **not** `...-05` (with `-05`, GH Archive would return 404 for every hour from 0 to 9) · a two-digit hour · midnight (`-0`) |
+
+**`tests/test_loaders.py`** (5 tests):
+
+| Function | Cases |
+|---|---|
+| `read_csv` (Neo4j) | Converts the ids into **numbers** (in Neo4j, `1` and `"1"` are different values and would never match) · leaves the other columns as **text**, even if a login is `12345` · converts both columns of the connections |
+| `count_csv_rows` (PostgreSQL) | Doesn't count the header · a CSV with only the header has 0 rows |
+
+### How a test is written
+
+A `pytest` test is an **ordinary Python function** with two rules:
+
+- its name **starts with `test_`** (and it's in a file whose name also
+  starts with `test_`). That way `pytest` finds it on its own, without
+  registering it anywhere;
+- inside, it uses **`assert`**: "I claim this is true". If it is,
+  nothing happens; if not, the test **fails**.
+
+```python
+def test_is_bot_true_for_bot_suffix():
+    assert is_bot("dependabot[bot]")
+```
+
+`extract` needs an input file. Instead of using the real data (large, and
+not in the repository), each test creates a **tiny** file with 2 or 3
+made-up events that have only the fields `extract_csv.py` reads. For
+that there are two tools that `pytest` gives you for free, just by
+**putting their name as a parameter** of the test (they're called
+*fixtures*):
+
+| Fixture | What it gives |
+|---|---|
+| `tmp_path` | A new, empty **temporary folder** for each test. `pytest` creates it beforehand and nobody has to delete it by hand |
+| `caplog` | Captures what's written to the **log**, to check that a warning appears (used by the `"repo": {}` test) |
+
+So each test takes milliseconds and works the same on your computer as in
+CI, without downloading anything.
+
+### Why `pytest.ini` is needed
+
+The scripts import each other by name: `pipeline.py` does
+`import extract_csv`. That works when you run a script, because Python
+looks for modules **in the folder of the script you run** (`scripts/`).
+But the tests are in `tests/`, so Python wouldn't find them. The line
+`pythonpath = scripts` in `pytest.ini` tells `pytest`: "also add
+`scripts/` to the places to look". And `testpaths = tests` tells it where
+the tests are.
+
+### Why a separate `requirements-dev.txt`
+
+`pytest` is needed to **develop** the project, not for the pipeline to
+work. That's why it isn't in `requirements.txt`, but in a separate file.
+Its first line, `-r requirements.txt`, means "also install everything in
+`requirements.txt`", so on a new computer (or in CI) a single command is
+enough:
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
+
+The version is pinned (`pytest==9.2.0`), like the others. After
+installing it, `pip freeze` shows five more packages (`colorama`,
+`iniconfig`, `packaging`, `pluggy`, `Pygments`): they're **`pytest`'s
+dependencies**, and they aren't pinned, the same case as `tzdata` and
+`pytz` explained in "What triggers a CI: not just `git push`".
+
+### How to run them
+
+The tests **don't need passwords** (they don't touch any database), so
+`run.sh` isn't needed: just activate the virtual environment, from the
+project folder.
+
+```bash
+source .venv/Scripts/activate
+python -m pip install -r requirements-dev.txt   # only the first time
+python -m pytest
+```
+
+The result:
+
+```
+collected 24 items
+
+tests\test_extract_csv.py .............                                  [ 54%]
+tests\test_loaders.py .....                                              [ 75%]
+tests\test_pipeline.py ......                                            [100%]
+
+============================= 24 passed in 1.70s ==============================
+```
+
+Each dot (`.`) is a test that passes. With `python -m pytest -v`
+(*verbose*) you see each test's name followed by `PASSED`.
+
+### What you see when a test fails
+
+To see what a failure looks like, a test that was **wrong on purpose**
+was run (outside the repository): it claimed that the name for hour 5
+was `2026-10-20-05.json.gz`, with a leading zero. This is what `pytest`
+shows:
+
+```
+test_demo.py F                                                           [100%]
+
+================================== FAILURES ===================================
+___________________ test_hour_file_name_has_no_leading_zero ___________________
+
+    def test_hour_file_name_has_no_leading_zero():
+>       assert hour_file_name(datetime(2026, 10, 20, 5, tzinfo=timezone.utc)) == "2026-10-20-05.json.gz"
+E       AssertionError: assert '2026-10-20-5.json.gz' == '2026-10-20-05.json.gz'
+E
+E         - 2026-10-20-05.json.gz
+E         ?            -
+E         + 2026-10-20-5.json.gz
+
+============================== 1 failed in 0.65s ==============================
+```
+
+How to read it:
+
+- `F` instead of `.`: that test **failed**.
+- The line with `>` is the `assert` that didn't hold.
+- The `E AssertionError` line shows **both values**: on the left, what
+  the function returned (`...-5...`); on the right, what the test
+  expected (`...-05...`).
+- The `-`, `?`, `+` lines point to **the exact difference**: `-` is what
+  was expected, `+` what was obtained, and the `?` marks underneath the
+  character that changes, the `0`.
+
+When a test fails there are two possibilities: **the code has a bug**,
+or **the test is wrong** (as here, on purpose). Both deserve a look: a
+wrong test gives a false sense of safety.
+
+### What's left
+
+- **Step 2 of the plan:** the `.github/workflows/ci.yml` file, so that
+  GitHub Actions runs these 24 tests on every `push`.
+- Later, if needed: tests for `acquire_lock` (the lock file) and for
+  `fetch_gz` by simulating the network.

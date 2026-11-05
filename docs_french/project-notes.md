@@ -4417,3 +4417,223 @@ En résumé, la question à laquelle répond chacune :
 En plus de vérifier le code, tout cela est un bon signal pour qui regarde
 le dépôt : un projet avec des tests et une CI démontre de vraies pratiques
 d'ingénierie des données.
+
+## Tests unitaires avec pytest (étape 1 du plan)
+
+Voici l'**étape 1** du plan de la section précédente : des tests
+unitaires qui vérifient, en quelques secondes et sans Internet ni base de
+données, que les éléments de la pipeline qui ont leur propre logique font
+bien ce qu'ils doivent faire.
+
+Nouveaux fichiers :
+
+| Fichier | À quoi il sert |
+|---|---|
+| `tests/test_extract_csv.py` | Tests de `extract_csv.py` (bots, repo vide, noms, connexions, CSV) |
+| `tests/test_pipeline.py` | Tests de `compute_window` et `hour_file_name` de `pipeline.py` |
+| `tests/test_loaders.py` | Tests de la façon dont `load_neo4j.py` et `load_postgres.py` lisent les CSV |
+| `pytest.ini` | La configuration de `pytest` : où sont les tests et où sont les scripts |
+| `requirements-dev.txt` | Les paquets pour **développer** (pour l'instant, seulement `pytest`) |
+
+Les copies annotées ligne par ligne des trois fichiers de tests se
+trouvent dans ce même dossier (`test_extract_csv.py`, `test_pipeline.py`,
+`test_loaders.py`).
+
+### Quelles fonctions tester et lesquelles non (et pourquoi)
+
+Une idée très naturelle est de « tester **toutes** les fonctions, avec
+**3 tests chacune** ». Ce n'est pas une bonne règle, pour deux raisons :
+
+- **Le nombre de tests ne se fixe pas à l'avance.** Il découle du nombre
+  de **comportements différents** d'une fonction. `is_bot` a trois cas
+  qui valent la peine d'être vérifiés ; `extract` en a six. L'important
+  n'est pas de compter les tests, mais que **chaque cas difficile** ait
+  le sien.
+- **Toutes les fonctions ne méritent pas un test unitaire.** Certaines
+  n'ont rien qui puisse échouer en silence, et d'autres ont besoin du
+  monde extérieur ; elles se testent donc autrement.
+
+**Comment décider.** Un test unitaire vaut la peine quand la fonction :
+
+1. **a sa propre logique**, avec des décisions, des règles ou des cas
+   particuliers ;
+2. **ne dépend pas du monde extérieur** : ni Internet ni base de
+   données ;
+3. **peut échouer sans que vous le remarquiez** : elle ne lève pas
+   d'erreur, mais donne un résultat faux.
+
+Selon ce critère, dans ce projet, restent **en dehors** :
+
+| Fonctions | Pourquoi elles n'ont pas de tests unitaires |
+|---|---|
+| `parse_args`, `main` | Elles se contentent de lire des options et d'appeler d'autres fonctions |
+| `check_postgres`, `ensure_databases`, `copy_csv`, `load`, `run_in_batches` | Elles ont besoin d'une vraie base de données. C'est le rôle du **test d'intégration** (étape 3 du plan) |
+| `fetch_gz`, `sync_raw_files` | Elles ont besoin d'Internet. On peut les tester en simulant le réseau, mais plutôt plus tard |
+| `peek_data`, `profile_schema`, `summarize_data` | Ce sont des scripts d'exploration, ils ne font pas partie de la pipeline |
+| `seconds_since`, `pct`, `print_*` | Elles sont si simples ou si visuelles qu'un test n'apporterait presque rien |
+
+> 🎯 **Idée centrale :** on teste ce qui a des **règles** et peut se
+> tromper **en silence**. Une fonction qui se trompe en silence est la
+> pire : la pipeline se termine « bien », mais les données sont fausses.
+
+### Ce qui est testé : 24 tests
+
+Chaque test correspond à un cas que **nous connaissons réellement**, et
+non à un nombre choisi au hasard.
+
+**`tests/test_extract_csv.py`**, le cœur de la pipeline (13 tests) :
+
+| Fonction | Cas |
+|---|---|
+| `is_bot` | `dependabot[bot]` → oui · `pedro` → non · `robot` et `bot-builder` → non (seule la **fin** `[bot]` compte) |
+| `remember_latest` | Un nouvel id est enregistré · un nom plus récent remplace le précédent · un nom plus ancien **ne** le remplace **pas** (les événements peuvent arriver dans le désordre) |
+| `extract` | Un événement normal → 1 acteur, 1 repo, 1 connexion · un bot est exclu et compté · un `"repo": {}` est ignoré et l'avertissement apparaît dans le log (le vrai problème du 22/10) · la même paire répétée compte **une seule fois** · un utilisateur renommé garde le login le plus récent · lit plusieurs fichiers, `.json` et `.json.gz` |
+| `write_all` / `write_csv` | Chaque CSV a son en-tête et ses lignes **triées par id** |
+
+**`tests/test_pipeline.py`** (6 tests) :
+
+| Fonction | Cas |
+|---|---|
+| `compute_window` | L'exemple du README (à 11:15 le 22/10 → du 20/10 11:00 au 21/10 11:00, 24 heures) · les heures se suivent, une par une · une heure pile, avec une autre fenêtre et un autre décalage (6 h et 2 h) |
+| `hour_file_name` | L'heure 5 donne `...-5.json.gz` et **non** `...-05` (avec `-05`, GH Archive renverrait une 404 pour toutes les heures de 0 à 9) · une heure à deux chiffres · minuit (`-0`) |
+
+**`tests/test_loaders.py`** (5 tests) :
+
+| Fonction | Cas |
+|---|---|
+| `read_csv` (Neo4j) | Convertit les ids en **nombres** (dans Neo4j, `1` et `"1"` sont des valeurs différentes et ne correspondraient jamais) · laisse en **texte** les autres colonnes, même si un login vaut `12345` · convertit les deux colonnes des connexions |
+| `count_csv_rows` (PostgreSQL) | Ne compte pas l'en-tête · un CSV avec seulement l'en-tête a 0 ligne |
+
+### Comment s'écrit un test
+
+Un test `pytest` est une **fonction Python ordinaire** avec deux
+règles :
+
+- son nom **commence par `test_`** (et elle se trouve dans un fichier
+  dont le nom commence aussi par `test_`). Ainsi `pytest` la trouve tout
+  seul, sans qu'il faille l'enregistrer quelque part ;
+- à l'intérieur, elle utilise **`assert`** : « j'affirme que ceci est
+  vrai ». Si c'est le cas, rien ne se passe ; sinon, le test **échoue**.
+
+```python
+def test_is_bot_true_for_bot_suffix():
+    assert is_bot("dependabot[bot]")
+```
+
+Pour `extract`, il faut un fichier d'entrée. Au lieu d'utiliser les
+vraies données (volumineuses, et absentes du dépôt), chaque test crée un
+fichier **minuscule**, avec 2 ou 3 événements inventés qui ne contiennent
+que les champs lus par `extract_csv.py`. Pour cela, `pytest` fournit
+gratuitement deux outils, qu'il suffit de **mettre en paramètre** du test
+(on les appelle des *fixtures*) :
+
+| Fixture | Ce qu'elle fournit |
+|---|---|
+| `tmp_path` | Un **dossier temporaire** neuf et vide pour chaque test. `pytest` le crée avant, et personne n'a besoin de le supprimer à la main |
+| `caplog` | Capture ce qui est écrit dans le **log**, pour vérifier qu'un avertissement apparaît (utilisée par le test du `"repo": {}`) |
+
+Ainsi, chaque test prend quelques millisecondes et fonctionne de la même
+façon sur votre ordinateur et dans la CI, sans rien télécharger.
+
+### Pourquoi il faut un `pytest.ini`
+
+Les scripts s'importent entre eux par leur nom : `pipeline.py` fait
+`import extract_csv`. Cela fonctionne quand vous lancez un script, car
+Python cherche les modules **dans le dossier du script exécuté**
+(`scripts/`). Mais les tests sont dans `tests/`, donc Python ne les
+trouverait pas. La ligne `pythonpath = scripts` de `pytest.ini` dit à
+`pytest` : « ajoute aussi `scripts/` aux endroits où chercher ». Et
+`testpaths = tests` lui indique où se trouvent les tests.
+
+### Pourquoi un `requirements-dev.txt` séparé
+
+`pytest` sert à **développer** le projet, pas à faire fonctionner la
+pipeline. C'est pourquoi il n'est pas dans `requirements.txt`, mais dans
+un fichier séparé. Sa première ligne, `-r requirements.txt`, signifie
+« installe aussi tout ce qui est dans `requirements.txt` » ; sur un
+nouvel ordinateur (ou dans la CI), une seule commande suffit donc :
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
+
+La version est fixée (`pytest==9.2.0`), comme les autres. Après
+l'installation, `pip freeze` affiche cinq paquets de plus (`colorama`,
+`iniconfig`, `packaging`, `pluggy`, `Pygments`) : ce sont les
+**dépendances de `pytest`**, et elles ne sont pas fixées, le même cas que
+`tzdata` et `pytz` expliqué dans « Ce qui déclenche une CI : pas
+seulement `git push` ».
+
+### Comment les lancer
+
+Les tests **n'ont pas besoin de mots de passe** (ils ne touchent à
+aucune base de données), donc `run.sh` n'est pas nécessaire : il suffit
+d'activer l'environnement virtuel, depuis le dossier du projet.
+
+```bash
+source .venv/Scripts/activate
+python -m pip install -r requirements-dev.txt   # seulement la première fois
+python -m pytest
+```
+
+Le résultat :
+
+```
+collected 24 items
+
+tests\test_extract_csv.py .............                                  [ 54%]
+tests\test_loaders.py .....                                              [ 75%]
+tests\test_pipeline.py ......                                            [100%]
+
+============================= 24 passed in 1.70s ==============================
+```
+
+Chaque point (`.`) est un test qui passe. Avec `python -m pytest -v`
+(*verbose*, « détaillé »), on voit le nom de chaque test suivi de
+`PASSED`.
+
+### Ce qu'on voit quand un test échoue
+
+Pour voir à quoi ressemble un échec, on a lancé (en dehors du dépôt) un
+test **faux exprès** : il affirmait que le nom de l'heure 5 était
+`2026-10-20-05.json.gz`, avec un zéro devant. Voici ce qu'affiche
+`pytest` :
+
+```
+test_demo.py F                                                           [100%]
+
+================================== FAILURES ===================================
+___________________ test_hour_file_name_has_no_leading_zero ___________________
+
+    def test_hour_file_name_has_no_leading_zero():
+>       assert hour_file_name(datetime(2026, 10, 20, 5, tzinfo=timezone.utc)) == "2026-10-20-05.json.gz"
+E       AssertionError: assert '2026-10-20-5.json.gz' == '2026-10-20-05.json.gz'
+E
+E         - 2026-10-20-05.json.gz
+E         ?            -
+E         + 2026-10-20-5.json.gz
+
+============================== 1 failed in 0.65s ==============================
+```
+
+Comment le lire :
+
+- `F` au lieu de `.` : ce test a **échoué**.
+- La ligne avec `>` est l'`assert` qui n'a pas été vérifié.
+- La ligne `E AssertionError` montre **les deux valeurs** : à gauche, ce
+  que la fonction a renvoyé (`...-5...`) ; à droite, ce que le test
+  attendait (`...-05...`).
+- Les lignes `-`, `?`, `+` indiquent **la différence exacte** : `-` est
+  la valeur attendue, `+` la valeur obtenue, et le `?` marque en dessous
+  le caractère qui change, le `0`.
+
+Quand un test échoue, il y a deux possibilités : **le code a un bogue**,
+ou **le test est faux** (comme ici, exprès). Les deux méritent d'être
+examinées : un test faux donne un faux sentiment de sécurité.
+
+### Ce qui reste à faire
+
+- **Étape 2 du plan :** le fichier `.github/workflows/ci.yml`, pour que
+  GitHub Actions lance ces 24 tests à chaque `push`.
+- Plus tard, si nécessaire : des tests de `acquire_lock` (le fichier de
+  verrou) et de `fetch_gz` en simulant le réseau.
