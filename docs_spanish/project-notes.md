@@ -4535,3 +4535,72 @@ seleccionadas"):
 
 Para quedarse solo con las de `is_bot`, hay que ser más preciso:
 `python -m pytest -k is_bot` ejecuta 3.
+
+### pytest no es lo contrario de "prueba de integración"
+
+Es fácil pensar: "las funciones que se conectan a una base de datos no se
+prueban con pytest, sino con pruebas de integración". La segunda parte es
+correcta; la primera, no. **pytest y "prueba de integración" no son
+alternativas**, porque son cosas de tipos distintos:
+
+| Concepto | Qué es | Ejemplos |
+|---|---|---|
+| **pytest** | La **herramienta** (el *framework*) que encuentra, ejecuta y cuenta las pruebas | `pytest`, `unittest` (otra herramienta de Python) |
+| **Unitaria / integración** | El **tipo de prueba**: qué se comprueba y con qué | Unitaria: `is_bot`, sin nada externo · Integración: cargar datos en un PostgreSQL de verdad |
+
+Lo normal es que **las pruebas de integración también se escriban con
+pytest**: las mismas funciones `test_...`, los mismos `assert` y el
+mismo `python -m pytest`. La diferencia está **dentro** de la prueba, que
+usa una base de datos real:
+
+```python
+def test_load_postgres_counts_match(tmp_path):
+    # 1. preparar unos CSV diminutos en tmp_path
+    # 2. load_postgres.load(tmp_path, database="test_db")  <- PostgreSQL de verdad
+    # 3. assert que la tabla actor tiene 2 filas
+```
+
+Así que la frase correcta es: **una función que se conecta a una base de
+datos no se comprueba con una prueba unitaria, sino con una prueba de
+integración, y las dos se escriben con pytest.**
+
+Una prueba de integración necesita dos cosas más:
+
+- **una base de datos que funcione**: en el CI serán los contenedores
+  temporales de PostgreSQL y Neo4j (paso 3 del plan);
+- **separarla de las unitarias**, porque es más lenta y falla si la base
+  de datos no está encendida. Lo habitual es **marcarlas** (en pytest se
+  llaman *markers*) para poder elegir: `python -m pytest` ejecutaría solo
+  las rápidas, y `python -m pytest -m integration` las de integración.
+
+### La tercera opción: simular con *mocks*
+
+Hay una forma de probar una función de base de datos **sin** base de
+datos: sustituir la conexión real por un objeto falso, un ***mock***
+("imitación"), que responde lo que tú le digas y apunta cómo lo han
+usado. Por ejemplo, `run_in_batches` de `load_neo4j.py` se podría probar
+como prueba unitaria comprobando que, con 12.000 filas, el *mock* recibe
+**3 lotes** (5.000 + 5.000 + 2.000), sin ningún Neo4j encendido. Lo que
+no puede decirte es si la consulta Cypher funciona de verdad: eso solo lo
+confirma la integración.
+
+| Forma de probarla | ¿Base de datos real? | Qué te asegura |
+|---|---|---|
+| Unitaria con *mock* | No | Que **tu lógica** es correcta (los lotes, el orden de las llamadas) |
+| Integración | Sí | Que **todo junto funciona** (la conexión, el SQL/Cypher, los conteos) |
+
+**Una trampa común con los *mocks*.** Cuando la meta es "tener una
+prueba unitaria para **cada** función", los *mocks* parecen la solución:
+con ellos, hasta `check_postgres` puede tener su prueba unitaria. Pero el
+resultado suele ser una prueba que **comprueba el *mock*, no el
+código**: si la función solo llama a la base de datos y la base de datos
+es falsa, la prueba pasa aunque el SQL esté mal escrito. Es otra cara de
+la idea central de "Qué funciones probar y cuáles no": la meta no es
+cubrir todas las funciones, sino que **cada riesgo real** tenga la prueba
+que de verdad lo detecta. Un *mock* es útil cuando hay **lógica propia**
+alrededor de la llamada (como los lotes de `run_in_batches`); si no la
+hay, la prueba que vale es la de integración.
+
+**Para este proyecto:** por ahora, sin *mocks*. Las funciones de base de
+datos son casi solo SQL y Cypher, y eso solo se comprueba de verdad
+contra una base real, en el paso 3.

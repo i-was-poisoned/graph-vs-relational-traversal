@@ -4697,3 +4697,75 @@ les trois de `is_bot`, `test_extract_skips_bots` et aussi
 
 Pour ne garder que ceux de `is_bot`, il faut être plus précis :
 `python -m pytest -k is_bot` en lance 3.
+
+### pytest n'est pas le contraire de « test d'intégration »
+
+Il est facile de penser : « les fonctions qui se connectent à une base de
+données ne se testent pas avec pytest, mais avec des tests
+d'intégration ». La seconde moitié est juste ; la première, non. **pytest
+et « test d'intégration » ne sont pas des alternatives**, car ce sont des
+choses de nature différente :
+
+| Concept | Ce que c'est | Exemples |
+|---|---|---|
+| **pytest** | L'**outil** (le *framework*) qui trouve, lance et compte les tests | `pytest`, `unittest` (un autre outil Python) |
+| **Unitaire / intégration** | Le **type de test** : ce qu'on vérifie, et avec quoi | Unitaire : `is_bot`, rien d'externe · Intégration : charger des données dans un vrai PostgreSQL |
+
+En général, **les tests d'intégration s'écrivent aussi avec pytest** :
+les mêmes fonctions `test_...`, les mêmes `assert` et le même
+`python -m pytest`. La différence est **à l'intérieur** du test, qui
+utilise une vraie base de données :
+
+```python
+def test_load_postgres_counts_match(tmp_path):
+    # 1. préparer quelques CSV minuscules dans tmp_path
+    # 2. load_postgres.load(tmp_path, database="test_db")  <- un vrai PostgreSQL
+    # 3. assert que la table actor a 2 lignes
+```
+
+La phrase correcte est donc : **une fonction qui se connecte à une base
+de données se vérifie avec un test d'intégration plutôt qu'avec un test
+unitaire, et les deux s'écrivent avec pytest.**
+
+Un test d'intégration a besoin de deux choses en plus :
+
+- **une base de données qui fonctionne** : dans la CI, ce seront les
+  conteneurs temporaires de PostgreSQL et Neo4j (étape 3 du plan) ;
+- **être séparé des tests unitaires**, car il est plus lent et échoue si
+  la base de données n'est pas démarrée. L'habitude est de les
+  **marquer** (pytest appelle cela des *markers*) pour pouvoir choisir :
+  `python -m pytest` lancerait seulement les tests rapides, et
+  `python -m pytest -m integration` les tests d'intégration.
+
+### La troisième option : simuler avec des *mocks*
+
+Il existe une façon de tester une fonction de base de données **sans**
+base de données : remplacer la vraie connexion par un faux objet, un
+***mock*** (« imitation »), qui répond ce que vous lui dites et note
+comment on l'a utilisé. Par exemple, `run_in_batches` de `load_neo4j.py`
+pourrait être testée par un test unitaire en vérifiant qu'avec 12 000
+lignes, le *mock* reçoit **3 lots** (5 000 + 5 000 + 2 000), sans aucun
+Neo4j démarré. Ce qu'il ne peut pas vous dire, c'est si la requête
+Cypher fonctionne vraiment : seul le test d'intégration le confirme.
+
+| Façon de la tester | Vraie base de données ? | Ce que cela garantit |
+|---|---|---|
+| Test unitaire avec *mock* | Non | Que **votre logique** est correcte (les lots, l'ordre des appels) |
+| Test d'intégration | Oui | Que **tout fonctionne ensemble** (la connexion, le SQL/Cypher, les comptages) |
+
+**Un piège courant avec les *mocks*.** Quand l'objectif est « un test
+unitaire pour **chaque** fonction », les *mocks* semblent être la
+solution : avec eux, même `check_postgres` peut avoir son test unitaire.
+Mais le résultat est souvent un test qui **vérifie le *mock*, pas le
+code** : si la fonction ne fait qu'appeler la base de données et que la
+base de données est fausse, le test passe même si le SQL est mal écrit.
+C'est une autre facette de l'idée centrale de « Quelles fonctions tester
+et lesquelles non » : le but n'est pas de couvrir toutes les fonctions,
+mais que **chaque risque réel** ait le test qui le détecte vraiment. Un
+*mock* est utile quand il y a une **logique propre** autour de l'appel
+(comme les lots de `run_in_batches`) ; sinon, le test qui compte est le
+test d'intégration.
+
+**Pour ce projet :** pas de *mocks* pour l'instant. Les fonctions de base
+de données sont presque uniquement du SQL et du Cypher, et cela ne se
+vérifie vraiment que contre une vraie base, à l'étape 3.

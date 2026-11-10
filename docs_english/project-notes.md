@@ -4410,3 +4410,73 @@ whole words. `python -m pytest -k bot` runs **5** tests, not 4: the three
 
 To keep only the `is_bot` ones, be more precise:
 `python -m pytest -k is_bot` runs 3.
+
+### pytest isn't the opposite of "integration test"
+
+It's easy to think: "functions that connect to a database aren't tested
+with pytest, but with integration tests". The second half is right; the
+first isn't. **pytest and "integration test" aren't alternatives**,
+because they're different kinds of thing:
+
+| Concept | What it is | Examples |
+|---|---|---|
+| **pytest** | The **tool** (the *framework*) that finds, runs and counts the tests | `pytest`, `unittest` (another Python tool) |
+| **Unit / integration** | The **kind of test**: what is checked, and with what | Unit: `is_bot`, nothing external · Integration: loading data into a real PostgreSQL |
+
+Integration tests are **usually written with pytest too**: the same
+`test_...` functions, the same `assert`s and the same
+`python -m pytest`. The difference is **inside** the test, which uses a
+real database:
+
+```python
+def test_load_postgres_counts_match(tmp_path):
+    # 1. write a few tiny CSV files into tmp_path
+    # 2. load_postgres.load(tmp_path, database="test_db")  <- a real PostgreSQL
+    # 3. assert that the actor table has 2 rows
+```
+
+So the correct sentence is: **a function that connects to a database is
+checked with an integration test rather than a unit test, and both are
+written with pytest.**
+
+An integration test needs two more things:
+
+- **a working database**: in CI, the temporary PostgreSQL and Neo4j
+  containers (step 3 of the plan);
+- **to be kept apart from the unit tests**, because it's slower and fails
+  if the database isn't running. The usual way is to **mark** them (pytest
+  calls these *markers*) so you can choose: `python -m pytest` would run
+  only the fast ones, and `python -m pytest -m integration` the
+  integration ones.
+
+### The third option: simulating with *mocks*
+
+There is a way to test a database function **without** a database:
+replace the real connection with a fake object, a ***mock***, that
+answers whatever you tell it to and records how it was used. For example,
+`run_in_batches` in `load_neo4j.py` could be tested as a unit test by
+checking that, with 12,000 rows, the *mock* receives **3 batches**
+(5,000 + 5,000 + 2,000), with no Neo4j running. What it can't tell you is
+whether the Cypher query really works: only the integration test confirms
+that.
+
+| How it's tested | Real database? | What it guarantees |
+|---|---|---|
+| Unit test with a *mock* | No | That **your logic** is right (the batches, the order of the calls) |
+| Integration test | Yes | That **everything works together** (the connection, the SQL/Cypher, the counts) |
+
+**A common trap with *mocks*.** When the goal is "a unit test for
+**every** function", *mocks* look like the answer: with them, even
+`check_postgres` can have its unit test. But the result is often a test
+that **checks the *mock*, not the code**: if the function only calls the
+database and the database is fake, the test passes even when the SQL is
+wrong. It's another side of the central idea in "Which functions to test
+and which not": the goal isn't to cover every function, but for **every
+real risk** to have the test that actually catches it. A *mock* is useful
+when there's **logic of its own** around the call (like the batches in
+`run_in_batches`); when there isn't, the test worth having is the
+integration test.
+
+**For this project:** no *mocks* for now. The database functions are
+almost entirely SQL and Cypher, and that can only really be checked
+against a real database, in step 3.
