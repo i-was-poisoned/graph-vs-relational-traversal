@@ -147,6 +147,8 @@ advantage from network or hardware differences.
 | Neo4j | 2026.10.0 (Enterprise Edition bundled with Neo4j Desktop, free for local development) | Graph database (managed with Neo4j Desktop and Neo4j Browser) |
 | psycopg | 3.3.6 | Python connector for PostgreSQL |
 | neo4j (Python driver) | 6.4.1 | Python connector for Neo4j |
+| pytest | 9.2.0 | Unit and integration tests (development only, `requirements-dev.txt`) |
+| Docker Desktop | Engine 28.3.3 | Runs the CI's temporary PostgreSQL and Neo4j containers locally (`simulate_ci.sh`) |
 
 Versions are pinned on purpose: this project compares two tools, so every
 condition (database versions, connectors, Python) must stay the same across
@@ -207,9 +209,22 @@ python -m pip install -r requirements-dev.txt   # pytest, pinned; once
 python -m pytest
 ```
 
-GitHub Actions runs the same tests on every push and pull request
-([.github/workflows/ci.yml](.github/workflows/ci.yml)); the badge at the top
-shows the latest result.
+**Integration tests** ([tests/test_integration.py](tests/test_integration.py))
+load the same tiny data set into real PostgreSQL and Neo4j databases and check
+that both hold exactly the same actors, repos and connections, and that a
+two-hop traversal gives the same answer in SQL and Cypher. They are marked
+`integration`, so the plain command above skips them. They never use the
+`gharchive` or `gharchive24h` databases, only a separate test database:
+
+```bash
+./run.sh -m pytest -m integration    # against your local servers (database "gharchivetest")
+./simulate_ci.sh                     # in Docker containers, exactly as in CI
+```
+
+GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs both
+on every push and pull request: the unit tests, and the integration tests
+against temporary PostgreSQL 18.6 and Neo4j 2026.10.0 Community containers.
+The badge at the top shows the latest result.
 
 Which functions are tested, which aren't and why is explained in
 [docs_english/project-notes.md](docs_english/project-notes.md), section

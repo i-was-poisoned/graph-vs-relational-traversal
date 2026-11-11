@@ -5001,3 +5001,238 @@ message.
 > fixée**. Dans un projet qui exige des conditions identiques, tout ce
 > qui peut changer tout seul (les paquets, Python, le système
 > d'exploitation) est fixé.
+
+## Tests d'intégration avec PostgreSQL et Neo4j (étape 3 du plan)
+
+C'est l'**étape 3** du plan : vérifier que les pièces fonctionnent
+**ensemble**, avec de **vraies** bases de données. Les tests unitaires
+vérifient chaque pièce séparément ; ceux-ci vérifient le parcours
+complet : événements → `extract_csv.py` → CSV → `load_postgres.py` et
+`load_neo4j.py` → les deux bases de données.
+
+Fichiers nouveaux ou modifiés :
+
+| Fichier | Ce qui change |
+|---|---|
+| `tests/test_integration.py` | **Nouveau :** les 6 tests d'intégration |
+| `pytest.ini` | Enregistre le marqueur `integration` et fait en sorte que `python -m pytest` ne les lance **pas** par défaut |
+| `.github/workflows/ci.yml` | Un second job, `integration-tests`, avec PostgreSQL et Neo4j dans des conteneurs |
+| `simulate_ci.sh` | **Nouveau :** lance ce même job sur votre ordinateur, avec Docker |
+| `README.md` | pytest et Docker dans le tableau des outils ; comment lancer les tests d'intégration |
+
+Les copies annotées de `test_integration.py` et du `ci.yml` mis à jour
+se trouvent dans ce même dossier.
+
+### Les données de test : 8 événements avec les cas difficiles
+
+Tous les tests utilisent les **mêmes 8 événements inventés**, choisis
+pour que tous les cas difficiles connus apparaissent en même temps :
+
+| Événement | Cas | Ce qui doit se passer |
+|---|---|---|
+| Ana (1) → repo 10 | Normal | Il est chargé |
+| Bea (2) → repo 10 | Partage un repo avec Ana | Il est chargé : Ana et Bea se retrouvent à **2 sauts** |
+| Bea (2) → repo 20, **deux fois** | Paire répétée | **Une seule** connexion |
+| Carl (3) → repo 30, en tant que `carl` puis `carl-dev` | Login renommé | On garde `carl-dev`, le plus récent |
+| `dependabot[bot]` → repo 10 | Bot | Il n'est **pas** chargé |
+| Dan (4) → `"repo": {}` | Repo vide | Il n'est **pas** chargé |
+
+Résultat attendu dans **les deux** bases de données : 3 acteurs (`ana`,
+`bea`, `carl-dev`), 3 repos et 4 connexions.
+
+### Les 6 tests
+
+| Test | Ce qu'il vérifie |
+|---|---|
+| `test_both_loads_match_their_csv_files` | Les deux chargements se terminent bien : chaque table et chaque type de nœud a autant de lignes que son CSV |
+| `test_both_databases_hold_the_same_actors` | PostgreSQL et Neo4j ont **exactement** les mêmes acteurs, avec le même login |
+| `test_both_databases_hold_the_same_repos` | La même chose pour les repos |
+| `test_both_databases_hold_the_same_connections` | La même chose pour les connexions acteur–repo |
+| `test_same_traversal_answer_on_both_sides` | Une requête à **2 sauts** (« qui a travaillé sur un repo où Ana a aussi travaillé ? ») donne **la même réponse** en SQL et en Cypher : Bea |
+| `test_loading_twice_gives_the_same_result` | Charger deux fois ne duplique rien (le chargement est **idempotent**) |
+
+Le cinquième est un **avant-goût du benchmark** : la même question,
+écrite dans les deux langages, sur les deux modèles, doit donner la même
+réponse. Avant de mesurer **combien de temps** prend chacun, il faut être
+sûr que les deux répondent **la même chose**.
+
+### Sécurité : jamais les bases de données du projet
+
+Chaque chargement **vide** la base de données avant de la remplir. C'est
+pourquoi ces tests utilisent **une base de données réservée aux tests**
+de chaque côté, et le code **refuse** d'utiliser `gharchive` ou
+`gharchive24h` (si quelqu'un essayait, le test s'arrêterait sur une
+erreur avant de toucher à quoi que ce soit) :
+
+| Où | PostgreSQL | Neo4j |
+|---|---|---|
+| Sur votre ordinateur | `gharchivetest` (créée si elle n'existe pas) | `gharchivetest` (créée si elle n'existe pas) |
+| Dans la CI | `gharchivetest` (créée) | `neo4j` : Neo4j **Community** n'autorise qu'une seule base de données utilisateur, et elle s'appelle ainsi |
+
+Les noms peuvent être changés avec les variables d'environnement
+`TEST_POSTGRES_DATABASE` et `TEST_NEO4J_DATABASE` ; la CI utilise la
+seconde pour choisir `neo4j`.
+
+### Séparés des tests unitaires : le marqueur `integration`
+
+Les tests d'intégration ont besoin des deux serveurs démarrés et prennent
+plus de temps. C'est pourquoi ils portent un **marqueur** (*marker*),
+`integration`, et `pytest.ini` dit « par défaut, tous **sauf** ceux qui
+sont marqués » :
+
+```
+markers =
+    integration: needs running PostgreSQL and Neo4j servers
+addopts = -m "not integration"
+```
+
+`addopts`, ce sont des options que `pytest` ajoute **toujours**, comme si
+vous les tapiez vous-même. Le résultat :
+
+| Commande | Ce qu'elle lance | Résultat |
+|---|---|---|
+| `python -m pytest` | Seulement les tests unitaires | `24 passed, 6 deselected` |
+| `python -m pytest -m integration` | Seulement les tests d'intégration | `6 passed, 24 deselected` |
+
+La seconde fonctionne parce que, s'il y a deux `-m`, **c'est le dernier
+qui gagne** : celui que vous tapez remplace celui de `addopts`.
+
+Dans `test_integration.py`, la ligne
+`pytestmark = pytest.mark.integration` pose le marqueur sur **tous** les
+tests du fichier d'un coup.
+
+### Charger une fois pour six tests : `scope="module"`
+
+Les fixtures des tests unitaires (`tmp_path`) sont préparées **à nouveau
+pour chaque test**. Ici, ce serait lent : charger les deux bases de
+données six fois. Avec `@pytest.fixture(scope="module")`, la fixture est
+préparée **une seule fois pour tout le fichier**, et les six tests
+reçoivent le même résultat. Il y en a deux :
+
+- `csv_dir` : écrit les 8 événements, lance `extract_csv`, attend que
+  Neo4j soit prêt et crée les bases de données de test si nécessaire ;
+- `loaded` : charge les CSV dans les deux bases de données, une fois.
+
+Cela fonctionne parce que les cinq premiers tests **ne font que lire**.
+Le sixième recharge, mais les mêmes données : le résultat ne change pas.
+
+### Dans la CI : des conteneurs temporaires (*service containers*)
+
+Le job `integration-tests` du `ci.yml` a une partie nouvelle,
+`services:` : des **conteneurs** que GitHub démarre **avant** les étapes
+et détruit à la fin. Il y en a deux :
+
+| Service | Image | Configuration |
+|---|---|---|
+| `postgres` | `postgres:18.6` | `POSTGRES_HOST_AUTH_METHOD: trust` (sans mot de passe) et une vérification de santé (`pg_isready`) |
+| `neo4j` | `neo4j:2026.10.0-community` | `NEO4J_AUTH: none` (sans authentification) |
+
+- **Les mêmes versions que sur votre ordinateur** : PostgreSQL 18.6 et
+  Neo4j 2026.10.0. L'image, comme les paquets, est **fixée** avec sa
+  version exacte (on sait déjà ce qui arrive avec `latest`).
+- **Sans mots de passe** : les conteneurs n'existent qu'à l'intérieur de
+  la machine temporaire de la CI, personne d'autre ne peut les
+  atteindre, et ils sont détruits à la fin. Ainsi, aucun mot de passe
+  n'a besoin d'être écrit dans `ci.yml`. La variable `NEO4J_PASSWORD`
+  existe toujours parce que `load_neo4j.py` la lit, mais sa valeur est
+  ignorée.
+- **Attendre qu'ils soient prêts** : PostgreSQL a sa vérification de
+  santé (*health check*), et GitHub ne commence pas les étapes tant
+  qu'il ne répond pas. Neo4j met quelques secondes de plus à accepter
+  les connexions, donc c'est le test lui-même qui l'attend
+  (`wait_for_neo4j`, jusqu'à 90 secondes).
+- Les `ports:` (`5432:5432`, `7687:7687`) font répondre les conteneurs
+  sur `localhost`, sur les mêmes ports que sur votre ordinateur : c'est
+  pourquoi les chargeurs fonctionnent **sans changer une seule ligne**.
+
+### Docker : un outil clé du projet
+
+Jusqu'ici, Docker n'apparaissait dans ces notes que comme concept
+(« Images et conteneurs (Docker) »). À cette étape, il devient un
+**outil du projet**, pour deux raisons :
+
+1. **La CI fonctionne avec Docker.** Les `services:` de GitHub Actions
+   sont des conteneurs Docker, créés à partir d'images de Docker Hub.
+   Sans Docker, il n'y aurait ni PostgreSQL ni Neo4j dans la CI.
+2. **Il permet de reproduire la CI sur votre ordinateur.** Un workflow
+   ne s'exécute vraiment que sur GitHub, mais avec **Docker Desktop**
+   (moteur 28.3.3) on peut démarrer **les mêmes conteneurs**, avec les
+   mêmes versions, et lancer les tests avant de faire `push`. On découvre
+   ainsi les erreurs en une minute, au lieu d'attendre de voir un ❌ dans
+   l'onglet Actions.
+
+C'est le rôle de `simulate_ci.sh`, à côté de `run.sh` :
+
+```bash
+./simulate_ci.sh
+```
+
+Avec Docker Desktop ouvert (« Engine running », en bas à gauche), il
+fait ceci :
+
+1. il démarre Neo4j 2026.10.0 Community, sans authentification ;
+2. il démarre PostgreSQL 18.6, sans mot de passe, **dans le même réseau
+   privé** que Neo4j ;
+3. il attend que PostgreSQL réponde ;
+4. il démarre Python 3.14.0, lui aussi dans ce réseau, y copie
+   `scripts/`, `tests/`, `pytest.ini` et les `requirements`, les installe
+   et lance `python -m pytest -v -m integration` ;
+5. à la fin, il **supprime** les conteneurs des bases de données.
+
+**Il ne touche pas à vos bases de données.** Votre PostgreSQL et votre
+Neo4j occupent déjà les ports 5432 et 7687 de votre ordinateur. Les
+conteneurs n'ouvrent aucun port sur votre ordinateur : ils partagent un
+**réseau privé** entre eux (celui du conteneur Neo4j), où `localhost`
+désigne ce réseau et non votre ordinateur. C'est pourquoi ils n'entrent
+pas en conflit, et vos données ne sont pas affectées.
+
+La première fois, il télécharge les trois images (environ 1,9 Go au
+total : `neo4j:2026.10.0-community` 1,06 Go, `postgres:18.6` 644 Mo,
+`python:3.14.0-slim` 177 Mo). Elles restent enregistrées, donc les fois
+suivantes cela prend quelques secondes. On peut les voir, et les
+supprimer, dans Docker Desktop → **Images**.
+
+**Résultat réel** (11/11/2026, avant le premier `push`) :
+
+```
+tests/test_integration.py::test_both_loads_match_their_csv_files PASSED  [ 16%]
+tests/test_integration.py::test_both_databases_hold_the_same_actors PASSED [ 33%]
+tests/test_integration.py::test_both_databases_hold_the_same_repos PASSED [ 50%]
+tests/test_integration.py::test_both_databases_hold_the_same_connections PASSED [ 66%]
+tests/test_integration.py::test_same_traversal_answer_on_both_sides PASSED [ 83%]
+tests/test_integration.py::test_loading_twice_gives_the_same_result PASSED [100%]
+
+======================= 6 passed, 24 deselected in 5.18s =======================
+```
+
+> 🎯 **Idée centrale :** Docker permet d'avoir **le même
+> environnement** partout : sur GitHub et sur votre ordinateur, les mêmes
+> versions de PostgreSQL, Neo4j et Python. C'est la même idée que fixer
+> les versions avec `==`, appliquée à des programmes entiers.
+
+### Comment lancer les tests d'intégration
+
+| Où | Commande | Ce qu'il faut |
+|---|---|---|
+| Dans des conteneurs, comme la CI | `./simulate_ci.sh` | Docker Desktop ouvert |
+| Contre vos serveurs | `./run.sh -m pytest -m integration` | PostgreSQL et Neo4j démarrés ; `secrets.sh` (crée `gharchivetest` des deux côtés si elle n'existe pas) |
+| Sur GitHub | `git push` | Rien : la CI s'en charge toute seule |
+
+Avec `run.sh`, les mots de passe sont nécessaires, car vos serveurs, eux,
+ont une authentification ; `run.sh -m pytest` équivaut à
+`python -m pytest`, avec le `.venv` et `secrets.sh` chargés.
+
+### Ce qu'on verra dans l'onglet Actions
+
+Le workflow « CI » a désormais **deux jobs**, `unit-tests` et
+`integration-tests`. Ils s'exécutent **en même temps**, chacun sur sa
+propre machine, et l'exécution n'est en ✅ que si **les deux** se
+terminent bien. Sur la page de l'exécution, ils apparaissent comme deux
+cases ; sur celle du commit, comme **2 checks**.
+
+### Ce qui reste à faire
+
+- **Étape 4 :** la vérification quotidienne planifiée (`schedule`) du
+  format de GH Archive.
+- **Étape 5 :** planifier la pipeline de données pour qu'elle s'exécute
+  toute seule chaque heure.

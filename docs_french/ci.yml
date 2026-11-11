@@ -159,3 +159,116 @@ jobs:
       # No databases or passwords needed: the unit tests use tiny made-up files.
       - name: Run the unit tests
         run: python -m pytest -v
+
+  # =====================================================================
+  # SECOND JOB : les tests d'INTÉGRATION (étape 3 du plan).
+  #
+  # Les deux jobs (unit-tests et integration-tests) s'exécutent EN MÊME
+  # TEMPS, chacun sur sa propre machine. L'exécution n'est en ✅ que si
+  # LES DEUX se terminent bien ; sur la page du commit, ils apparaissent
+  # comme 2 « checks ».
+  # =====================================================================
+  integration-tests:
+    # Même système fixé que pour les tests unitaires (voir plus haut
+    # pourquoi pas ubuntu-latest).
+    runs-on: ubuntu-24.04
+    # Un peu plus de marge que les tests unitaires : il faut télécharger
+    # et démarrer deux serveurs de bases de données.
+    timeout-minutes: 15
+
+    # -----------------------------------------------------------------
+    # services : des CONTENEURS DE SERVICE (service containers). Ce sont
+    # des conteneurs Docker que GitHub démarre AVANT les étapes, à côté
+    # de la machine, et qu'il DÉTRUIT à la fin. Ici, deux serveurs de
+    # bases de données temporaires : un PostgreSQL et un Neo4j.
+    # -----------------------------------------------------------------
+    # Temporary database servers, started before the steps and destroyed at the end.
+    # Same versions as the project. Authentication is off: they only exist inside
+    # this run's machine, so no password is needed anywhere.
+    services:
+      # postgres : le nom qu'on donne à ce service (on le choisit).
+      postgres:
+        # image : l'image Docker Hub à partir de laquelle créer le
+        # conteneur, avec sa version FIXÉE (18.6, la même que sur votre
+        # ordinateur). Comme `==` pour les paquets : jamais `latest`.
+        image: postgres:18.6
+        # env : des variables d'environnement pour le conteneur.
+        # POSTGRES_HOST_AUTH_METHOD: trust = PostgreSQL accepte les
+        # connexions SANS mot de passe. Sans danger ici : le serveur
+        # n'existe que dans cette machine temporaire, personne d'autre ne
+        # peut l'atteindre, et il est détruit à la fin. Ainsi, aucun mot
+        # de passe n'est écrit dans ce fichier.
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        # ports : "port de la machine:port du conteneur". Le serveur répond
+        # donc sur localhost:5432, comme sur votre ordinateur : les
+        # chargeurs fonctionnent sans changer une seule ligne.
+        ports:
+          - 5432:5432
+        # options : des options supplémentaires pour Docker. Ici, une
+        # VÉRIFICATION DE SANTÉ (health check) : toutes les 5 s, Docker
+        # lance `pg_isready` dans le conteneur, jusqu'à 10 fois. GitHub
+        # attend que PostgreSQL soit « en bonne santé » avant de commencer
+        # les étapes.
+        #
+        # `>-` est une syntaxe YAML : le texte sur plusieurs lignes qui
+        # suit est REPLIÉ en une seule ligne (les retours à la ligne
+        # deviennent des espaces), sans retour à la ligne final. Cela
+        # permet d'écrire une longue option sur plusieurs lignes lisibles.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      neo4j:
+        # Neo4j 2026.10.0 édition Community (gratuite, libre) : la même
+        # version que sur votre ordinateur. L'édition Enterprise demande
+        # une licence ; Community suffit pour les tests.
+        image: neo4j:2026.10.0-community
+        # NEO4J_AUTH: none = authentification désactivée, pour la même
+        # raison que `trust` plus haut : pas de mot de passe à écrire.
+        env:
+          NEO4J_AUTH: none
+        # 7687 : le port du protocole Bolt, celui qu'utilise le pilote
+        # Python (neo4j://localhost:7687).
+        ports:
+          - 7687:7687
+        # Pas de vérification de santé ici : c'est le test lui-même qui
+        # attend Neo4j (wait_for_neo4j, jusqu'à 90 secondes).
+
+    # -----------------------------------------------------------------
+    # env au niveau du JOB : ces variables d'environnement existent dans
+    # TOUTES les étapes de ce job (comme si secrets.sh était chargé).
+    # -----------------------------------------------------------------
+    env:
+      # NEO4J_PASSWORD doit EXISTER, car load_neo4j.py fait
+      # os.environ["NEO4J_PASSWORD"] (sinon : KeyError). Mais avec
+      # NEO4J_AUTH: none, sa valeur est ignorée : ce n'est pas un vrai
+      # mot de passe, et son texte le dit.
+      # The loaders read this variable; with authentication off its value is ignored.
+      NEO4J_PASSWORD: unused-authentication-is-off
+      # Neo4j Community n'autorise qu'UNE base de données utilisateur,
+      # nommée "neo4j" (pas de CREATE DATABASE). test_integration.py lit
+      # cette variable pour l'utiliser au lieu de "gharchivetest".
+      # Neo4j Community allows only one user database, "neo4j".
+      TEST_NEO4J_DATABASE: neo4j
+
+    # Les quatre étapes sont les mêmes que pour les tests unitaires
+    # (expliquées plus haut), sauf la dernière.
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14.0"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      # `-m integration` : SEULEMENT les tests marqués « integration »
+      # (il remplace le `-m "not integration"` de pytest.ini : s'il y a
+      # deux -m, c'est le dernier qui gagne).
+      - name: Run the integration tests
+        run: python -m pytest -v -m integration

@@ -148,3 +148,107 @@ jobs:
       # No databases or passwords needed: the unit tests use tiny made-up files.
       - name: Run the unit tests
         run: python -m pytest -v
+
+  # ---------------------------------------------------------------------
+  # integration-tests: a SECOND job. Jobs in the same workflow run AT THE
+  # SAME TIME (in parallel), each on its OWN new machine — so this one
+  # repeats checkout, Python and pip install; it shares nothing with
+  # unit-tests. The run only turns green if BOTH jobs succeed.
+  # ---------------------------------------------------------------------
+  integration-tests:
+    runs-on: ubuntu-24.04
+    # A bit more room than the unit tests: the database containers have to
+    # be downloaded and started first.
+    timeout-minutes: 15
+
+    # -------------------------------------------------------------------
+    # services: SERVICE CONTAINERS. Docker containers that GitHub starts
+    # BEFORE the steps and destroys at the end of the job. Each one is
+    # created from an IMAGE on Docker Hub (see "Images and containers
+    # (Docker)" in the notes).
+    #
+    # Images are PINNED to an exact version, like packages with `==` and
+    # the runner with ubuntu-24.04: the same PostgreSQL 18.6 and Neo4j
+    # 2026.10.0 as on your computer. (We've seen what `latest` can do.)
+    # -------------------------------------------------------------------
+    # Temporary database servers, started before the steps and destroyed at the end.
+    # Same versions as the project. Authentication is off: they only exist inside
+    # this run's machine, so no password is needed anywhere.
+    services:
+      # The name of the service (our choice).
+      postgres:
+        image: postgres:18.6
+        # env: environment variables passed INTO the container, which the
+        # image reads when it starts.
+        env:
+          # trust = accept connections without asking for a password. Fine
+          # here: the container lives only inside this temporary machine,
+          # nobody else can reach it, and it's destroyed at the end. That's
+          # why ci.yml contains no password at all.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        # ports: "machine port:container port". The container's 5432 is
+        # made available as localhost:5432 on the runner — exactly where
+        # load_postgres.py looks, so the loader runs unchanged.
+        ports:
+          - 5432:5432
+        # options: extra options for `docker run`. Here a HEALTH CHECK:
+        # every 5 s, run `pg_isready` inside the container; it's "healthy"
+        # once PostgreSQL accepts connections (up to 10 tries). GitHub
+        # waits for healthy services before starting the steps.
+        # `>-` is YAML for "the following indented lines are ONE string,
+        # joined with spaces" (the `-` drops the final newline): a long
+        # command written over several lines for readability.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      neo4j:
+        # Community = the free edition (Enterprise needs a licence). It
+        # allows only one user database, "neo4j" — see the env below.
+        image: neo4j:2026.10.0-community
+        env:
+          # none = authentication switched off, for the same reason as
+          # PostgreSQL's trust. Neo4j has no health check here: the test
+          # itself waits for it (wait_for_neo4j, up to 90 s).
+          NEO4J_AUTH: none
+        # Bolt, the port the Python driver uses: localhost:7687, as in
+        # load_neo4j.py.
+        ports:
+          - 7687:7687
+
+    # -------------------------------------------------------------------
+    # env at JOB level: environment variables for EVERY step of this job
+    # (and the programs they start, like pytest).
+    # -------------------------------------------------------------------
+    env:
+      # load_neo4j.py reads os.environ["NEO4J_PASSWORD"] and would stop
+      # with an error if it were missing. With authentication off the
+      # server ignores it, so any text will do — and it's clearly not a
+      # real password.
+      # The loaders read this variable; with authentication off its value is ignored.
+      NEO4J_PASSWORD: unused-authentication-is-off
+      # test_integration.py uses "gharchivetest" by default, which would
+      # need CREATE DATABASE (Enterprise only). Here: the built-in "neo4j".
+      # Neo4j Community allows only one user database, "neo4j".
+      TEST_NEO4J_DATABASE: neo4j
+
+    # The same first three steps as unit-tests (new machine, so they're
+    # needed again), then the integration tests instead of the unit tests.
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14.0"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      # `-m integration` replaces pytest.ini's `-m "not integration"`
+      # (when there are two -m, the last one wins): ONLY the 6 integration
+      # tests run, against the two service containers above.
+      - name: Run the integration tests
+        run: python -m pytest -v -m integration
