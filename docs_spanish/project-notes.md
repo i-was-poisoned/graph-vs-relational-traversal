@@ -4604,3 +4604,158 @@ hay, la prueba que vale es la de integración.
 **Para este proyecto:** por ahora, sin *mocks*. Las funciones de base de
 datos son casi solo SQL y Cypher, y eso solo se comprueba de verdad
 contra una base real, en el paso 3.
+
+## CI con GitHub Actions (paso 2 del plan)
+
+Este es el **paso 2** del plan: que GitHub ejecute las 24 pruebas
+unitarias **él solo**, en sus máquinas, cada vez que se sube código.
+
+Archivos nuevos o cambiados:
+
+| Archivo | Para qué sirve |
+|---|---|
+| `.github/workflows/ci.yml` | El *workflow*: las instrucciones que sigue GitHub Actions |
+| `README.md` | Una **insignia** (*badge*) arriba del todo, que muestra si la última ejecución pasó o falló, y una frase en la sección "Tests" |
+
+La copia comentada línea por línea de `ci.yml` está en esta misma
+carpeta (`ci.yml`). Explica también el formato YAML.
+
+### Por qué en `.github/workflows/`
+
+GitHub busca workflows **solo** en esa carpeta, con ese nombre exacto (y
+el punto delante de `.github`). Cualquier archivo `.yml` que haya dentro
+es un workflow: no hay que activarlo en ninguna parte. Es lo que se
+explicó al ver la página "Get started with GitHub Actions": no hace falta
+configurar nada ahí, basta con que el archivo exista en el repositorio.
+
+### El workflow, por partes
+
+| Parte | Qué dice | Por qué |
+|---|---|---|
+| `name: CI` | El nombre del workflow | Es el que aparece en la pestaña Actions y en la insignia |
+| `on:` | `push`, `pull_request`, `workflow_dispatch` | Cada `push`, cada propuesta de cambio, y un botón para lanzarlo a mano. `schedule` **no** está: la comprobación diaria será el paso 4, en otro workflow |
+| `permissions:` | `contents: read` | La ejecución solo puede **leer** el código. Es el principio del **mínimo permiso necesario** |
+| `runs-on:` | `ubuntu-latest` | Una máquina virtual Linux **nueva y vacía** en cada ejecución (el ***runner***), que se destruye al terminar |
+| `timeout-minutes:` | `10` | Las pruebas tardan segundos: si tarda 10 minutos, algo se ha colgado. Sin esto, el límite es de 6 horas |
+| `steps:` | 4 pasos, en orden | Si uno falla, los siguientes no se ejecutan |
+
+Los **4 pasos** son exactamente lo que harías tú en un ordenador nuevo:
+
+| Paso | Tipo | Qué hace |
+|---|---|---|
+| 1. Check out the code | `uses: actions/checkout@v5` | Copia el repositorio en la máquina (como un `git clone`) |
+| 2. Set up Python | `uses: actions/setup-python@v6` | Instala Python 3.14.0, la misma versión que usa el proyecto |
+| 3. Install dependencies | `run: python -m pip install -r requirements-dev.txt` | Instala `pytest` y los paquetes del proyecto |
+| 4. Run the unit tests | `run: python -m pytest -v` | Ejecuta las 24 pruebas |
+
+Dos tipos de paso:
+
+- **`uses:`** usa una **acción**: una pieza ya hecha y publicada en
+  GitHub por otros, como importar un paquete. `actions/checkout` y
+  `actions/setup-python` son las oficiales de GitHub. El `@v5` es su
+  **versión fijada**, la misma idea que el `==` de `requirements.txt`.
+- **`run:`** ejecuta un **comando** en el terminal de la máquina, como si
+  lo escribieras tú en Git Bash.
+
+Fíjate en lo que **no** hace falta: ni `.venv` (la máquina entera ya es
+un entorno aislado que solo existe para esta ejecución), ni `run.sh`, ni
+`secrets.sh` (las pruebas unitarias no usan contraseñas). Y en el paso 3
+se ve en la práctica lo explicado en "Las dependencias": como la máquina
+es nueva, **en cada ejecución** se descargan todos los paquetes de PyPI.
+
+### Comprobado antes de subirlo
+
+Un workflow solo se puede ejecutar de verdad en GitHub. Pero sí se puede
+imitar lo que hará: se creó un entorno virtual **nuevo y vacío**, se
+instaló `requirements-dev.txt` y se ejecutó `python -m pytest`. Resultado:
+`24 passed`. La única diferencia con GitHub es el sistema operativo
+(Windows aquí, Linux allí); las pruebas no dependen de él.
+
+### Cómo verlo en GitHub, en la pestaña Actions
+
+1. **Sube el código** con `git push`. El `push` es el disparador: en
+   cuanto llega a GitHub, el workflow empieza.
+2. **Abre el repositorio en GitHub y entra en la pestaña "Actions"**. En
+   lugar de la página "Get started with GitHub Actions" verás:
+   - a la **izquierda**, la lista de workflows: "CI";
+   - en el **centro**, una línea por ejecución, con el **mensaje del
+     commit** que la disparó, la rama (`main`) y cuánto hace.
+3. **El icono** de cada ejecución dice cómo va:
+
+   | Icono | Significado |
+   |---|---|
+   | 🟡 círculo amarillo (girando) | En cola o ejecutándose |
+   | ✅ verde | Todos los pasos terminaron bien: las 24 pruebas pasan |
+   | ❌ rojo | Algún paso falló |
+
+4. **Haz clic en la ejecución** y luego en el trabajo **`unit-tests`**
+   (a la izquierda). Verás los pasos, cada uno con su icono y su
+   duración. Haz clic en **"Run the unit tests"** para desplegarlo: es
+   la misma salida de `pytest -v` que ves en tu ordenador, con cada
+   prueba y su `PASSED`.
+5. **El botón "Run workflow"** (arriba a la derecha, al elegir "CI" en la
+   lista de la izquierda) lo lanza a mano, sin hacer `push`: es el
+   disparador `workflow_dispatch`.
+6. **La insignia del README**, en la página principal del repositorio,
+   dice "CI | passing" en verde o "CI | failing" en rojo, según la última
+   ejecución.
+
+**Si sale en rojo:** GitHub te envía un correo. En la ejecución, el paso
+que falló tiene una ❌; al desplegarlo se ve el error, con el mismo
+formato explicado en "Qué se ve cuando una prueba falla". Después se
+corrige en tu ordenador, se comprueba con `python -m pytest` y se vuelve
+a hacer `push`: eso dispara una ejecución nueva.
+
+### Coste
+
+**Gratis.** En los repositorios **públicos**, GitHub Actions no tiene
+límite de minutos en sus máquinas estándar (como `ubuntu-latest`). Cada
+ejecución de este workflow dura menos de un minuto.
+
+### Lo que falta
+
+- **Paso 3:** la prueba de integración, con PostgreSQL y Neo4j en
+  contenedores temporales, como otro trabajo (*job*) del workflow.
+- **Paso 4:** la comprobación diaria por horario (`schedule`) del formato
+  de GH Archive.
+- **Paso 5:** programar la pipeline de datos para que se ejecute sola
+  cada hora.
+
+### Para qué sirve `ci.yml` y por qué es importante
+
+Las 24 pruebas ya existían antes de `ci.yml`. Lo que añade este archivo
+no son pruebas nuevas, sino **la garantía de que se ejecutan**:
+
+| | Sin `ci.yml` | Con `ci.yml` |
+|---|---|---|
+| **Cuándo se ejecutan las pruebas** | Solo si te acuerdas de escribir `python -m pytest` | **Siempre**, solas, en cada `push` |
+| **Dónde** | En tu ordenador, con todo lo que tenga instalado | En una **máquina limpia**, nueva en cada ejecución |
+| **Quién se entera de un fallo** | Nadie, si no las ejecutaste | Tú (GitHub te envía un correo) y cualquiera que vea el ❌ |
+| **Qué queda registrado** | Nada | Cada commit, con su ✅ o ❌, en la pestaña Actions |
+
+Por qué importa cada punto:
+
+1. **No depende de tu memoria.** Si un día cambias `extract_csv.py` y se
+   te olvida ejecutar las pruebas, un fallo puede llegar a GitHub, y de
+   ahí a los datos de `gharchive24h`, sin que nadie lo note. Con
+   `ci.yml`, el `push` dispara las pruebas aunque tú no lo hagas.
+2. **Detecta lo que tu ordenador esconde.** Tu ordenador tiene cosas que
+   el repositorio no tiene: paquetes instalados a mano, archivos en
+   `data/`, el `.venv`. Una prueba puede pasar en tu ordenador solo
+   gracias a ellas. La máquina del CI empieza **vacía** y solo tiene lo
+   que está en el repositorio, así que detecta, por ejemplo, un paquete
+   que falta en `requirements.txt` o un archivo que solo existe en tu
+   disco. Es la diferencia entre "funciona en mi ordenador" y "funciona".
+3. **Deja constancia.** Cada commit queda marcado con ✅ o ❌. Si algo se
+   rompe, se puede ver en la lista de ejecuciones **en qué commit**
+   empezó a fallar. Y la insignia del README muestra a quien visite el
+   repositorio que el proyecto tiene pruebas y que pasan.
+4. **Es la base de lo que viene.** La prueba de integración (paso 3) y la
+   comprobación diaria del formato de GH Archive (paso 4) se añadirán a
+   este mismo mecanismo: más trabajos (*jobs*) o más workflows en
+   `.github/workflows/`, con la misma lógica de disparadores y pasos.
+
+> 🎯 **Idea central:** las pruebas detectan los fallos; `ci.yml` asegura
+> que las pruebas **se ejecuten siempre**, en un entorno limpio, sin
+> depender de que alguien se acuerde. Una prueba que nadie ejecuta no
+> protege nada.

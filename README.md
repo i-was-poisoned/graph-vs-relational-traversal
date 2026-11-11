@@ -1,5 +1,7 @@
 # graph-vs-relational-traversal
 
+[![CI](https://github.com/i-was-poisoned/graph-vs-relational-traversal/actions/workflows/ci.yml/badge.svg)](https://github.com/i-was-poisoned/graph-vs-relational-traversal/actions/workflows/ci.yml)
+
 At what traversal depth, and at what data volume, does a property graph model outperform an equivalent normalized relational model for the same query?
 
 ## Two processes, four databases
@@ -204,6 +206,10 @@ source .venv/Scripts/activate
 python -m pip install -r requirements-dev.txt   # pytest, pinned; once
 python -m pytest
 ```
+
+GitHub Actions runs the same tests on every push and pull request
+([.github/workflows/ci.yml](.github/workflows/ci.yml)); the badge at the top
+shows the latest result.
 
 Which functions are tested, which aren't and why is explained in
 [docs_english/project-notes.md](docs_english/project-notes.md), section

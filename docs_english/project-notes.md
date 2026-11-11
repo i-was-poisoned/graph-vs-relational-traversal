@@ -4480,3 +4480,157 @@ integration test.
 **For this project:** no *mocks* for now. The database functions are
 almost entirely SQL and Cypher, and that can only really be checked
 against a real database, in step 3.
+
+## CI with GitHub Actions (step 2 of the plan)
+
+This is **step 2** of the plan: GitHub runs the 24 unit tests **on its
+own**, on its machines, every time code is pushed.
+
+New or changed files:
+
+| File | What it's for |
+|---|---|
+| `.github/workflows/ci.yml` | The *workflow*: the instructions GitHub Actions follows |
+| `README.md` | A **badge** at the very top, showing whether the latest run passed or failed, and a sentence in the "Tests" section |
+
+The line-by-line annotated copy of `ci.yml` is in this same folder
+(`ci.yml`). It also explains the YAML format.
+
+### Why in `.github/workflows/`
+
+GitHub looks for workflows **only** in that folder, with that exact name
+(including the dot in front of `.github`). Any `.yml` file inside it is a
+workflow: there's nothing to switch on anywhere. That's what was
+explained when looking at the "Get started with GitHub Actions" page:
+there's nothing to configure there, the file just has to exist in the
+repository.
+
+### The workflow, part by part
+
+| Part | What it says | Why |
+|---|---|---|
+| `name: CI` | The workflow's name | It's the one shown in the Actions tab and on the badge |
+| `on:` | `push`, `pull_request`, `workflow_dispatch` | Every `push`, every proposed change, and a button to start it by hand. `schedule` is **not** there: the daily check will be step 4, in another workflow |
+| `permissions:` | `contents: read` | The run can only **read** the code. This is the **principle of least privilege** |
+| `runs-on:` | `ubuntu-latest` | A **new, empty** Linux virtual machine for every run (the ***runner***), destroyed at the end |
+| `timeout-minutes:` | `10` | The tests take seconds: if it takes 10 minutes, something is stuck. Without this, the limit is 6 hours |
+| `steps:` | 4 steps, in order | If one fails, the following ones don't run |
+
+The **4 steps** are exactly what you'd do on a new computer:
+
+| Step | Type | What it does |
+|---|---|---|
+| 1. Check out the code | `uses: actions/checkout@v5` | Copies the repository onto the machine (like a `git clone`) |
+| 2. Set up Python | `uses: actions/setup-python@v6` | Installs Python 3.14.0, the same version the project uses |
+| 3. Install dependencies | `run: python -m pip install -r requirements-dev.txt` | Installs `pytest` and the project's packages |
+| 4. Run the unit tests | `run: python -m pytest -v` | Runs the 24 tests |
+
+Two kinds of step:
+
+- **`uses:`** uses an **action**: a ready-made piece published on GitHub
+  by others, like importing a package. `actions/checkout` and
+  `actions/setup-python` are GitHub's official ones. The `@v5` is their
+  **pinned version**, the same idea as the `==` in `requirements.txt`.
+- **`run:`** runs a **command** in the machine's terminal, as if you typed
+  it yourself in Git Bash.
+
+Notice what is **not** needed: no `.venv` (the whole machine is already
+an isolated environment that exists only for this run), no `run.sh`, and
+no `secrets.sh` (the unit tests use no passwords). And step 3 shows in
+practice what was explained under "Dependencies": since the machine is
+new, **every run** downloads all the packages from PyPI.
+
+### Checked before pushing it
+
+A workflow can only really run on GitHub. But what it will do can be
+imitated: a **new, empty** virtual environment was created,
+`requirements-dev.txt` was installed and `python -m pytest` was run.
+Result: `24 passed`. The only difference from GitHub is the operating
+system (Windows here, Linux there); the tests don't depend on it.
+
+### How to see it on GitHub, in the Actions tab
+
+1. **Push the code** with `git push`. The `push` is the trigger: as soon
+   as it reaches GitHub, the workflow starts.
+2. **Open the repository on GitHub and go to the "Actions" tab**. Instead
+   of the "Get started with GitHub Actions" page you'll see:
+   - on the **left**, the list of workflows: "CI";
+   - in the **middle**, one line per run, with the **commit message**
+     that triggered it, the branch (`main`) and how long ago it was.
+3. **The icon** of each run tells you how it's going:
+
+   | Icon | Meaning |
+   |---|---|
+   | 🟡 yellow circle (spinning) | Queued or running |
+   | ✅ green | Every step finished well: the 24 tests pass |
+   | ❌ red | Some step failed |
+
+4. **Click the run** and then the **`unit-tests`** job (on the left).
+   You'll see the steps, each with its icon and its duration. Click
+   **"Run the unit tests"** to expand it: it's the same `pytest -v`
+   output you see on your computer, with every test and its `PASSED`.
+5. **The "Run workflow" button** (top right, after choosing "CI" in the
+   list on the left) starts it by hand, without a `push`: that's the
+   `workflow_dispatch` trigger.
+6. **The README badge**, on the repository's main page, says
+   "CI | passing" in green or "CI | failing" in red, depending on the
+   latest run.
+
+**If it's red:** GitHub sends you an email. In the run, the step that
+failed has a ❌; expanding it shows the error, in the same format
+explained in "What you see when a test fails". Then you fix it on your
+computer, check with `python -m pytest` and `push` again: that triggers a
+new run.
+
+### Cost
+
+**Free.** In **public** repositories, GitHub Actions has no minute limit
+on its standard machines (like `ubuntu-latest`). Each run of this
+workflow takes less than a minute.
+
+### What's left
+
+- **Step 3:** the integration test, with PostgreSQL and Neo4j in
+  temporary containers, as another job in the workflow.
+- **Step 4:** the daily scheduled check (`schedule`) of GH Archive's
+  format.
+- **Step 5:** scheduling the data pipeline so it runs on its own every
+  hour.
+
+### What `ci.yml` is for and why it matters
+
+The 24 tests already existed before `ci.yml`. What this file adds isn't
+new tests, but **the guarantee that they get run**:
+
+| | Without `ci.yml` | With `ci.yml` |
+|---|---|---|
+| **When the tests run** | Only if you remember to type `python -m pytest` | **Always**, on their own, on every `push` |
+| **Where** | On your computer, with everything installed on it | On a **clean machine**, new for every run |
+| **Who finds out about a failure** | Nobody, if you didn't run them | You (GitHub sends you an email) and anyone who sees the ❌ |
+| **What's recorded** | Nothing | Every commit, with its ✅ or ❌, in the Actions tab |
+
+Why each point matters:
+
+1. **It doesn't depend on your memory.** If one day you change
+   `extract_csv.py` and forget to run the tests, a bug can reach GitHub,
+   and from there the `gharchive24h` data, without anyone noticing. With
+   `ci.yml`, the `push` triggers the tests even if you don't.
+2. **It catches what your computer hides.** Your computer has things the
+   repository doesn't: packages installed by hand, files in `data/`, the
+   `.venv`. A test can pass on your computer only thanks to them. The CI
+   machine starts **empty** and only has what's in the repository, so it
+   catches, for example, a package missing from `requirements.txt` or a
+   file that only exists on your disk. It's the difference between "works
+   on my machine" and "works".
+3. **It leaves a record.** Every commit is marked with ✅ or ❌. If
+   something breaks, the list of runs shows **which commit** it started
+   failing at. And the README badge shows anyone visiting the repository
+   that the project has tests and that they pass.
+4. **It's the foundation for what comes next.** The integration test
+   (step 3) and the daily GH Archive format check (step 4) will be added
+   to this same mechanism: more jobs or more workflows in
+   `.github/workflows/`, with the same logic of triggers and steps.
+
+> 🎯 **Central idea:** tests catch bugs; `ci.yml` makes sure the tests
+> **always run**, in a clean environment, without depending on anyone
+> remembering. A test nobody runs protects nothing.

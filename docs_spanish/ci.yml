@@ -1,0 +1,141 @@
+########################################################################
+# COPIA ANOTADA — solo con fines de aprendizaje.
+#
+# Este es un duplicado explicado línea por línea de .github/workflows/ci.yml.
+# GitHub NO lo ejecuta: GitHub solo lee los archivos que están dentro de
+# .github/workflows/. Este vive en docs_spanish/ porque su propósito es
+# enseñar. El archivo real (con menos comentarios) es .github/workflows/ci.yml.
+#
+# Lo único que cambia respecto al original son las líneas de comentario
+# (las que empiezan por #). Las demás líneas son idénticas.
+########################################################################
+
+# ---------------------------------------------------------------------
+# YAML en cuatro reglas (el formato de este archivo)
+#
+# 1. `clave: valor` — un dato con su nombre, como en un diccionario de
+#    Python: `name: CI` significa "el nombre es CI".
+# 2. La SANGRÍA (los espacios a la izquierda) indica qué va dentro de qué,
+#    como en Python. Siempre con ESPACIOS, nunca con tabuladores. Un
+#    espacio de más o de menos cambia el significado, o rompe el archivo.
+# 3. Un guion `- ` al principio de una línea es un elemento de una LISTA
+#    (lo usan los pasos, `steps`, más abajo).
+# 4. `#` empieza un comentario, igual que en Python: GitHub lo ignora.
+# ---------------------------------------------------------------------
+
+# Continuous integration: run the unit tests in tests/ on GitHub's machines.
+# Results appear in the repository's "Actions" tab (one run per trigger).
+
+# name: el nombre del workflow. Es el que aparece en la columna de la
+# izquierda de la pestaña Actions, y en la insignia (badge) del README.
+name: CI
+
+# ---------------------------------------------------------------------
+# on: LOS DISPARADORES (triggers). Cuándo se ejecuta este workflow.
+# Son los de la tabla de "Los disparadores de un CI: no solo git push".
+# Cada clave sin nada detrás (`push:`) significa "este disparador, con
+# sus opciones por defecto".
+#
+# No está `schedule` (por horario): la comprobación diaria del formato de
+# GH Archive es el paso 4 del plan, y será otro workflow.
+# ---------------------------------------------------------------------
+on:
+  # push: cada vez que haces `git push`, en cualquier rama.
+  push:                # every git push, on any branch
+  # pull_request: cuando alguien propone un cambio para revisarlo antes
+  # de juntarlo con main. En un proyecto personal casi no se usa, pero es
+  # lo normal tenerlo: así las pruebas se ejecutan ANTES de aceptar algo.
+  pull_request:        # every proposed change, before it's merged
+  # workflow_dispatch: añade un botón "Run workflow" en la pestaña
+  # Actions, para lanzarlo a mano sin tener que hacer ningún push.
+  workflow_dispatch:   # a "Run workflow" button in the Actions tab
+
+# ---------------------------------------------------------------------
+# permissions: qué puede hacer este workflow con tu repositorio.
+# GitHub le da una "llave" temporal a cada ejecución. Aquí decimos que esa
+# llave solo sirve para LEER el código (contents: read): no puede
+# modificar nada, ni publicar, ni crear issues. Es el principio de
+# "el mínimo permiso necesario": si algo saliera mal, el daño posible es
+# mínimo.
+# ---------------------------------------------------------------------
+# The tests only need to read the code.
+permissions:
+  contents: read
+
+# ---------------------------------------------------------------------
+# jobs: los TRABAJOS de este workflow. Un workflow puede tener varios
+# (por ejemplo, más adelante, uno de pruebas unitarias y otro de
+# integración), y cada uno se ejecuta en su PROPIA máquina.
+# ---------------------------------------------------------------------
+jobs:
+  # unit-tests: el nombre que le damos a este trabajo (lo elegimos
+  # nosotros). Aparece en GitHub al abrir una ejecución.
+  unit-tests:
+    # runs-on: en qué tipo de máquina se ejecuta. `ubuntu-latest` es una
+    # máquina virtual con Linux (Ubuntu), NUEVA y VACÍA en cada ejecución,
+    # que GitHub destruye al terminar: es el "runner".
+    # ¿Por qué Linux, si tú usas Windows? Porque es la opción más rápida y
+    # la más habitual, y las pruebas no dependen del sistema operativo.
+    # (También existe `windows-latest`.)
+    runs-on: ubuntu-latest
+    # timeout-minutes: si el trabajo tarda más de 10 minutos, GitHub lo
+    # para. Las pruebas tardan segundos, así que tardar 10 minutos solo
+    # puede significar que algo se ha quedado colgado. Sin esto, el límite
+    # por defecto es de 6 horas.
+    # The unit tests take seconds; anything this long means something is stuck.
+    timeout-minutes: 10
+
+    # -----------------------------------------------------------------
+    # steps: los PASOS, en orden. Es una lista (por eso cada uno empieza
+    # por `-`). Si un paso falla, los siguientes no se ejecutan y la
+    # ejecución entera queda en rojo.
+    #
+    # Hay dos tipos de paso:
+    #   uses: ...  -> usa una ACCIÓN: una pieza ya hecha y publicada en
+    #                 GitHub por otros (como importar un paquete).
+    #   run: ...   -> ejecuta un COMANDO en el terminal de la máquina,
+    #                 como si lo escribieras tú en Git Bash.
+    # `name:` es solo la etiqueta que verás en GitHub para cada paso.
+    # -----------------------------------------------------------------
+    steps:
+      # Paso 1. La máquina empieza VACÍA: ni siquiera tiene tu código.
+      # La acción oficial `actions/checkout` hace el equivalente a un
+      # `git clone` del repositorio, en la versión exacta del push.
+      #
+      # `@v5` es la VERSIÓN de la acción, fijada: la misma idea que el
+      # `==` de requirements.txt. Si los autores publican una v6 con
+      # cambios, este archivo seguirá usando la v5.
+      # Each run starts on an empty machine: first, get a copy of the repository.
+      - name: Check out the code
+        uses: actions/checkout@v5
+
+      # Paso 2. Instalar Python. La acción oficial `actions/setup-python`
+      # descarga e instala la versión que le pidamos en `with:` (`with`
+      # son las opciones que recibe una acción, como los argumentos de
+      # una función).
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # Entre comillas para que YAML lo lea como TEXTO. Sin comillas,
+          # una versión como 3.10 se leería como el NÚMERO 3.1 (el cero
+          # final desaparece). Aquí "3.14.0", la misma que en tu ordenador.
+          python-version: "3.14.0"   # same version as the project (README)
+
+      # Paso 3. Instalar los paquetes. Es el mismo comando que en tu
+      # ordenador. Aquí se ve lo explicado en "Las dependencias": en CI
+      # se descarga TODO de PyPI en CADA ejecución, porque la máquina es
+      # nueva.
+      # No hace falta crear un .venv: la máquina ya es un entorno aislado
+      # que solo existe para esta ejecución.
+      # requirements-dev.txt also installs requirements.txt (its "-r" line).
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      # Paso 4. Ejecutar las pruebas. `-v` para que en GitHub se vea el
+      # nombre de cada prueba con su PASSED o FAILED.
+      # Si alguna prueba falla, pytest termina con un código de salida
+      # distinto de 0, y GitHub marca el paso (y la ejecución) en rojo.
+      # No hay `run.sh` ni secrets.sh: estas pruebas no usan contraseñas.
+      # No databases or passwords needed: the unit tests use tiny made-up files.
+      - name: Run the unit tests
+        run: python -m pytest -v

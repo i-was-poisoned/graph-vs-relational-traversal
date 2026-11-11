@@ -1,0 +1,140 @@
+########################################################################
+# ANNOTATED COPY — for learning only.
+#
+# This is a line-by-line explained duplicate of .github/workflows/ci.yml.
+# GitHub does NOT run it: GitHub only reads the files inside
+# .github/workflows/. This one lives in docs_english/ because its purpose
+# is to teach. The real file (with fewer comments) is .github/workflows/ci.yml.
+#
+# The only thing that differs from the original is the comment lines
+# (the ones starting with #). All other lines are identical.
+########################################################################
+
+# ---------------------------------------------------------------------
+# YAML in four rules (this file's format)
+#
+# 1. `key: value` — a piece of data with its name, as in a Python
+#    dictionary: `name: CI` means "the name is CI".
+# 2. INDENTATION (the spaces on the left) says what goes inside what,
+#    as in Python. Always with SPACES, never tabs. One space too many or
+#    too few changes the meaning, or breaks the file.
+# 3. A dash `- ` at the start of a line is an item in a LIST
+#    (used by the steps, `steps`, further down).
+# 4. `#` starts a comment, just like in Python: GitHub ignores it.
+# ---------------------------------------------------------------------
+
+# Continuous integration: run the unit tests in tests/ on GitHub's machines.
+# Results appear in the repository's "Actions" tab (one run per trigger).
+
+# name: the workflow's name. It's the one shown in the left-hand column
+# of the Actions tab, and on the README badge.
+name: CI
+
+# ---------------------------------------------------------------------
+# on: THE TRIGGERS. When this workflow runs.
+# They're the ones in the table in "What triggers a CI: not just git push".
+# Each key with nothing after it (`push:`) means "this trigger, with its
+# default options".
+#
+# `schedule` isn't here: the daily check of GH Archive's format is step 4
+# of the plan, and it will be another workflow.
+# ---------------------------------------------------------------------
+on:
+  # push: every time you `git push`, on any branch.
+  push:                # every git push, on any branch
+  # pull_request: when someone proposes a change for review before it's
+  # merged into main. A personal project hardly uses it, but it's normal
+  # to have it: that way the tests run BEFORE anything is accepted.
+  pull_request:        # every proposed change, before it's merged
+  # workflow_dispatch: adds a "Run workflow" button to the Actions tab,
+  # to start it by hand without any push.
+  workflow_dispatch:   # a "Run workflow" button in the Actions tab
+
+# ---------------------------------------------------------------------
+# permissions: what this workflow may do with your repository.
+# GitHub gives each run a temporary "key". Here we say that key can only
+# READ the code (contents: read): it can't modify anything, publish, or
+# open issues. This is the "least privilege" principle: if something
+# went wrong, the possible damage is minimal.
+# ---------------------------------------------------------------------
+# The tests only need to read the code.
+permissions:
+  contents: read
+
+# ---------------------------------------------------------------------
+# jobs: this workflow's JOBS. A workflow can have several (for example,
+# later on, one for unit tests and another for integration), and each
+# one runs on its OWN machine.
+# ---------------------------------------------------------------------
+jobs:
+  # unit-tests: the name we give this job (we choose it). It shows up on
+  # GitHub when you open a run.
+  unit-tests:
+    # runs-on: what kind of machine it runs on. `ubuntu-latest` is a
+    # Linux (Ubuntu) virtual machine, NEW and EMPTY on every run, which
+    # GitHub destroys at the end: it's the "runner".
+    # Why Linux, if you use Windows? Because it's the fastest and most
+    # common option, and the tests don't depend on the operating system.
+    # (`windows-latest` exists too.)
+    runs-on: ubuntu-latest
+    # timeout-minutes: if the job takes longer than 10 minutes, GitHub
+    # stops it. The tests take seconds, so taking 10 minutes can only
+    # mean something got stuck. Without this, the default limit is
+    # 6 hours.
+    # The unit tests take seconds; anything this long means something is stuck.
+    timeout-minutes: 10
+
+    # -----------------------------------------------------------------
+    # steps: the STEPS, in order. It's a list (that's why each one
+    # starts with `-`). If a step fails, the following ones don't run
+    # and the whole run turns red.
+    #
+    # There are two kinds of step:
+    #   uses: ...  -> uses an ACTION: a ready-made piece published on
+    #                 GitHub by others (like importing a package).
+    #   run: ...   -> runs a COMMAND in the machine's terminal, as if
+    #                 you typed it yourself in Git Bash.
+    # `name:` is just the label you'll see on GitHub for each step.
+    # -----------------------------------------------------------------
+    steps:
+      # Step 1. The machine starts EMPTY: it doesn't even have your code.
+      # The official `actions/checkout` action does the equivalent of a
+      # `git clone` of the repository, at the exact version of the push.
+      #
+      # `@v5` is the action's VERSION, pinned: the same idea as the `==`
+      # in requirements.txt. If the authors publish a v6 with changes,
+      # this file will keep using v5.
+      # Each run starts on an empty machine: first, get a copy of the repository.
+      - name: Check out the code
+        uses: actions/checkout@v5
+
+      # Step 2. Install Python. The official `actions/setup-python` action
+      # downloads and installs the version we ask for in `with:` (`with`
+      # holds the options an action receives, like a function's
+      # arguments).
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # In quotes so YAML reads it as TEXT. Without quotes, a version
+          # like 3.10 would be read as the NUMBER 3.1 (the trailing zero
+          # disappears). Here "3.14.0", the same as on your computer.
+          python-version: "3.14.0"   # same version as the project (README)
+
+      # Step 3. Install the packages. It's the same command as on your
+      # computer. Here you can see what was explained under
+      # "Dependencies": in CI EVERYTHING is downloaded from PyPI on EVERY
+      # run, because the machine is new.
+      # No .venv is needed: the machine is already an isolated environment
+      # that exists only for this run.
+      # requirements-dev.txt also installs requirements.txt (its "-r" line).
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      # Step 4. Run the tests. `-v` so that GitHub shows each test's name
+      # with its PASSED or FAILED.
+      # If any test fails, pytest exits with a code other than 0, and
+      # GitHub marks the step (and the run) red.
+      # No `run.sh` or secrets.sh: these tests use no passwords.
+      # No databases or passwords needed: the unit tests use tiny made-up files.
+      - name: Run the unit tests
+        run: python -m pytest -v
