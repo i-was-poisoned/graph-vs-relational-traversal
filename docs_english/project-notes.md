@@ -4634,3 +4634,65 @@ Why each point matters:
 > 🎯 **Central idea:** tests catch bugs; `ci.yml` makes sure the tests
 > **always run**, in a clean environment, without depending on anyone
 > remembering. A test nobody runs protects nothing.
+
+### The first real run: it failed, and why
+
+After the first `push` with `ci.yml`, the repository's main page showed
+a ❌ next to the commit and, on hovering, the message **"All checks have
+failed — 1 failing check: CI / unit-tests (push) Failing after 5s"**.
+
+**How to read that message.** It doesn't mean all 24 tests failed: a
+**"check"** is each **job** of the workflow, and this workflow has only
+one, `unit-tests`. "1 failing check" = that job ended in red. And
+**"after 5s"** is the important clue: installing the packages and
+running the tests takes much longer, so the failure had to be
+**earlier**, while setting up the machine.
+
+**Which step failed.** The run's steps (in Actions → the run →
+`unit-tests`) were:
+
+| Step | Result |
+|---|---|
+| Check out the code | ✅ |
+| **Set up Python** | ❌ |
+| Install dependencies | ⏭️ skipped |
+| Run the unit tests | ⏭️ skipped |
+
+Because one step failed, the following ones **didn't even run**: the
+tests never got to run. The "Set up Python" error said:
+
+```
+The version '3.14.0' with architecture 'x64' was not found for Ubuntu 26.04.
+```
+
+**The cause.** `runs-on: ubuntu-latest` means "the **latest** Ubuntu
+version GitHub has". In October 2026, GitHub switched it from Ubuntu
+24.04 to Ubuntu 26.04. And there's no pre-built Python 3.14.0 for Ubuntu
+26.04: only 3.14.6 onwards. In other words, **"latest" changed
+underneath, without anyone touching the code**: exactly the kind of
+"Has **the world** changed and broken something?" problem explained in
+"What triggers a CI: not just `git push`".
+
+**The fix.** There were two options:
+
+| Option | Change | Consequence |
+|---|---|---|
+| Change Python | `python-version: "3.14"` (the most recent 3.14) | CI would use a different Python version from your computer (3.14.0) |
+| **Pin the system** ✅ | `runs-on: ubuntu-24.04` | Python stays at 3.14.0, the same as on your computer |
+
+**Pinning the system** was chosen, for consistency with the rest of the
+project: just as packages use `==` and Python its exact version, the CI's
+operating system now has its exact version too. So when GitHub changes
+`ubuntu-latest` again, this workflow won't notice. (The tables in "The
+workflow, part by part" say `ubuntu-latest` because they describe the
+file's first version; the current one uses `ubuntu-24.04`.)
+
+**How the error was found without opening the website.** Since the
+repository is public, GitHub's API gives the status of each step without
+a password. But the normal way is the website: Actions → the red run →
+`unit-tests` → the step with the ❌, which expands to show the message.
+
+> 🎯 **Lesson:** `latest` is convenient, but it's an **unpinned**
+> version. In a project that needs identical conditions, everything that
+> can change on its own (packages, Python, the operating system) is
+> pinned.

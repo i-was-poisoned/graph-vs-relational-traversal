@@ -4934,3 +4934,70 @@ Pourquoi chaque point compte :
 > garantit que les tests **sont toujours lancés**, dans un environnement
 > propre, sans dépendre de la mémoire de quelqu'un. Un test que personne
 > ne lance ne protège rien.
+
+### La première exécution réelle : elle a échoué, et pourquoi
+
+Après le premier `push` avec `ci.yml`, la page principale du dépôt a
+affiché un ❌ à côté du commit et, au survol, le message **« All checks
+have failed — 1 failing check: CI / unit-tests (push) Failing after
+5s »**.
+
+**Comment lire ce message.** Il ne veut pas dire que les 24 tests ont
+échoué : un **« check »** (vérification) est chaque **job** du workflow,
+et ce workflow n'en a qu'un, `unit-tests`. « 1 failing check » = ce job
+s'est terminé en rouge. Et **« after 5s »** est l'indice important :
+installer les paquets et lancer les tests prend bien plus longtemps,
+donc l'échec devait se situer **avant**, pendant la préparation de la
+machine.
+
+**Quelle étape a échoué.** Les étapes de l'exécution (dans Actions →
+l'exécution → `unit-tests`) étaient :
+
+| Étape | Résultat |
+|---|---|
+| Check out the code | ✅ |
+| **Set up Python** | ❌ |
+| Install dependencies | ⏭️ ignorée (*skipped*) |
+| Run the unit tests | ⏭️ ignorée |
+
+Comme une étape a échoué, les suivantes **n'ont même pas été lancées** :
+les tests n'ont jamais tourné. L'erreur de « Set up Python » disait :
+
+```
+The version '3.14.0' with architecture 'x64' was not found for Ubuntu 26.04.
+```
+
+**La cause.** `runs-on: ubuntu-latest` signifie « la **dernière**
+version d'Ubuntu dont dispose GitHub ». En octobre 2026, GitHub l'a fait
+passer d'Ubuntu 24.04 à Ubuntu 26.04. Or il n'existe pas de Python
+3.14.0 précompilé pour Ubuntu 26.04 : seulement à partir de la 3.14.6.
+Autrement dit, **« latest » a changé en dessous, sans que personne ne
+touche au code** : exactement le genre de problème « **Le monde** a-t-il
+changé et cassé quelque chose ? » expliqué dans « Ce qui déclenche une
+CI : pas seulement `git push` ».
+
+**La correction.** Il y avait deux options :
+
+| Option | Changement | Conséquence |
+|---|---|---|
+| Changer Python | `python-version: "3.14"` (la 3.14 la plus récente) | La CI utiliserait une autre version de Python que votre ordinateur (3.14.0) |
+| **Fixer le système** ✅ | `runs-on: ubuntu-24.04` | Python reste en 3.14.0, comme sur votre ordinateur |
+
+On a choisi de **fixer le système**, par cohérence avec le reste du
+projet : de même que les paquets utilisent `==` et Python sa version
+exacte, le système d'exploitation de la CI a désormais lui aussi sa
+version exacte. Ainsi, quand GitHub changera de nouveau `ubuntu-latest`,
+ce workflow ne s'en apercevra pas. (Les tableaux de « Le workflow, partie
+par partie » disent `ubuntu-latest` parce qu'ils décrivent la première
+version du fichier ; la version actuelle utilise `ubuntu-24.04`.)
+
+**Comment l'erreur a été trouvée sans ouvrir le site.** Comme le dépôt
+est public, l'API de GitHub donne l'état de chaque étape sans mot de
+passe. Mais la façon normale, c'est le site : Actions → l'exécution en
+rouge → `unit-tests` → l'étape avec le ❌, qui se déplie et affiche le
+message.
+
+> 🎯 **Leçon :** `latest` est pratique, mais c'est une version **non
+> fixée**. Dans un projet qui exige des conditions identiques, tout ce
+> qui peut changer tout seul (les paquets, Python, le système
+> d'exploitation) est fixé.

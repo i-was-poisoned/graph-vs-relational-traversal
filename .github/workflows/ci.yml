@@ -13,7 +13,8 @@ permissions:
 
 jobs:
   unit-tests:
-    runs-on: ubuntu-latest
+    # A fixed version, not ubuntu-latest: Python 3.14.0 isn't built for Ubuntu 26.04.
+    runs-on: ubuntu-24.04
     # The unit tests take seconds; anything this long means something is stuck.
     timeout-minutes: 10
 

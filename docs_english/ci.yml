@@ -70,13 +70,23 @@ jobs:
   # unit-tests: the name we give this job (we choose it). It shows up on
   # GitHub when you open a run.
   unit-tests:
-    # runs-on: what kind of machine it runs on. `ubuntu-latest` is a
-    # Linux (Ubuntu) virtual machine, NEW and EMPTY on every run, which
-    # GitHub destroys at the end: it's the "runner".
+    # runs-on: what kind of machine it runs on. `ubuntu-24.04` is a
+    # Linux (Ubuntu 24.04) virtual machine, NEW and EMPTY on every run,
+    # which GitHub destroys at the end: it's the "runner".
     # Why Linux, if you use Windows? Because it's the fastest and most
     # common option, and the tests don't depend on the operating system.
     # (`windows-latest` exists too.)
-    runs-on: ubuntu-latest
+    #
+    # Why 24.04 and not `ubuntu-latest`? The first version of this file
+    # used `ubuntu-latest`, and the first run FAILED at the "Set up
+    # Python" step: "The version '3.14.0' ... was not found for Ubuntu
+    # 26.04". `ubuntu-latest` means "the latest version", and in October
+    # 2026 GitHub switched it from 24.04 to 26.04, for which there's no
+    # Python 3.14.0 build. In other words: "latest" changed underneath,
+    # without anyone touching the code. By pinning the version (`24.04`),
+    # just as we pin packages with `==`, that can no longer happen.
+    # A fixed version, not ubuntu-latest: Python 3.14.0 isn't built for Ubuntu 26.04.
+    runs-on: ubuntu-24.04
     # timeout-minutes: if the job takes longer than 10 minutes, GitHub
     # stops it. The tests take seconds, so taking 10 minutes can only
     # mean something got stuck. Without this, the default limit is

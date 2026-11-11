@@ -75,14 +75,25 @@ jobs:
   # unit-tests : le nom qu'on donne à ce travail (c'est nous qui le
   # choisissons). Il apparaît sur GitHub quand on ouvre une exécution.
   unit-tests:
-    # runs-on : sur quel type de machine il s'exécute. `ubuntu-latest` est
-    # une machine virtuelle sous Linux (Ubuntu), NEUVE et VIDE à chaque
-    # exécution, que GitHub détruit à la fin : c'est le « runner ».
+    # runs-on : sur quel type de machine il s'exécute. `ubuntu-24.04` est
+    # une machine virtuelle sous Linux (Ubuntu 24.04), NEUVE et VIDE à
+    # chaque exécution, que GitHub détruit à la fin : c'est le « runner ».
     # Pourquoi Linux, alors que vous utilisez Windows ? Parce que c'est
     # l'option la plus rapide et la plus courante, et que les tests ne
     # dépendent pas du système d'exploitation.
     # (`windows-latest` existe aussi.)
-    runs-on: ubuntu-latest
+    #
+    # Pourquoi 24.04 et pas `ubuntu-latest` ? La première version de ce
+    # fichier utilisait `ubuntu-latest`, et la première exécution a
+    # ÉCHOUÉ à l'étape « Set up Python » : « The version '3.14.0' ... was
+    # not found for Ubuntu 26.04 ». `ubuntu-latest` veut dire « la
+    # dernière version », et en octobre 2026 GitHub l'a fait passer de
+    # 24.04 à 26.04, pour laquelle il n'existe pas de Python 3.14.0
+    # compilé. Autrement dit : « latest » a changé en dessous, sans que
+    # personne ne touche au code. En fixant la version (`24.04`), comme on
+    # fixe les paquets avec `==`, cela ne peut plus arriver.
+    # A fixed version, not ubuntu-latest: Python 3.14.0 isn't built for Ubuntu 26.04.
+    runs-on: ubuntu-24.04
     # timeout-minutes : si le travail dure plus de 10 minutes, GitHub
     # l'arrête. Les tests prennent quelques secondes, donc 10 minutes ne
     # peuvent signifier qu'une chose : quelque chose est bloqué. Sans cela,
