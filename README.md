@@ -32,11 +32,73 @@ with `gharchive-`. (Names use dashes, never underscores, because Neo4j
 doesn't allow `_` in database names. Several databases on one Neo4j server
 need the Enterprise Edition, which Neo4j Desktop includes for free.)
 
+## Setup (once, before anything else)
+
+**Use Git Bash, not PowerShell.** Every command in this README is written for
+**Git Bash** (installed with Git for Windows: Start menu → *Git Bash*).
+PowerShell and the Command Prompt don't understand `source` or `./run.sh`.
+You know you're in Git Bash when the prompt ends with `$` and shows paths like
+`/c/dev/Research`; PowerShell shows `PS C:\dev\Research>`.
+
+Go to the project folder:
+
+```bash
+cd /c/dev/Research
+```
+
+### A. The virtual environment (`.venv`): create it only once
+
+The Python connectors are installed in a project-only **virtual environment**
+(`.venv`, not committed), from the pinned [requirements.txt](requirements.txt).
+**If the folder `.venv` already exists, skip this step**: it's already done.
+
+```bash
+python -m venv .venv                              # creates the .venv folder (only once)
+source .venv/Scripts/activate                     # turns it on in this terminal; the prompt shows (.venv)
+python -m pip install -r requirements.txt         # the database connectors
+python -m pip install -r requirements-dev.txt     # pytest, for the tests
+```
+
+(`python -m venv .venv` fails with `Unable to copy ... venvlauncher.exe` if
+`.venv` already exists and is turned on: it's trying to overwrite the Python
+that's running. Nothing is broken; just don't create it again.)
+
+### B. The passwords (`secrets.sh`): once
+
+Database passwords are never stored in the repository. They live in a local,
+git-ignored `secrets.sh` (created from the [secrets.example.sh](secrets.example.sh)
+template) as environment variables: `PGPASSWORD` (read automatically by
+PostgreSQL/psycopg) and `NEO4J_PASSWORD` (read by the project's scripts).
+
+```bash
+cp secrets.example.sh secrets.sh     # then open it and fill in your passwords
+```
+
+### C. Check that everything works
+
+Scripts that need the databases are run through [run.sh](run.sh), which
+activates `.venv` and loads `secrets.sh` by itself (so you don't need
+`source` for them), then runs Python, which inherits the passwords only for
+that run. `run.sh` is a generic launcher: always give it the script to run,
+followed by that script's own options, if any. With PostgreSQL running and
+Neo4j Desktop open:
+
+```bash
+./run.sh scripts/check_connections.py     # expected: "Both databases are reachable."
+# or, equivalently (e.g. if ./run.sh says "Permission denied"):
+bash run.sh scripts/check_connections.py
+```
+
+Step-by-step installation of PostgreSQL, Neo4j and the virtual environment
+(with checks and troubleshooting) is in
+[docs_english/project-notes.md](docs_english/project-notes.md), section
+"Installing the software".
+
 ## 1. The manual pipeline, step by step
 
-All commands are typed in **Git Bash**, in the project folder
-(`cd /c/dev/Research`, or wherever you cloned it). Times in GH Archive and
-in the scripts are always **UTC**.
+First do the [Setup](#setup-once-before-anything-else), once. All commands
+are typed in **Git Bash**, in the project folder. Times in GH Archive and in
+the scripts are always **UTC**.
 
 ### Step 0. What must be running
 
@@ -46,17 +108,7 @@ in the scripts are always **UTC**.
 | Everything that uses the databases | **Neo4j Desktop** open, with the instance `gharchive` **started** | Neo4j Desktop shows the instance as *Running* |
 | Downloads | An internet connection | `https://data.gharchive.org` opens in a browser |
 
-### Step 1. Once: set up the project
-
-Follow [Setup](#setup): create `.venv`, install `requirements.txt` (and
-`requirements-dev.txt` for the tests), and create `secrets.sh` with your
-passwords. Then check that both servers answer:
-
-```bash
-./run.sh scripts/check_connections.py     # expected: "Both databases are reachable."
-```
-
-### Step 2. Once: build the fixed benchmark (`gharchive`)
+### Step 1. Once: build the fixed benchmark (`gharchive`)
 
 The benchmark's reference hour was built step by step, one script per stage:
 
@@ -74,7 +126,7 @@ database `gharchive` must exist before the first load: `CREATE DATABASE
 gharchive;` in pgAdmin or `psql -U postgres`, and in Neo4j Desktop or Neo4j
 Browser.)
 
-### Step 3. Load the hours you choose
+### Step 2. Load the hours you choose
 
 ```bash
 ./run.sh scripts/build_hours.py
@@ -103,7 +155,7 @@ The database name records exactly what's inside:
 `gharchive-2026-11-10-9` = 1 hour from 2026-11-10 09:00 UTC;
 `gharchive-2026-11-10-9-3h` = 3 hours from 2026-11-10 09:00 UTC.
 
-### Step 4. What it does after you confirm
+### Step 3. What it does after you confirm
 
 Every stage announces what it's about to do and then confirms it, always
 naming the database:
@@ -145,7 +197,7 @@ Only databases whose name starts with `gharchive-` can be emptied this way:
 the script refuses to empty `gharchive`, `gharchive24h` or any other
 database, even by mistake.
 
-### Step 5. Delete a database you no longer need
+### Step 4. Delete a database you no longer need
 
 Delete it **on both sides** (this can't be undone; never do it to
 `gharchive`):
@@ -167,7 +219,9 @@ downloaded again if needed.
 
 | Message | Cause | What to do |
 |---|---|---|
-| `Missing virtual environment (.venv)` / `Missing secrets.sh` | Step 1 not done | Do [Setup](#setup) |
+| `Missing virtual environment (.venv)` / `Missing secrets.sh` | Setup not done | Do the [Setup](#setup-once-before-anything-else) |
+| `source : The term 'source' is not recognized` | You're in PowerShell | Open **Git Bash** instead |
+| `Unable to copy ... venvlauncher.exe` | `.venv` already exists | Nothing to fix: skip `python -m venv .venv` |
 | `PostgreSQL isn't answering` / `connection to server at "localhost" ... failed` | The PostgreSQL service isn't running | Start it in the *Services* app |
 | `Neo4j isn't answering` / a Neo4j error mentioning `localhost:7687` | Neo4j Desktop is closed, or the instance is stopped | Open Neo4j Desktop and start the instance |
 | `... does not exist (not published yet?)` | That hour isn't on GH Archive (yet) | Choose an older hour |
@@ -308,7 +362,7 @@ The **benchmark** uses a single, fixed hour for reproducibility:
   so the file is guaranteed to be published and available.
 
 It's also the default answer of `build_hours.py`. How it was downloaded and
-loaded is in [step 2](#step-2-once-build-the-fixed-benchmark-gharchive).
+loaded is in [step 1](#step-1-once-build-the-fixed-benchmark-gharchive).
 
 ## Schema
 
@@ -365,46 +419,6 @@ Versions are pinned on purpose: this project compares two tools, so every
 condition (database versions, connectors, Python) must stay the same across
 all measurements. If any of them is upgraded, the change is recorded here and
 every measurement is repeated.
-
-## Setup
-
-The Python connectors are installed in a project-only **virtual environment**
-(`.venv`, not committed), from the pinned [requirements.txt](requirements.txt):
-
-```bash
-python -m venv .venv
-source .venv/Scripts/activate        # Git Bash on Windows
-python -m pip install -r requirements.txt
-```
-
-Database passwords are never stored in the repository. They live in a local,
-git-ignored `secrets.sh` (created from the [secrets.example.sh](secrets.example.sh)
-template) as environment variables: `PGPASSWORD` (read automatically by
-PostgreSQL/psycopg) and `NEO4J_PASSWORD` (read by the project's scripts).
-
-```bash
-cp secrets.example.sh secrets.sh     # then fill in your passwords
-```
-
-Scripts that need the databases are run through [run.sh](run.sh), which
-activates `.venv`, loads `secrets.sh` and runs Python (which inherits the
-passwords only for that run). `run.sh` is a generic launcher: always give it
-the script to run, followed by that script's own options, if any. For
-example, to check that both databases are reachable:
-
-```bash
-./run.sh scripts/check_connections.py
-# or, equivalently (e.g. if ./run.sh says "Permission denied"):
-bash run.sh scripts/check_connections.py
-```
-
-Any other script works the same way, e.g.
-`./run.sh scripts/summarize_data.py --top 10`.
-
-Step-by-step installation of PostgreSQL, Neo4j and the virtual environment
-(with checks and troubleshooting) is in
-[docs_english/project-notes.md](docs_english/project-notes.md), section
-"Installing the software".
 
 ## Tests
 
