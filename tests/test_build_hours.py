@@ -7,8 +7,8 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from build_hours import (ask_hours, chosen_hours, database_name, hours_are_published, parse_count, parse_date,
-                         parse_hour)
+from build_hours import (ask_hours, chosen_hours, database_name, hours_are_published, may_be_emptied, parse_count,
+                         parse_date, parse_hour, recreate_databases)
 
 NOW = datetime(2026, 11, 12, 15, 20, tzinfo=timezone.utc)
 
@@ -130,3 +130,21 @@ def test_ask_hours_asks_again_after_bad_answers(capsys):
 
 def test_ask_hours_no_means_nothing_is_done():
     assert ask_hours(NOW, ask=answers("", "", "", "n")) is None
+
+
+# ---------- may_be_emptied / recreate_databases (the safety check before deleting) ----------
+
+def test_databases_made_by_this_script_may_be_emptied():
+    assert may_be_emptied(database_name(chosen_hours(date(2026, 8, 27), 15, 1)))
+    assert may_be_emptied(database_name(chosen_hours(date(2026, 8, 27), 15, 3)))
+
+
+def test_the_other_databases_may_never_be_emptied():
+    for name in ("gharchive", "gharchive24h", "gharchivetest", "neo4j", "postgres", "system"):
+        assert not may_be_emptied(name)
+
+
+def test_recreate_refuses_before_connecting_to_anything():
+    # The check comes first, so this fails safely even with no server running and no password.
+    with pytest.raises(ValueError, match="Refusing to empty"):
+        recreate_databases("gharchive")

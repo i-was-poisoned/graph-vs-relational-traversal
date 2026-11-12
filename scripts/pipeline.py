@@ -15,12 +15,15 @@ the "gharchive" databases (which it never touches). Each run:
 
 If anything fails before loading (a missing hour, a database that isn't
 running), the databases keep the previous window: nothing is half-replaced.
-It's meant to be run every hour by Windows Task Scheduler (see project notes).
+It runs on its own, once a day: Windows Task Scheduler starts it with --scheduled
+every 15 minutes, and it only does the work if today's run hasn't succeeded yet
+and both servers are answering (see README, step 6). It never asks anything.
 
 Usage:
     ./run.sh scripts/pipeline.py
     ./run.sh scripts/pipeline.py --dry-run
     ./run.sh scripts/pipeline.py --window-hours 6 --lag-hours 2
+    ./run.sh scripts/pipeline.py --scheduled     # what Task Scheduler runs
 """
 
 import argparse
@@ -28,7 +31,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg
@@ -47,6 +50,9 @@ CSV_DIR = LIVE_DIR / "csv"
 LOCK_FILE = LIVE_DIR / "pipeline.lock"
 WINDOW_FILE = LIVE_DIR / "current_window.txt"
 LOG_FILE = PROJECT_DIR / "logs" / "pipeline.log"
+# --scheduled only: the local date of the last successful run, and what the last attempt found.
+LAST_SUCCESS_FILE = LIVE_DIR / "last_success_date.txt"
+SCHEDULED_STATUS_FILE = LIVE_DIR / "scheduled_status.txt"
 
 DEFAULT_DATABASE = "gharchive24h"  # Neo4j doesn't allow "_" in database names
 DEFAULT_WINDOW_HOURS = 24
@@ -163,6 +169,9 @@ def run(window_hours: int, lag_hours: int, database: str, dry_run: bool) -> bool
 
     if postgres_ok and neo4j_ok:
         WINDOW_FILE.write_text(f"{window}\n{len(actors)} actors, {len(repos)} repos, {len(pairs)} connections\n")
+        if database == DEFAULT_DATABASE:
+            # Your computer's date, not UTC: "once a day" means once per day of yours.
+            LAST_SUCCESS_FILE.write_text(f"{date.today():%Y-%m-%d}\n")
     log.info("Run finished in %.1f s", time.perf_counter() - run_start)
     return postgres_ok and neo4j_ok
 
@@ -177,11 +186,55 @@ def parse_args() -> argparse.Namespace:
                          help=f"Database to rebuild on both sides (default: {DEFAULT_DATABASE})")
     parser.add_argument("--dry-run", action="store_true",
                          help="Only show the window and which files would be downloaded; change nothing")
+    parser.add_argument("--scheduled", action="store_true",
+                         help="For Task Scheduler, which starts it every 15 minutes: do nothing if today's run "
+                              "already succeeded, or if PostgreSQL or Neo4j isn't answering yet")
     return parser.parse_args()
+
+
+def already_ran_today(last_success: str | None, today: date) -> bool:
+    # last_success is the text of LAST_SUCCESS_FILE (None if it doesn't exist yet).
+    return last_success is not None and last_success.strip() == f"{today:%Y-%m-%d}"
+
+
+def servers_not_ready() -> str | None:
+    # Returns None if both servers answer, or a short reason if one doesn't (it isn't running yet).
+    try:
+        with psycopg.connect(host="localhost", user="postgres", dbname="postgres", connect_timeout=5) as conn:
+            conn.execute("SELECT 1")
+    except Exception:
+        return "PostgreSQL isn't answering"
+    try:
+        auth = (load_neo4j.NEO4J_USER, os.environ["NEO4J_PASSWORD"])
+        with GraphDatabase.driver(load_neo4j.NEO4J_URI, auth=auth, connection_timeout=5) as driver:
+            driver.verify_connectivity()
+    except Exception:
+        return "Neo4j isn't answering (is Neo4j Desktop open, with the instance started?)"
+    return None
+
+
+def skip_scheduled_run() -> bool:
+    # Runs before logging is set up, so the frequent "nothing to do" checks don't fill
+    # logs/pipeline.log: their result only goes to SCHEDULED_STATUS_FILE (overwritten each time).
+    last_success = LAST_SUCCESS_FILE.read_text() if LAST_SUCCESS_FILE.exists() else None
+    if already_ran_today(last_success, date.today()):
+        reason = "today's run already succeeded; nothing to do"
+    else:
+        reason = servers_not_ready()
+        if reason is not None:
+            reason += "; will try again at the next check"
+    if reason is None:
+        return False
+    LIVE_DIR.mkdir(parents=True, exist_ok=True)
+    SCHEDULED_STATUS_FILE.write_text(f"{datetime.now():%Y-%m-%d %H:%M} (your time): {reason}\n")
+    print(reason)
+    return True
 
 
 def main() -> None:
     args = parse_args()
+    if args.scheduled and not args.dry_run and skip_scheduled_run():
+        sys.exit(0)
     setup_logging()
 
     if args.database == "gharchive":
@@ -201,6 +254,9 @@ def main() -> None:
             LOCK_FILE.unlink(missing_ok=True)
 
     log.info("Status: %s", "SUCCESS" if ok else "FAILURE")
+    if args.scheduled and not args.dry_run:
+        outcome = "run SUCCEEDED" if ok else "run FAILED (see logs/pipeline.log); will try again at the next check"
+        SCHEDULED_STATUS_FILE.write_text(f"{datetime.now():%Y-%m-%d %H:%M} (your time): {outcome}\n")
     sys.exit(0 if ok else 1)
 
 

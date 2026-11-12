@@ -7,21 +7,28 @@ which date, starting hour and number of consecutive hours you want, then
     1. downloads those hours to data/hours/ (hours already there are reused);
     2. extracts the CSV files from them (extract_csv.py), into
        data/hours/csv/<database name>/;
-    3. creates a database named after the hours in PostgreSQL and in Neo4j,
-       and loads the CSVs into both (load_postgres.py, load_neo4j.py):
+    3. empties the database named after the hours, in PostgreSQL and in Neo4j:
+       it deletes it (if it exists) and creates it again, then checks that both
+       sides really are empty, and stops if they aren't;
            1 hour  from 2026-08-27 15:00 UTC -> "gharchive-2026-08-27-15"
            3 hours from 2026-08-27 15:00 UTC -> "gharchive-2026-08-27-15-3h"
+    4. loads the CSVs into both (load_postgres.py, load_neo4j.py).
 
 Each choice gets its own database, so "gharchive" and "gharchive24h" are never
-touched. Loading the same choice again rebuilds only its own databases.
+touched. Loading the same choice again empties and rebuilds only its own databases.
 
 Usage (it asks the rest; press Enter to keep the value in brackets):
     ./run.sh scripts/build_hours.py
 """
 
+import os
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+import psycopg
+from neo4j import GraphDatabase
+from psycopg import sql
 
 import download_gharchive
 import extract_csv
@@ -106,8 +113,56 @@ def ask_hours(now: datetime, ask=input) -> list[datetime] | None:
                   "the last one must end at least an hour before the current hour.")
             continue
 
-        answer = ask(f'Load {describe(hours)} into "{database_name(hours)}"? [Y/n]: ')
+        answer = ask(f'Load {describe(hours)} into "{database_name(hours)}"? '
+                     "(if that database already exists, it's emptied first) [Y/n]: ")
         return hours if answer.strip().lower() in ("", "y", "yes", "s", "si", "sí") else None
+
+
+def may_be_emptied(name: str) -> bool:
+    # Only databases made by this script may be deleted: never "gharchive" (the frozen
+    # benchmark), "gharchive24h" (the pipeline's) or anything else on the servers.
+    return name.startswith("gharchive-")
+
+
+def recreate_databases(name: str) -> None:
+    # Deleting the whole database and creating it again is the surest way to empty it:
+    # nothing from before survives (tables, rows, nodes, relationships, constraints).
+    if not may_be_emptied(name):
+        raise ValueError(f'Refusing to empty "{name}": build_hours.py only empties databases named gharchive-...')
+
+    with psycopg.connect(host="localhost", user="postgres", dbname="postgres", autocommit=True) as conn:
+        # WITH (FORCE) first closes other connections to it (e.g. pgAdmin), which would block the DROP.
+        conn.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
+        conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    print(f'PostgreSQL: "{name}" deleted (if it existed) and created again')
+
+    auth = (load_neo4j.NEO4J_USER, os.environ["NEO4J_PASSWORD"])
+    with GraphDatabase.driver(load_neo4j.NEO4J_URI, auth=auth) as driver:
+        # CREATE OR REPLACE = delete it if it exists, then create it (Enterprise Edition only).
+        # WAIT: don't return until the new database is online.
+        driver.execute_query(f"CREATE OR REPLACE DATABASE `{name}` WAIT", database_="system")
+    print(f'Neo4j:      "{name}" deleted (if it existed) and created again')
+
+
+def databases_are_empty(name: str) -> bool:
+    # Checks both sides and prints what it finds; True only if everything is 0.
+    with psycopg.connect(host="localhost", user="postgres", dbname=name) as conn:
+        tables = conn.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'").fetchone()[0]
+
+    auth = (load_neo4j.NEO4J_USER, os.environ["NEO4J_PASSWORD"])
+    with GraphDatabase.driver(load_neo4j.NEO4J_URI, auth=auth) as driver:
+        def count(query: str) -> int:
+            return driver.execute_query(query, database_=name).records[0][0]
+        nodes = count("MATCH (n) RETURN count(n)")
+        relationships = count("MATCH ()-[r]->() RETURN count(r)")
+        constraints = count("SHOW CONSTRAINTS YIELD name RETURN count(name)")
+
+    found = {"PostgreSQL tables": tables, "Neo4j nodes": nodes,
+             "Neo4j relationships": relationships, "Neo4j constraints": constraints}
+    for what, how_many in found.items():
+        print(f"  {what:<20} {how_many:>3}   {'empty' if how_many == 0 else 'NOT EMPTY'}")
+    return all(how_many == 0 for how_many in found.values())
 
 
 def build(hours: list[datetime]) -> bool:
@@ -130,8 +185,11 @@ def build(hours: list[datetime]) -> bool:
     print(f"{len(actors)} actors, {len(repos)} repos, {len(pairs)} connections "
           f"({skipped_bot_events} bot events skipped)")
 
-    print(f'\n== 3. Create "{name}" on both sides (if it doesn\'t exist yet)')
-    pipeline.ensure_databases(name)
+    print(f'\n== 3. Empty "{name}" on both sides, and check that it is empty')
+    recreate_databases(name)
+    if not databases_are_empty(name):
+        print("The database isn't empty after being recreated; nothing was loaded.")
+        return False
 
     print("\n== 4. Load PostgreSQL")
     postgres_ok = load_postgres.load(csv_dir, name)

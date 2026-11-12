@@ -3,9 +3,9 @@
 Run with:  python -m pytest
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
-from pipeline import compute_window, hour_file_name
+from pipeline import already_ran_today, compute_window, hour_file_name
 
 
 def utc(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
@@ -48,3 +48,17 @@ def test_hour_file_name_two_digit_hour():
 
 def test_hour_file_name_midnight():
     assert hour_file_name(utc(2026, 10, 21, 0)) == "2026-10-21-0.json.gz"
+
+
+# ---------- already_ran_today (--scheduled: once a day) ----------
+
+def test_never_ran_before():
+    assert not already_ran_today(None, date(2026, 11, 12))
+
+
+def test_already_ran_today():
+    assert already_ran_today("2026-11-12\n", date(2026, 11, 12))
+
+
+def test_ran_yesterday_so_runs_again_today():
+    assert not already_ran_today("2026-11-11\n", date(2026, 11, 12))
