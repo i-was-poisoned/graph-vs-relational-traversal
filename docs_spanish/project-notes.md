@@ -5309,3 +5309,86 @@ ejecutado. Para hacerlo, con PostgreSQL y Neo4j encendidos:
 
 Si sale bien, `gharchivetest` aparecerá en pgAdmin y en Neo4j Desktop
 con 3 actores, 3 repos y 4 conexiones.
+
+### Red propia y puertos propios: qué significa y para qué sirve
+
+Esta subsección amplía el punto "**su red**: su propio `localhost` y sus
+propios puertos" de "Qué significa 'aislado'", y explica desde cero las
+palabras que usa "Los puertos y las redes".
+
+**Qué es un puerto.** Un ordenador es como un **edificio** con una
+dirección, y cada **puerto** es una **puerta numerada** de ese edificio
+(hay 65.535). Un programa que espera conexiones, como una base de
+datos, se queda **escuchando** detrás de una puerta concreta. Para
+hablar con él hay que saber **el edificio y la puerta**:
+
+| Programa | Puerto | Dónde aparece en este proyecto |
+|---|---|---|
+| PostgreSQL | **5432** | Los cargadores se conectan a `localhost`, puerto 5432 (el puerto por defecto, por eso no se escribe) |
+| Neo4j (conexiones de programas, protocolo Bolt) | **7687** | `NEO4J_URI = "neo4j://localhost:7687"` en `load_neo4j.py` |
+
+**Qué es `localhost`.** Es el nombre que significa "**este mismo
+edificio**": el ordenador desde el que te conectas. Cuando
+`load_postgres.py` se conecta a `localhost:5432`, quiere decir "la
+puerta 5432 de **esta** máquina".
+
+**La regla: una puerta, un programa.** Dos programas no pueden escuchar
+detrás de la misma puerta del mismo edificio. Si un segundo PostgreSQL
+intentara usar el 5432 de tu Windows, fallaría con un error del tipo
+"*address already in use*" ("dirección ya en uso").
+
+**Qué significa que un contenedor tenga su propia red.** Cada
+contenedor es **su propio edificio pequeño**, con **su propio
+`localhost`** y **sus propias 65.535 puertas**. Por eso:
+
+- el PostgreSQL de un contenedor escucha en **su** puerta 5432, y tu
+  PostgreSQL de Windows en la **tuya**: son edificios distintos, así que
+  no chocan;
+- **dentro** de un contenedor, `localhost` significa **ese contenedor**,
+  no tu ordenador.
+
+**Para qué sirve:**
+
+1. **Sin conflictos.** Cada programa usa su puerto de siempre (5432,
+   7687) sin cambiar su configuración, y se pueden tener varias copias
+   a la vez, incluso de versiones distintas. Es lo que permitió ejecutar
+   `simulate_ci.sh` con tus bases de datos encendidas.
+2. **Seguridad.** Por defecto, **nadie de fuera** puede entrar: las
+   puertas del contenedor no dan a la calle. Por eso en el CI y en
+   `simulate_ci.sh` las bases de datos pueden funcionar **sin
+   contraseña**: solo llega a ellas quien está dentro de esa red privada.
+3. **Siempre igual.** Como los puertos son los mismos en todas partes,
+   el código (`localhost:5432`, `localhost:7687`) funciona sin cambiar
+   ni una línea en tu ordenador, en la simulación y en GitHub.
+
+**Cómo se llega desde fuera**, las dos formas de "Los puertos y las
+redes", con la misma comparación:
+
+| Forma | Comparación | Dónde |
+|---|---|---|
+| `-p 5432:5432` (en `ci.yml`, `ports:`) | Un **recepcionista**: lo que llama a la puerta 5432 **de la máquina** se reenvía a la puerta 5432 **del contenedor** | En el CI |
+| `--network container:NOMBRE` | Varios contenedores **comparten el mismo edificio**: un solo `localhost` para todos | En `simulate_ci.sh` |
+
+**La misma línea de código, tres destinos distintos.** Los cargadores
+siempre se conectan a `localhost:5432`. Lo que hay detrás de esa puerta
+depende de dónde corre Python (son los tres lugares de "Los tres lugares
+donde se ejecutan las pruebas de integración"):
+
+| Dónde corre Python | Qué es `localhost` | Qué hay en la puerta 5432 |
+|---|---|---|
+| Tu Windows (`./run.sh ...`) | Tu ordenador | **Tu** PostgreSQL de Windows |
+| Contenedor de Python en `simulate_ci.sh` | El edificio compartido con `gvr-ci-neo4j` | El PostgreSQL **del contenedor** `gvr-ci-postgres` (tu PostgreSQL de Windows queda fuera, invisible) |
+| Máquina virtual del CI | La máquina virtual | El recepcionista (`ports:`), que reenvía al PostgreSQL **del contenedor** de servicio |
+
+**Una trampa típica.** Si el contenedor de Python de `simulate_ci.sh`
+tuviera **su propio edificio** (sin `--network container:...`), al
+conectarse a `localhost:5432` buscaría PostgreSQL **dentro de sí mismo**,
+donde no hay nada, y fallaría con "*connection refused*" ("conexión
+rechazada"). Por eso los tres contenedores comparten la red del de
+Neo4j.
+
+> 🎯 **Idea central:** un puerto es una puerta numerada donde escucha
+> un programa, y `localhost` es "este mismo edificio". Cada contenedor
+> es **su propio edificio**: por eso no choca con tus programas, nadie
+> de fuera entra si no se le abre una puerta, y `localhost` dentro de un
+> contenedor es **el contenedor**, no tu ordenador.

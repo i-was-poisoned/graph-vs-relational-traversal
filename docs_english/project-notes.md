@@ -5179,3 +5179,84 @@ it, with PostgreSQL and Neo4j running:
 
 If it passes, `gharchivetest` will show up in pgAdmin and in Neo4j
 Desktop with 3 actors, 3 repos and 4 connections.
+
+### Its own network and its own ports: what it means and what it's for
+
+This subsection expands the point "**its network**: its own `localhost`
+and its own ports" from "What 'isolated' means", and explains from
+scratch the words used in "Ports and networks".
+
+**What a port is.** A computer is like a **building** with an address,
+and each **port** is a **numbered door** of that building (there are
+65,535). A program that waits for connections, like a database, sits
+**listening** behind one particular door. To talk to it you need to know
+**the building and the door**:
+
+| Program | Port | Where it appears in this project |
+|---|---|---|
+| PostgreSQL | **5432** | The loaders connect to `localhost`, port 5432 (the default port, which is why it isn't written) |
+| Neo4j (connections from programs, Bolt protocol) | **7687** | `NEO4J_URI = "neo4j://localhost:7687"` in `load_neo4j.py` |
+
+**What `localhost` is.** It's the name that means "**this same
+building**": the computer you're connecting from. When `load_postgres.py`
+connects to `localhost:5432`, it means "door 5432 of **this** machine".
+
+**The rule: one door, one program.** Two programs can't listen behind
+the same door of the same building. If a second PostgreSQL tried to use
+port 5432 on your Windows, it would fail with an error like "*address
+already in use*".
+
+**What it means for a container to have its own network.** Each
+container is **its own small building**, with **its own `localhost`**
+and **its own 65,535 doors**. That's why:
+
+- a container's PostgreSQL listens on **its** door 5432, and your Windows
+  PostgreSQL on **yours**: they're different buildings, so they don't
+  clash;
+- **inside** a container, `localhost` means **that container**, not your
+  computer.
+
+**What it's for:**
+
+1. **No conflicts.** Each program uses its usual port (5432, 7687)
+   without changing its configuration, and you can run several copies at
+   once, even of different versions. That's what made it possible to run
+   `simulate_ci.sh` with your databases switched on.
+2. **Security.** By default, **nobody from outside** can get in: the
+   container's doors don't open onto the street. That's why in CI and in
+   `simulate_ci.sh` the databases can run **without a password**: only
+   whoever is inside that private network can reach them.
+3. **Always the same.** Because the ports are the same everywhere, the
+   code (`localhost:5432`, `localhost:7687`) works without changing a
+   single line on your computer, in the simulation and on GitHub.
+
+**How to get in from outside**, the two ways from "Ports and networks",
+with the same comparison:
+
+| Way | Comparison | Where |
+|---|---|---|
+| `-p 5432:5432` (in `ci.yml`, `ports:`) | A **receptionist**: whatever knocks on door 5432 **of the machine** is forwarded to door 5432 **of the container** | In CI |
+| `--network container:NAME` | Several containers **share the same building**: one `localhost` for all of them | In `simulate_ci.sh` |
+
+**The same line of code, three different destinations.** The loaders
+always connect to `localhost:5432`. What's behind that door depends on
+where Python runs (these are the three places from "The three places
+where the integration tests run"):
+
+| Where Python runs | What `localhost` is | What's at door 5432 |
+|---|---|---|
+| Your Windows (`./run.sh ...`) | Your computer | **Your** Windows PostgreSQL |
+| Python container in `simulate_ci.sh` | The building shared with `gvr-ci-neo4j` | The PostgreSQL **of the** `gvr-ci-postgres` **container** (your Windows PostgreSQL stays outside, invisible) |
+| CI virtual machine | The virtual machine | The receptionist (`ports:`), which forwards to the PostgreSQL **of the** service **container** |
+
+**A typical trap.** If the Python container in `simulate_ci.sh` had
+**its own building** (without `--network container:...`), connecting to
+`localhost:5432` would look for PostgreSQL **inside itself**, where
+there's nothing, and fail with "*connection refused*". That's why the
+three containers share the Neo4j container's network.
+
+> 🎯 **Central idea:** a port is a numbered door where a program
+> listens, and `localhost` is "this same building". Each container is
+> **its own building**: that's why it doesn't clash with your programs,
+> nobody from outside gets in unless a door is opened, and `localhost`
+> inside a container is **the container**, not your computer.
