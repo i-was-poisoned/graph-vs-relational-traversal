@@ -131,21 +131,38 @@ def recreate_databases(name: str) -> None:
         raise ValueError(f'Refusing to empty "{name}": build_hours.py only empties databases named gharchive-...')
 
     with psycopg.connect(host="localhost", user="postgres", dbname="postgres", autocommit=True) as conn:
-        # WITH (FORCE) first closes other connections to it (e.g. pgAdmin), which would block the DROP.
-        conn.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
+        exists = conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,)).fetchone() is not None
+        if exists:
+            print(f'Deleting the PostgreSQL database "{name}" and all its data ...')
+            # WITH (FORCE) first closes other connections to it (e.g. pgAdmin), which would block the DROP.
+            conn.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+            print(f'The PostgreSQL database "{name}" has been deleted.')
+        else:
+            print(f'The PostgreSQL database "{name}" doesn\'t exist yet: nothing to delete.')
+        print(f'Creating the PostgreSQL database "{name}" (empty) ...')
         conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
-    print(f'PostgreSQL: "{name}" deleted (if it existed) and created again')
+        print(f'The PostgreSQL database "{name}" has been created.')
 
     auth = (load_neo4j.NEO4J_USER, os.environ["NEO4J_PASSWORD"])
     with GraphDatabase.driver(load_neo4j.NEO4J_URI, auth=auth) as driver:
+        records = driver.execute_query("SHOW DATABASES YIELD name WHERE name = $name RETURN name",
+                                       name=name, database_="system").records
+        if records:
+            print(f'Deleting the Neo4j database "{name}" and all its data, then creating it again (empty) ...')
+        else:
+            print(f'The Neo4j database "{name}" doesn\'t exist yet: nothing to delete. Creating it (empty) ...')
         # CREATE OR REPLACE = delete it if it exists, then create it (Enterprise Edition only).
         # WAIT: don't return until the new database is online.
         driver.execute_query(f"CREATE OR REPLACE DATABASE `{name}` WAIT", database_="system")
-    print(f'Neo4j:      "{name}" deleted (if it existed) and created again')
+        if records:
+            print(f'The Neo4j database "{name}" has been deleted and created again.')
+        else:
+            print(f'The Neo4j database "{name}" has been created.')
 
 
 def databases_are_empty(name: str) -> bool:
     # Checks both sides and prints what it finds; True only if everything is 0.
+    print(f'Checking that the database "{name}" is empty on both sides ...')
     with psycopg.connect(host="localhost", user="postgres", dbname=name) as conn:
         tables = conn.execute(
             "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'").fetchone()[0]
@@ -162,41 +179,71 @@ def databases_are_empty(name: str) -> bool:
              "Neo4j relationships": relationships, "Neo4j constraints": constraints}
     for what, how_many in found.items():
         print(f"  {what:<20} {how_many:>3}   {'empty' if how_many == 0 else 'NOT EMPTY'}")
-    return all(how_many == 0 for how_many in found.values())
+    empty = all(how_many == 0 for how_many in found.values())
+    if empty:
+        print(f'The database "{name}" is empty in PostgreSQL and in Neo4j: ready to load.')
+    return empty
 
 
 def build(hours: list[datetime]) -> bool:
     name = database_name(hours)
     csv_dir = HOURS_DIR / "csv" / name
 
-    print(f"\n== 1. Download {len(hours)} hour file(s) to {HOURS_DIR}")
+    # Before changing anything: if one server isn't answering, stop now. Otherwise one side
+    # could be emptied while the other can't be, leaving the two databases different.
+    print("\n== 0. Check that both servers are answering")
+    print("Connecting to PostgreSQL (localhost:5432) and Neo4j (localhost:7687) ...")
+    problem = pipeline.servers_not_ready()
+    if problem is not None:
+        print(f"{problem}. Nothing was changed.")
+        return False
+    print("Both servers are answering.")
+
+    print(f"\n== 1. Download {len(hours)} hour file(s) from GH Archive to {HOURS_DIR}")
     files = []
     for hour in hours:
         path = HOURS_DIR / pipeline.hour_file_name(hour)
         if path.exists():
-            print(f"Already downloaded: {path.name}")
+            print(f"{path.name} is already on this computer: no need to download it again.")
         else:
             download_gharchive.fetch_gz(f"{hour:%Y-%m-%d}", hour.hour, HOURS_DIR)
         files.append(path)
+    print(f"All {len(files)} hour file(s) are ready.")
 
-    print(f"\n== 2. Extract the CSV files to {csv_dir}")
+    print("\n== 2. Extract actors, repos and connections into CSV files")
+    print(f"Reading the events in {len(files)} file(s) (bots are left out) ...")
     actors, repos, pairs, skipped_bot_events = extract_csv.extract(files)
+    print(f"Found {len(actors)} actors, {len(repos)} repos and {len(pairs)} connections "
+          f"({skipped_bot_events} bot events skipped).")
+    print(f"Writing actors.csv, repos.csv and actor_repo.csv to {csv_dir} ...")
     extract_csv.write_all(csv_dir, actors, repos, pairs)
-    print(f"{len(actors)} actors, {len(repos)} repos, {len(pairs)} connections "
-          f"({skipped_bot_events} bot events skipped)")
+    print("The CSV files have been written.")
 
-    print(f'\n== 3. Empty "{name}" on both sides, and check that it is empty')
+    print(f'\n== 3. Empty the database "{name}" on both sides, and check that it is empty')
     recreate_databases(name)
     if not databases_are_empty(name):
-        print("The database isn't empty after being recreated; nothing was loaded.")
+        print(f'The database "{name}" isn\'t empty after being recreated; nothing was loaded.')
         return False
 
-    print("\n== 4. Load PostgreSQL")
+    print(f'\n== 4. Load the data into the PostgreSQL database "{name}"')
+    print(f'The data is being loaded into the PostgreSQL database "{name}" ...')
     postgres_ok = load_postgres.load(csv_dir, name)
+    if postgres_ok:
+        print(f'The data has been loaded into the PostgreSQL database "{name}", and every count matches its CSV file.')
+    else:
+        print(f'The PostgreSQL database "{name}" was loaded, but some counts DON\'T match their CSV files (MISMATCH above).')
 
-    print("\n== 5. Load Neo4j")
+    print(f'\n== 5. Load the data into the Neo4j database "{name}"')
+    print(f'The data is being loaded into the Neo4j database "{name}" ...')
     neo4j_ok = load_neo4j.load(csv_dir, name)
+    if neo4j_ok:
+        print(f'The data has been loaded into the Neo4j database "{name}", and every count matches its CSV file.')
+    else:
+        print(f'The Neo4j database "{name}" was loaded, but some counts DON\'T match their CSV files (MISMATCH above).')
 
+    print(f'\nSummary: "{name}" holds {describe(hours)}: {len(actors)} actors, {len(repos)} repos '
+          f"and {len(pairs)} connections, in PostgreSQL ({'OK' if postgres_ok else 'MISMATCH'}) "
+          f"and in Neo4j ({'OK' if neo4j_ok else 'MISMATCH'}).")
     return postgres_ok and neo4j_ok
 
 
@@ -211,9 +258,14 @@ def main() -> None:
         print("Nothing done.")
         sys.exit(0)
 
-    ok = build(hours)
     name = database_name(hours)
-    print(f'\n{"Done" if ok else "Finished with MISMATCHES (see above)"}: database "{name}" on both sides.')
+    try:
+        ok = build(hours)
+    except Exception as error:
+        # e.g. an hour GH Archive doesn't have, no internet, a database error
+        print(f"\nStopped by an error: {error}")
+        ok = False
+    print(f'\n{"Done" if ok else "NOT done (see the messages above)"}: database "{name}".')
     sys.exit(0 if ok else 1)
 
 

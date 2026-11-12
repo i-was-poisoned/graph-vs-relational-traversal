@@ -10,12 +10,12 @@ The project runs two separate processes. Each one loads its data into a
 database **with the same name on both servers** (PostgreSQL and Neo4j), so
 the two models always hold exactly the same data.
 
-| | 1. Benchmark data (hours you choose) | 2. Daily 24-hour pipeline |
+| | 1. Manual pipeline (hours you choose) | 2. Automatic 24-hour pipeline |
 |---|---|---|
 | **Data** | One hour, or several consecutive hours, chosen by you | The 24 complete hours that ended 24 hours ago |
-| **Database** (PostgreSQL and Neo4j) | `gharchive` for the fixed benchmark hour (2026-08-27, 15:00 UTC); `gharchive-<date>-<hour>` for every other choice, e.g. `gharchive-2026-11-10-9` (1 hour) or `gharchive-2026-11-10-9-3h` (3 hours) | `gharchive24h` |
-| **Built by** | You, by hand: `build_hours.py` asks for the date, the first hour and how many hours (the fixed hour was built step by step with `extract_csv.py`, `load_postgres.py`, `load_neo4j.py`) | `pipeline.py`, started **once a day** by Windows Task Scheduler, without asking anything |
-| **Changes?** | **Never by itself.** `gharchive` is frozen, so every measurement can be repeated on the same data; the other databases only change if you load the same choice again, which empties them first | Rebuilt on every run |
+| **Database** (PostgreSQL and Neo4j) | `gharchive-<date>-<hour>`, e.g. `gharchive-2026-11-10-9` (1 hour) or `gharchive-2026-11-10-9-3h` (3 hours); plus `gharchive`, the fixed benchmark hour (2026-08-27, 15:00 UTC) | `gharchive24h` |
+| **Started by** | You: `./run.sh scripts/build_hours.py` asks for the date, the first hour and how many hours | Nobody: Windows Task Scheduler's trigger starts `pipeline.py` on its own, once a day, without asking anything |
+| **Changes?** | **Never by itself.** `gharchive` is frozen, so every measurement can be repeated on the same data; the other databases only change if you load the same choice again, which empties them first | Rebuilt once a day |
 | **Purpose** | Measuring and comparing queries under repeatable conditions, at different data volumes | Fresh, larger data through a repeatable, automatic data-engineering process |
 
 ```
@@ -32,8 +32,264 @@ with `gharchive-`. (Names use dashes, never underscores, because Neo4j
 doesn't allow `_` in database names. Several databases on one Neo4j server
 need the Enterprise Edition, which Neo4j Desktop includes for free.)
 
-**How to run all of this, step by step, is in
-[Running everything, step by step](#running-everything-step-by-step).**
+## 1. The manual pipeline, step by step
+
+All commands are typed in **Git Bash**, in the project folder
+(`cd /c/dev/Research`, or wherever you cloned it). Times in GH Archive and
+in the scripts are always **UTC**.
+
+### Step 0. What must be running
+
+| Needed for | What | How to check |
+|---|---|---|
+| Everything that uses the databases | The **PostgreSQL** service (it starts by itself with Windows) | Windows *Services* app: `postgresql-x64-18` is *Running* |
+| Everything that uses the databases | **Neo4j Desktop** open, with the instance `gharchive` **started** | Neo4j Desktop shows the instance as *Running* |
+| Downloads | An internet connection | `https://data.gharchive.org` opens in a browser |
+
+### Step 1. Once: set up the project
+
+Follow [Setup](#setup): create `.venv`, install `requirements.txt` (and
+`requirements-dev.txt` for the tests), and create `secrets.sh` with your
+passwords. Then check that both servers answer:
+
+```bash
+./run.sh scripts/check_connections.py     # expected: "Both databases are reachable."
+```
+
+### Step 2. Once: build the fixed benchmark (`gharchive`)
+
+The benchmark's reference hour was built step by step, one script per stage:
+
+```bash
+./run.sh scripts/download_gharchive.py    # data/2026-08-27-15.json.gz and .json
+./run.sh scripts/extract_csv.py           # data/2026-08-27-15.json -> data/csv/*.csv
+./run.sh scripts/load_postgres.py         # data/csv -> PostgreSQL database "gharchive"
+./run.sh scripts/load_neo4j.py            # data/csv -> Neo4j database "gharchive"
+```
+
+Each loader ends with a table comparing the database with the CSV files;
+every line must say `OK` (14,515 actors, 14,995 repos, 15,053 connections).
+This is done once: `gharchive` is frozen and nothing rebuilds it. (The
+database `gharchive` must exist before the first load: `CREATE DATABASE
+gharchive;` in pgAdmin or `psql -U postgres`, and in Neo4j Desktop or Neo4j
+Browser.)
+
+### Step 3. Load the hours you choose
+
+```bash
+./run.sh scripts/build_hours.py
+```
+
+It asks three questions (press Enter to keep the value in brackets):
+
+| Question | Default (Enter) | Accepted answers |
+|---|---|---|
+| `Date (UTC)` | `2026-08-27` | A date written `YYYY-MM-DD`, from 2015-01-01 (older files use another format) |
+| `First hour (UTC, 0-23)` | `15` | An hour from 0 to 23, in UTC |
+| `How many consecutive hours` | `1` | From 1 to 168 (a week); the hours may cross midnight |
+
+A wrong answer, or hours GH Archive hasn't published yet, are explained and
+asked again. A last question confirms the choice (`n`, or `Ctrl+C`, = do
+nothing):
+
+```
+Date (UTC) [2026-08-27]: 2026-11-10
+First hour (UTC, 0-23) [15]: 9
+How many consecutive hours [1]: 3
+Load 2026-11-10 09:00 -> 2026-11-10 12:00 UTC (3 hours) into "gharchive-2026-11-10-9-3h"? (if that database already exists, it's emptied first) [Y/n]: y
+```
+
+The database name records exactly what's inside:
+`gharchive-2026-11-10-9` = 1 hour from 2026-11-10 09:00 UTC;
+`gharchive-2026-11-10-9-3h` = 3 hours from 2026-11-10 09:00 UTC.
+
+### Step 4. What it does after you confirm
+
+Every stage announces what it's about to do and then confirms it, always
+naming the database:
+
+| Stage | What happens |
+|---|---|
+| **0. Check the servers** | Both PostgreSQL and Neo4j must answer; if one doesn't, it stops with "Nothing was changed" (so one side is never emptied while the other can't be) |
+| **1. Download** | The hours go to `data/hours/` (each about 10-15 MB); hours already there are reused, even by another choice |
+| **2. Extract** | `extract_csv.py` turns the events into `actors.csv`, `repos.csv` and `actor_repo.csv` in `data/hours/csv/<database name>/` (bots left out) |
+| **3. Empty and check** | Deletes the database on both servers if it exists (`DROP DATABASE ... WITH (FORCE)` in PostgreSQL, `CREATE OR REPLACE DATABASE` in Neo4j) and creates it again, then **checks that it's really empty** (PostgreSQL tables, Neo4j nodes, relationships and constraints all 0); if not, it stops without loading anything |
+| **4. Load PostgreSQL** | `load_postgres.py` creates the tables and loads them; every count must match its CSV file |
+| **5. Load Neo4j** | `load_neo4j.py` creates the constraints, nodes and relationships; every count must match its CSV file |
+
+Stage 3, for example, when loading the same choice a second time:
+
+```
+== 3. Empty the database "gharchive-2026-11-10-9-3h" on both sides, and check that it is empty
+Deleting the PostgreSQL database "gharchive-2026-11-10-9-3h" and all its data ...
+The PostgreSQL database "gharchive-2026-11-10-9-3h" has been deleted.
+Creating the PostgreSQL database "gharchive-2026-11-10-9-3h" (empty) ...
+The PostgreSQL database "gharchive-2026-11-10-9-3h" has been created.
+Deleting the Neo4j database "gharchive-2026-11-10-9-3h" and all its data, then creating it again (empty) ...
+The Neo4j database "gharchive-2026-11-10-9-3h" has been deleted and created again.
+Checking that the database "gharchive-2026-11-10-9-3h" is empty on both sides ...
+  PostgreSQL tables      0   empty
+  Neo4j nodes            0   empty
+  Neo4j relationships    0   empty
+  Neo4j constraints      0   empty
+The database "gharchive-2026-11-10-9-3h" is empty in PostgreSQL and in Neo4j: ready to load.
+```
+
+(The first time, it says instead that the database "doesn't exist yet:
+nothing to delete".) The run ends with a one-line summary and
+`Done: database "gharchive-2026-11-10-9-3h".` As a rough guide, one hour
+takes well under a minute and 24 hours about three; downloads depend on your
+connection.
+
+Only databases whose name starts with `gharchive-` can be emptied this way:
+the script refuses to empty `gharchive`, `gharchive24h` or any other
+database, even by mistake.
+
+### Step 5. Delete a database you no longer need
+
+Delete it **on both sides** (this can't be undone; never do it to
+`gharchive`):
+
+```sql
+-- PostgreSQL (pgAdmin, or psql -U postgres); the double quotes are needed because of the dashes
+DROP DATABASE "gharchive-2026-11-10-9-3h";
+```
+
+```cypher
+// Neo4j Browser; the backticks are needed because of the dashes
+DROP DATABASE `gharchive-2026-11-10-9-3h`;
+```
+
+The downloaded hours in `data/hours/` can be deleted at any time; they're
+downloaded again if needed.
+
+### When something goes wrong
+
+| Message | Cause | What to do |
+|---|---|---|
+| `Missing virtual environment (.venv)` / `Missing secrets.sh` | Step 1 not done | Do [Setup](#setup) |
+| `PostgreSQL isn't answering` / `connection to server at "localhost" ... failed` | The PostgreSQL service isn't running | Start it in the *Services* app |
+| `Neo4j isn't answering` / a Neo4j error mentioning `localhost:7687` | Neo4j Desktop is closed, or the instance is stopped | Open Neo4j Desktop and start the instance |
+| `... does not exist (not published yet?)` | That hour isn't on GH Archive (yet) | Choose an older hour |
+| `MISMATCH` / `DON'T match` | A database doesn't hold what the CSVs say | Run the same choice again (it starts from empty) |
+| `Permission denied` for `./run.sh` | The file lost its "executable" flag | Use `bash run.sh ...` instead |
+
+## 2. The automatic 24-hour pipeline
+
+[scripts/pipeline.py](scripts/pipeline.py) keeps the `gharchive24h`
+databases (PostgreSQL and Neo4j) filled with the last 24 complete UTC hours,
+ending 24 hours ago so every hour is surely published. **There are no steps
+to follow: it runs on its own whenever its trigger fires.**
+
+**When it runs.** Windows Task Scheduler's trigger fires when you log on and
+then every 15 minutes. Each time, the pipeline first checks:
+
+| Check | If true |
+|---|---|
+| Today's run (your computer's date) already succeeded | Nothing to do until tomorrow |
+| PostgreSQL or Neo4j doesn't answer (e.g. Neo4j Desktop isn't open yet) | Try again 15 minutes later |
+
+So, in practice: **turn on the computer and open Neo4j Desktop**, and within
+15 minutes the day's pipeline runs, once, hidden (no window). If a run fails
+(e.g. no internet), the next check simply tries again.
+
+**What a run does:**
+
+1. works out the window: started at 10:15 UTC on 2026-11-12, it loads
+   2026-11-10 10:00 → 2026-11-11 10:00 UTC (10:00 UTC is 10:00 in Lisbon in
+   winter and 11:00 in Madrid; in summer, one hour more);
+2. downloads only the missing hours to `data/live/raw/` and deletes those that
+   left the window (with retries; a missing hour stops the run);
+3. extracts the CSVs with the same code as process 1 (`extract_csv.py`);
+4. checks both servers and creates `gharchive24h` if it doesn't exist, before
+   emptying anything;
+5. rebuilds both databases with the same loaders as process 1 and checks the
+   counts.
+
+A lock file stops two runs from overlapping. If a run fails, `gharchive24h`
+keeps the previous window, unless a load had already started.
+
+**Where to see what happened:**
+
+| Where | What you see |
+|---|---|
+| `logs/pipeline.log` | Every real run: the window, downloads, counts, load times and `Status: SUCCESS` or `FAILURE` (`tail -20 logs/pipeline.log`) |
+| `data/live/scheduled_status.txt` | What the last check found, e.g. `2026-11-12 10:15 (your time): Neo4j isn't answering (...); will try again at the next check` or `run SUCCEEDED` |
+| `data/live/last_success_date.txt` | The date (yours, not UTC) of the last successful run |
+| `data/live/current_window.txt` | The window currently loaded in `gharchive24h`, and its counts |
+
+Task Scheduler's *Last Run Result* always shows `0x0`, even when a run failed
+(the hidden launcher, `conhost.exe --headless`, doesn't pass the result on),
+so use the files above.
+
+First full run (window 2026-10-20 12:00 → 2026-10-21 12:00 UTC): 160 s in
+total, all counts matching.
+
+| | Benchmark hour | 24-hour window |
+|---|---|---|
+| Events | 69,429 | 1,250,059 |
+| Bot events skipped | 1,970 (2.8%) | 297,733 (23.8%) |
+| Events without an id skipped | 0 | 2 |
+| Actors / repos / connections | 14,515 / 14,995 / 15,053 | 362,730 / 406,603 / 424,098 |
+
+<details>
+<summary><b>One-time setup: create the trigger in Task Scheduler</b></summary>
+
+With the Task Scheduler window (Start menu → *Task Scheduler*):
+
+1. *Action* → **Create Task...** (not "Create Basic Task", which hides
+   the settings needed below).
+2. **General** tab: *Name:* `graph-vs-relational pipeline`; keep **Run only
+   when user is logged on** (Windows doesn't need to store your password, and
+   Neo4j Desktop only runs while you're logged on anyway).
+3. **Triggers** tab → *New...*: *Begin the task:* **At log on**, *Specific
+   user:* you; *Advanced settings:* tick **Repeat task every:** `15 minutes`,
+   *for a duration of:* **Indefinitely**; *Enabled* ticked → OK.
+4. **Actions** tab → *New...*: *Action:* Start a program;
+   *Program/script:* `conhost.exe`; *Add arguments:*
+   `--headless "C:\Program Files\Git\bin\bash.exe" -lc "/c/dev/Research/run.sh scripts/pipeline.py --scheduled"`
+   (change `/c/dev/Research` if the project is somewhere else) → OK.
+5. **Conditions** tab: untick **Start the task only if the computer is on AC
+   power**, so it also runs on battery.
+6. **Settings** tab: tick **Stop the task if it runs longer than:** 1 hour;
+   *If the task is already running:* **Do not start a new instance** → OK.
+7. Test it: select the task → **Run**. Nothing appears on screen; after about
+   3 minutes, `logs/pipeline.log` ends with `Status: SUCCESS` and
+   `data/live/scheduled_status.txt` says `run SUCCEEDED`. Press **Run** again:
+   this time it ends at once ("today's run already succeeded").
+
+Or the same task in one go, in PowerShell:
+
+```powershell
+$action   = New-ScheduledTaskAction -Execute 'conhost.exe' -Argument '--headless "C:\Program Files\Git\bin\bash.exe" -lc "/c/dev/Research/run.sh scripts/pipeline.py --scheduled"'
+$trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15)).Repetition
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+Register-ScheduledTask -TaskName 'graph-vs-relational pipeline' -Action $action -Trigger $trigger -Settings $settings
+```
+
+To pause or remove it: right-click the task → *Disable* (or *Delete*).
+
+</details>
+
+<details>
+<summary><b>Optional: run it by hand</b></summary>
+
+Never needed, but useful to try something. A successful run by hand also
+counts as the day's run.
+
+```bash
+./run.sh scripts/pipeline.py --dry-run   # show the window and planned downloads only; changes nothing
+./run.sh scripts/pipeline.py             # real run (about 3 minutes)
+./run.sh scripts/pipeline.py --window-hours 6 --lag-hours 2   # another window
+./run.sh scripts/pipeline.py --scheduled # exactly what the trigger runs
+```
+
+</details>
+
+The full design, decisions and results are in
+[docs_english/project-notes.md](docs_english/project-notes.md), section "The
+24-hour pipeline".
 
 ## Dataset
 
@@ -51,11 +307,8 @@ The **benchmark** uses a single, fixed hour for reproducibility:
   building a meaningfully connected graph. It is also comfortably in the past,
   so the file is guaranteed to be published and available.
 
-Download it with:
-
-```bash
-python scripts/download_gharchive.py
-```
+It's also the default answer of `build_hours.py`. How it was downloaded and
+loaded is in [step 2](#step-2-once-build-the-fixed-benchmark-gharchive).
 
 ## Schema
 
@@ -78,8 +331,8 @@ Stage) for the full analysis.
 | Connection | table `actor_repo` (`actor_id`, `repo_id`) | edge `(:Actor)-[:INTERACTED_WITH]->(:Repo)` |
 | Unique keys / indexes | primary keys on `actor.id`, `repo.id`, `(actor_id, repo_id)`, plus an index on `actor_repo.repo_id` | uniqueness constraints on `Actor.id`, `Repo.id` |
 
-- The benchmark uses a database called `gharchive` on both sides (the
-  24-hour pipeline uses the same schema in `gharchive24h`).
+- Every database of both processes (`gharchive`, `gharchive-...`,
+  `gharchive24h`) uses this same schema.
 - Keys use GitHub's numeric ids (`event["actor"]["id"]`, `event["repo"]["id"]`),
   not names: a user can change their login, but their id never changes.
 - **One connection per actor–repo pair**, never repeated: ten pushes by the
@@ -92,96 +345,6 @@ Stage) for the full analysis.
 | | Actors | Repos | Connections |
 |---|---|---|---|
 | PostgreSQL and Neo4j (2026-08-27, 15:00 UTC, no bots) | 14,515 | 14,995 | 15,053 |
-
-How the benchmark databases are built:
-
-```bash
-./run.sh scripts/extract_csv.py      # JSON -> data/csv/{actors,repos,actor_repo}.csv
-./run.sh scripts/load_postgres.py    # CSVs -> PostgreSQL (tables, keys, index, ANALYZE)
-./run.sh scripts/load_neo4j.py       # same CSVs -> Neo4j (nodes, edges, constraints)
-```
-
-## Loading other hours (`build_hours.py`)
-
-[scripts/build_hours.py](scripts/build_hours.py) builds a database from GH
-Archive hours you choose. It asks three questions (press Enter to keep the
-value in brackets):
-
-| Question | Default (Enter) | Accepted answers |
-|---|---|---|
-| `Date (UTC)` | `2026-08-27` | A date written `YYYY-MM-DD`, from 2015-01-01 (older files use another format) |
-| `First hour (UTC, 0-23)` | `15` | An hour from 0 to 23, in UTC |
-| `How many consecutive hours` | `1` | From 1 to 168 (a week); the hours may cross midnight |
-
-A wrong answer, or hours GH Archive hasn't published yet, are explained and
-asked again. A last question confirms the choice (`n` = do nothing). Then it:
-
-1. downloads the hours to `data/hours/` (hours already there are reused, even
-   by another choice);
-2. extracts the CSVs with `extract_csv.py` into `data/hours/csv/<database name>/`;
-3. **empties the database on both servers**: deletes it if it exists
-   (`DROP DATABASE ... WITH (FORCE)` in PostgreSQL, `CREATE OR REPLACE DATABASE`
-   in Neo4j) and creates it again, so nothing from an earlier load survives,
-   not even tables or constraints;
-4. **checks that it really is empty** (PostgreSQL tables, Neo4j nodes,
-   relationships and constraints must all be 0) and stops without loading
-   anything if it isn't;
-5. loads it with the same loaders as the benchmark and checks the counts.
-
-Only databases whose name starts with `gharchive-` can be emptied this way;
-the script refuses to empty `gharchive`, `gharchive24h` or any other
-database, even by mistake.
-
-The database name records exactly what's inside:
-`gharchive-2026-11-10-9` = 1 hour from 2026-11-10 09:00 UTC;
-`gharchive-2026-11-10-9-3h` = 3 hours from 2026-11-10 09:00 UTC.
-
-## The 24-hour pipeline
-
-[scripts/pipeline.py](scripts/pipeline.py) rebuilds the `gharchive24h`
-databases (PostgreSQL and Neo4j) from the last 24 complete UTC hours, ending
-24 hours ago so every hour is surely published. It asks nothing, so it can
-run on its own, once a day. For example, at
-2026-10-22 11:15 UTC it loads 2026-10-20 11:00 → 2026-10-21 11:00. Each run:
-
-1. computes the window (in UTC, like GH Archive's file names);
-2. downloads only the missing hours to `data/live/raw/` and deletes those that
-   left the window (with retries; a missing hour stops the run);
-3. extracts the CSVs with the same code as the benchmark (`extract_csv.py`);
-4. checks both servers and creates `gharchive24h` if it doesn't exist —
-   before emptying anything;
-5. rebuilds both databases with the same loaders as the benchmark and checks
-   the counts;
-6. logs everything to `logs/pipeline.log` (UTC times) and records the loaded
-   window in `data/live/current_window.txt`.
-
-A lock file stops two runs from overlapping, and the exit code (0/1) tells
-the scheduler whether the run succeeded.
-
-```bash
-./run.sh scripts/pipeline.py --dry-run   # show the window and planned downloads only
-./run.sh scripts/pipeline.py             # real run
-./run.sh scripts/pipeline.py --window-hours 6 --lag-hours 2   # other window
-./run.sh scripts/pipeline.py --scheduled # what Task Scheduler runs: only if not done today and both servers answer
-```
-
-First full run (window 2026-10-20 12:00 → 2026-10-21 12:00 UTC): 160 s in
-total, all counts matching.
-
-| | Benchmark hour | 24-hour window |
-|---|---|---|
-| Events | 69,429 | 1,250,059 |
-| Bot events skipped | 1,970 (2.8%) | 297,733 (23.8%) |
-| Events without an id skipped | 0 | 2 |
-| Actors / repos / connections | 14,515 / 14,995 / 15,053 | 362,730 / 406,603 / 424,098 |
-
-The pipeline runs **on its own, once a day**: Task Scheduler checks every 15
-minutes, and the pipeline does the day's work as soon as the computer is on and
-both servers answer (PostgreSQL starts with Windows; Neo4j Desktop must be
-opened). You never need to start it by hand. How to set it up is in [step 6](#6-process-2-let-the-pipeline-run-on-its-own-once-a-day) below. The
-full design, decisions and results are in
-[docs_english/project-notes.md](docs_english/project-notes.md), section "The
-24-hour pipeline".
 
 ## Tools and versions
 
@@ -243,230 +406,14 @@ Step-by-step installation of PostgreSQL, Neo4j and the virtual environment
 [docs_english/project-notes.md](docs_english/project-notes.md), section
 "Installing the software".
 
-## Running everything, step by step
-
-All commands are typed in **Git Bash**, in the project folder
-(`cd /c/dev/Research`, or wherever you cloned it). Times in GH Archive and
-in the scripts are always **UTC**; Task Scheduler uses your computer's local
-time.
-
-### 0. What must be running
-
-| Needed for | What | How to check |
-|---|---|---|
-| Everything that uses the databases | The **PostgreSQL** service | Windows *Services* app: `postgresql-x64-18` is *Running* |
-| Everything that uses the databases | **Neo4j Desktop** open, with the instance `gharchive` **started** | Neo4j Desktop shows the instance as *Running* |
-| Downloads (`download_gharchive.py`, `build_hours.py`, `pipeline.py`) | An internet connection | `https://data.gharchive.org` opens in a browser |
-| Only `./simulate_ci.sh` | **Docker Desktop** open | It shows *Engine running* |
-
-### 1. Once: set up the project
-
-Follow [Setup](#setup): create `.venv`, install `requirements.txt` (and
-`requirements-dev.txt` for the tests), and create `secrets.sh` with your
-passwords. Then check that both servers answer:
-
-```bash
-./run.sh scripts/check_connections.py     # expected: "Both databases are reachable."
-```
-
-### 2. Once: build the fixed benchmark (`gharchive`)
-
-```bash
-./run.sh scripts/download_gharchive.py    # data/2026-08-27-15.json.gz and .json
-./run.sh scripts/extract_csv.py           # data/2026-08-27-15.json -> data/csv/*.csv
-./run.sh scripts/load_postgres.py         # data/csv -> PostgreSQL database "gharchive"
-./run.sh scripts/load_neo4j.py            # data/csv -> Neo4j database "gharchive"
-```
-
-Each loader ends with a table comparing the database with the CSV files;
-every line must say `OK` (14,515 actors, 14,995 repos, 15,053 connections).
-This is done once: `gharchive` is frozen and nothing rebuilds it
-automatically. (The PostgreSQL database `gharchive` must exist before the
-first load: `CREATE DATABASE gharchive;` in pgAdmin or `psql -U postgres`.
-In Neo4j, create the database `gharchive` in Neo4j Desktop or with
-`CREATE DATABASE gharchive;` in Neo4j Browser.)
-
-### 3. Process 1: load other hours, whenever you want
-
-```bash
-./run.sh scripts/build_hours.py
-```
-
-An example session (here: 3 hours from 2026-11-10 09:00 UTC):
-
-```
-Date (UTC) [2026-08-27]: 2026-11-10
-First hour (UTC, 0-23) [15]: 9
-How many consecutive hours [1]: 3
-Load 2026-11-10 09:00 -> 2026-11-10 12:00 UTC (3 hours) into "gharchive-2026-11-10-9-3h"? (if that database already exists, it's emptied first) [Y/n]: y
-```
-
-Step 3 of its output shows the emptying and the check:
-
-```
-== 3. Empty "gharchive-2026-11-10-9-3h" on both sides, and check that it is empty
-PostgreSQL: "gharchive-2026-11-10-9-3h" deleted (if it existed) and created again
-Neo4j:      "gharchive-2026-11-10-9-3h" deleted (if it existed) and created again
-  PostgreSQL tables      0   empty
-  Neo4j nodes            0   empty
-  Neo4j relationships    0   empty
-  Neo4j constraints      0   empty
-```
-
-It then prints its five steps (download, extract, empty and check, load PostgreSQL,
-load Neo4j), each loader's `OK` table, and finally
-`Done: database "gharchive-2026-11-10-9-3h" on both sides.` As a rough guide,
-one hour takes well under a minute and 24 hours about three (the first
-pipeline run, 24 hours, took 160 s); downloads depend on your connection. To stop at a question, press
-`Ctrl+C`: nothing is changed until you confirm.
-
-To delete a database you no longer need, delete it **on both sides** (this
-can't be undone; never do it to `gharchive`):
-
-```sql
--- PostgreSQL (pgAdmin, or psql -U postgres); the double quotes are needed because of the dashes
-DROP DATABASE "gharchive-2026-11-10-9-3h";
-```
-
-```cypher
-// Neo4j Browser; the backticks are needed because of the dashes
-DROP DATABASE `gharchive-2026-11-10-9-3h`;
-```
-
-The downloaded hours stay in `data/hours/` (each about 10-15 MB) and can be
-deleted at any time; they're downloaded again if needed.
-
-### 4. Process 2: run the pipeline by hand (first time, or whenever you want)
-
-```bash
-./run.sh scripts/pipeline.py --dry-run    # shows the window and what it would download; changes nothing
-./run.sh scripts/pipeline.py              # real run: about 3 minutes
-```
-
-The real run ends with `Status: SUCCESS`. It downloads only the hours it
-doesn't have yet, so a run one day after the previous one downloads about 24
-new files and deletes the 24 that left the window.
-
-### 5. Process 2: check what the pipeline did
-
-| Where | What you see |
-|---|---|
-| `logs/pipeline.log` | Every run: the window, downloads, counts, load times and `Status: SUCCESS` or `FAILURE`. See the end with `tail -20 logs/pipeline.log` |
-| `data/live/current_window.txt` | The window currently loaded in `gharchive24h`, and its counts |
-| `data/live/scheduled_status.txt` (once scheduled) | What the last automatic check found: nothing to do, a server not answering yet, or whether the run succeeded |
-| `data/live/last_success_date.txt` | The date (yours, not UTC) of the last successful run |
-
-If a run fails (for example, Neo4j Desktop was closed), `gharchive24h` keeps
-the previous window, unless a load had already started, and the log says why.
-
-### 6. Process 2: let the pipeline run on its own, once a day
-
-The pipeline is meant to be **left alone**. Task Scheduler starts it when you
-log on to Windows and then **every 15 minutes**, with `--scheduled`. Each
-time, the pipeline first checks two things and, if either is true, ends in a
-few seconds without changing anything:
-
-| Check | If true |
-|---|---|
-| Today's run (your computer's date) already succeeded | Nothing to do until tomorrow |
-| PostgreSQL or Neo4j doesn't answer (e.g. Neo4j Desktop isn't open yet) | Try again 15 minutes later |
-
-So, in practice: **turn on the computer and open Neo4j Desktop** (PostgreSQL
-starts by itself with Windows), and within 15 minutes the day's pipeline runs,
-once. If a run fails (e.g. GH Archive is unreachable), the next check simply
-tries again. These quick checks don't write to `logs/pipeline.log`; the last
-one is described in `data/live/scheduled_status.txt`, e.g.
-`2026-11-12 10:15 (your time): Neo4j isn't answering (...); will try again at the next check`.
-
-It runs **hidden** (no window), through `conhost.exe --headless`. Because of
-that, Task Scheduler's *Last Run Result* is always `0x0`, even when the
-pipeline failed: check `logs/pipeline.log` and
-`data/live/scheduled_status.txt` instead (step 5).
-
-**Create the task with the Task Scheduler window** (Start menu → *Task
-Scheduler*):
-
-1. *Action* → **Create Task...** (not "Create Basic Task", which hides
-   the settings needed below).
-2. **General** tab:
-   - *Name:* `graph-vs-relational pipeline`
-   - Keep **Run only when user is logged on** (Windows doesn't need to store
-     your password, and Neo4j Desktop only runs while you're logged on
-     anyway).
-3. **Triggers** tab → *New...*:
-   - *Begin the task:* **At log on**, *Specific user:* you.
-   - *Advanced settings:* tick **Repeat task every:** `15 minutes`, *for a
-     duration of:* **Indefinitely**.
-   - *Enabled* ticked → OK.
-4. **Actions** tab → *New...*:
-   - *Action:* Start a program.
-   - *Program/script:* `conhost.exe`
-   - *Add arguments:*
-     `--headless "C:\Program Files\Git\bin\bash.exe" -lc "/c/dev/Research/run.sh scripts/pipeline.py --scheduled"`
-     (change `/c/dev/Research` if the project is somewhere else)
-   - OK.
-5. **Conditions** tab: untick **Start the task only if the computer is on AC
-   power**, so it also runs on battery.
-6. **Settings** tab:
-   - Tick **Stop the task if it runs longer than:** 1 hour.
-   - *If the task is already running:* **Do not start a new instance**.
-   - OK.
-7. Test it now: select the task → **Run**. Nothing appears on screen; after
-   about 3 minutes, check the end of `logs/pipeline.log` (`Status: SUCCESS`)
-   and `data/live/scheduled_status.txt` (`run SUCCEEDED`). Press **Run** again:
-   this time it ends at once, with "today's run already succeeded".
-
-**Or in one go, in PowerShell** (the same task and settings):
-
-```powershell
-$action   = New-ScheduledTaskAction -Execute 'conhost.exe' -Argument '--headless "C:\Program Files\Git\bin\bash.exe" -lc "/c/dev/Research/run.sh scripts/pipeline.py --scheduled"'
-$trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15)).Repetition
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 1)
-Register-ScheduledTask -TaskName 'graph-vs-relational pipeline' -Action $action -Trigger $trigger -Settings $settings
-```
-
-**Which data a day's run loads:** the 24 complete UTC hours ending 24 hours
-before it starts. Started at 10:15 UTC on 2026-11-12, it loads
-2026-11-10 10:00 → 2026-11-11 10:00 UTC. (10:00 UTC is 10:00 in Lisbon in
-winter and 11:00 in Madrid; in summer, one hour more.) So the window depends
-on when you open the servers that day.
-
-**To pause or remove it:** right-click the task → *Disable* (or *Delete*).
-Nothing else depends on it. Running the pipeline by hand (step 4) also counts
-as the day's run.
-
-### 7. Run the tests
-
-```bash
-source .venv/Scripts/activate && python -m pytest   # unit tests: no internet, no databases
-./run.sh -m pytest -m integration                   # integration tests on your servers (database "gharchivetest")
-./simulate_ci.sh                                     # integration tests in Docker, exactly as in CI
-```
-
-Details in [Tests](#tests).
-
-### 8. When something goes wrong
-
-| Message | Cause | What to do |
-|---|---|---|
-| `Missing virtual environment (.venv)` / `Missing secrets.sh` | Step 1 not done | Do [Setup](#setup) |
-| `connection to server at "localhost" ... failed` | The PostgreSQL service isn't running | Start it in the *Services* app |
-| A Neo4j connection error mentioning `localhost:7687` | Neo4j Desktop is closed, or the instance is stopped | Open Neo4j Desktop and start the instance |
-| `... does not exist (not published yet?)` | That hour isn't on GH Archive yet (or never was) | Choose an older hour; the pipeline retries on its next run |
-| `Another pipeline run is still in progress; skipping this one` | A previous run is still going | Wait; a lock older than 3 hours is removed automatically |
-| `MISMATCH` in a loader's table | A database doesn't hold what the CSVs say | Run the same command again; if it repeats, check the log |
-| The day's data never arrives | Neo4j Desktop wasn't opened, or every run failed | Read `data/live/scheduled_status.txt` and the end of `logs/pipeline.log` |
-| `Permission denied` for `./run.sh` | The file lost its "executable" flag | Use `bash run.sh ...` instead |
-
 ## Tests
 
-Unit tests for the parts of the pipeline with their own logic (bot filtering,
-empty-repo events, latest names, unique connections, the rolling window, GH
-Archive file names, CSV reading, and `build_hours.py`'s questions and
-database names) live in [tests/](tests/). They use tiny
-made-up events in a temporary folder, so they need neither the internet nor
-the databases (and no passwords):
+Unit tests for the parts of the pipelines with their own logic (bot
+filtering, empty-repo events, latest names, unique connections, the rolling
+window, "already ran today", GH Archive file names, CSV reading, and
+`build_hours.py`'s questions, database names and safety check) live in
+[tests/](tests/). They use tiny made-up events in a temporary folder, so they
+need neither the internet nor the databases (and no passwords):
 
 ```bash
 source .venv/Scripts/activate
@@ -479,11 +426,12 @@ load the same tiny data set into real PostgreSQL and Neo4j databases and check
 that both hold exactly the same actors, repos and connections, and that a
 two-hop traversal gives the same answer in SQL and Cypher. They are marked
 `integration`, so the plain command above skips them. They never use the
-`gharchive` or `gharchive24h` databases, only a separate test database:
+`gharchive`, `gharchive-...` or `gharchive24h` databases, only a separate
+test database:
 
 ```bash
 ./run.sh -m pytest -m integration    # against your local servers (database "gharchivetest")
-./simulate_ci.sh                     # in Docker containers, exactly as in CI
+./simulate_ci.sh                     # in Docker containers, exactly as in CI (needs Docker Desktop open)
 ```
 
 GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs both
