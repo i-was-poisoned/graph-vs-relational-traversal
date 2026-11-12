@@ -4881,6 +4881,65 @@ docker run -d -e NEO4J_AUTH=none -p 7687:7687 ... neo4j:2026.10.0-community
 And at the end, it deletes the containers. That's why `services:` **only
 works because the machine has Docker**.
 
+**What an image includes, and what it doesn't.** A database image
+includes the **program** (the server), already installed and configured,
+but **empty**: none of your databases, tables or data.
+
+| | What the image **already includes** | What **the tests add** |
+|---|---|---|
+| `postgres:18.6` | The PostgreSQL 18.6 server; on its first start it creates a `postgres` user and an empty initial database, also called `postgres` | The `gharchivetest` database, the `actor`, `repo` and `actor_repo` tables, and their rows |
+| `neo4j:2026.10.0-community` | The Neo4j 2026.10.0 server; an empty database called `neo4j` | The uniqueness constraints, the `:Actor` and `:Repo` nodes, and the `INTERACTED_WITH` relationships |
+
+In other words: starting one of these containers is like having **a
+freshly installed PostgreSQL (or Neo4j)**, like yours on Windows right
+after the installer finished, before `gharchive` was created. The `-e`
+variables (`POSTGRES_HOST_AUTH_METHOD=trust`, `NEO4J_AUTH=none`) play
+the role of the installer's questions ("which password?"): the image
+reads them the first time it starts and configures itself with them.
+
+**Can you create databases and load data in a container? Yes.** To
+your scripts, a server in a container is **a normal server**: they
+connect to it, create databases, create tables, load data with `COPY` or
+`UNWIND` and run queries, exactly as with your Windows servers. That's
+exactly what the integration tests do. The only things that change are
+**where** the server lives and that it's **temporary**.
+
+**What happens, step by step, in the `integration-tests` job:**
+
+1. **"Initialize containers":** GitHub downloads the two images and
+   starts one container from each. Both servers are running, but empty.
+2. GitHub waits until PostgreSQL answers (the *health check*).
+3. Your steps: copy the code, install Python 3.14.0 and install the
+   packages.
+4. `pytest` starts. The `csv_dir` fixture writes the **8 made-up
+   events** from `test_integration.py` to a file, runs them through
+   `extract_csv.py` and gets the three CSV files.
+5. `wait_for_neo4j` waits until Neo4j accepts connections, and
+   `ensure_test_databases` **creates the** `gharchivetest` **database**
+   in the container's PostgreSQL (`CREATE DATABASE`). On Neo4j the
+   `neo4j` database, which comes with the image, is used.
+6. The `loaded` fixture calls `load_postgres.load` (creates the tables
+   and fills them with `COPY`) and `load_neo4j.load` (creates the
+   constraints, the nodes and the relationships): **the same loaders**
+   the pipeline uses with your databases.
+7. The 6 tests query both databases and compare what they find with
+   what's expected.
+8. **"Stop containers":** GitHub deletes the containers, and with them
+   everything that was loaded.
+
+**Where does the data come from?** Neither from the image nor from GH
+Archive: it comes from the tests themselves (the `EVENTS` list in
+`test_integration.py`). You could load real data into a container (for
+example, the benchmark CSV files, to try something without touching
+your databases), but the tests use tiny data: that way it loads in
+seconds, the exact expected result is known, and the `data/` folder,
+which isn't in the repository, isn't needed.
+
+**The data disappears at the end.** Everything loaded lives **inside**
+the container and is deleted with it. Every run starts with empty
+servers, so the result doesn't depend on what the previous run left
+behind.
+
 **You can see it on GitHub:** in Actions → the run →
 `integration-tests`, the first step is called **"Initialize
 containers"**. When you expand it, the `docker` commands GitHub ran

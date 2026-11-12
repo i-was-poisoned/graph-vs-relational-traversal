@@ -5195,6 +5195,70 @@ docker run -d -e NEO4J_AUTH=none -p 7687:7687 ... neo4j:2026.10.0-community
 Et à la fin, il supprime les conteneurs. C'est pour cela que `services:`
 **ne fonctionne que parce que la machine a Docker**.
 
+**Ce que contient une image, et ce qu'elle ne contient pas.** Une image
+de base de données contient le **programme** (le serveur), déjà installé
+et configuré, mais **vide** : ni vos bases de données, ni vos tables, ni
+vos données.
+
+| | Ce que l'image **contient déjà** | Ce que **les tests ajoutent** |
+|---|---|---|
+| `postgres:18.6` | Le serveur PostgreSQL 18.6 ; à son premier démarrage, il crée un utilisateur `postgres` et une base initiale vide, appelée elle aussi `postgres` | La base `gharchivetest`, les tables `actor`, `repo` et `actor_repo`, et leurs lignes |
+| `neo4j:2026.10.0-community` | Le serveur Neo4j 2026.10.0 ; une base vide appelée `neo4j` | Les contraintes d'unicité, les nœuds `:Actor` et `:Repo`, et les relations `INTERACTED_WITH` |
+
+Autrement dit : démarrer l'un de ces conteneurs revient à avoir **un
+PostgreSQL (ou un Neo4j) fraîchement installé**, comme le vôtre sous
+Windows juste après l'installateur, avant la création de `gharchive`.
+Les variables de `-e` (`POSTGRES_HOST_AUTH_METHOD=trust`,
+`NEO4J_AUTH=none`) jouent le rôle des questions de l'installateur
+(« quel mot de passe ? ») : l'image les lit à son premier démarrage et se
+configure avec.
+
+**Peut-on créer des bases de données et charger des données dans un
+conteneur ? Oui.** Pour vos scripts, un serveur dans un conteneur est
+**un serveur normal** : ils s'y connectent, créent des bases, créent des
+tables, chargent des données avec `COPY` ou `UNWIND` et lancent des
+requêtes, exactement comme avec vos serveurs Windows. C'est précisément
+ce que font les tests d'intégration. Seuls changent **l'endroit** où vit
+le serveur et le fait qu'il est **temporaire**.
+
+**Ce qui se passe, étape par étape, dans le job `integration-tests` :**
+
+1. **« Initialize containers » :** GitHub télécharge les deux images et
+   démarre un conteneur à partir de chacune. Les deux serveurs tournent,
+   mais vides.
+2. GitHub attend que PostgreSQL réponde (le *health check*).
+3. Vos étapes : copier le code, installer Python 3.14.0 et installer les
+   paquets.
+4. `pytest` démarre. La fixture `csv_dir` écrit les **8 événements
+   inventés** de `test_integration.py` dans un fichier, les fait passer
+   par `extract_csv.py` et obtient les trois CSV.
+5. `wait_for_neo4j` attend que Neo4j accepte les connexions, et
+   `ensure_test_databases` **crée la base** `gharchivetest` dans le
+   PostgreSQL du conteneur (`CREATE DATABASE`). Côté Neo4j, on utilise
+   la base `neo4j`, fournie avec l'image.
+6. La fixture `loaded` appelle `load_postgres.load` (crée les tables et
+   les remplit avec `COPY`) et `load_neo4j.load` (crée les contraintes,
+   les nœuds et les relations) : **les mêmes chargeurs** que la pipeline
+   utilise avec vos bases de données.
+7. Les 6 tests interrogent les deux bases et comparent ce qu'ils
+   trouvent avec ce qui est attendu.
+8. **« Stop containers » :** GitHub supprime les conteneurs, et avec eux
+   tout ce qui a été chargé.
+
+**D'où viennent les données ?** Ni de l'image ni de GH Archive : elles
+viennent des tests eux-mêmes (la liste `EVENTS` de
+`test_integration.py`). On pourrait charger de vraies données dans un
+conteneur (par exemple les CSV du benchmark, pour essayer quelque chose
+sans toucher à vos bases), mais les tests utilisent des données
+minuscules : ainsi le chargement prend quelques secondes, on connaît
+exactement le résultat attendu, et le dossier `data/`, qui n'est pas
+dans le dépôt, n'est pas nécessaire.
+
+**Les données disparaissent à la fin.** Tout ce qui est chargé vit **à
+l'intérieur** du conteneur et est supprimé avec lui. Chaque exécution
+commence avec des serveurs vides, donc le résultat ne dépend pas de ce
+qu'a laissé l'exécution précédente.
+
 **On peut le voir sur GitHub :** dans Actions → l'exécution →
 `integration-tests`, la première étape s'appelle **« Initialize
 containers »**. En la dépliant, on voit les commandes `docker` que GitHub a

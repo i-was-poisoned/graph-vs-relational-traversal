@@ -9,7 +9,7 @@
 # Your own PostgreSQL and Neo4j are never touched: the three containers share
 # one private network (that of the Neo4j container) and publish no port, so
 # they don't clash with the servers already using ports 5432 and 7687.
-# The database containers are removed at the end; the downloaded images stay,
+# The database containers (and their data) are removed at the end; the downloaded images stay,
 # so the next run starts in seconds.
 
 set -u
@@ -23,7 +23,9 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
-cleanup() { docker rm -f gvr-ci-postgres gvr-ci-neo4j >/dev/null 2>&1; }
+# -v also deletes the containers' anonymous volumes: the postgres and neo4j images keep
+# their data in volumes, which "docker rm" alone would leave behind on every run.
+cleanup() { docker rm -f -v gvr-ci-postgres gvr-ci-neo4j >/dev/null 2>&1; }
 cleanup
 trap cleanup EXIT
 

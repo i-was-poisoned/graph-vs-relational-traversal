@@ -5007,6 +5007,66 @@ docker run -d -e NEO4J_AUTH=none -p 7687:7687 ... neo4j:2026.10.0-community
 Y al terminar, borra los contenedores. Por eso `services:` **solo
 funciona porque la máquina tiene Docker**.
 
+**Qué trae una imagen, y qué no.** Una imagen de base de datos trae el
+**programa** (el servidor), ya instalado y configurado, pero **vacío**:
+ni tus bases de datos, ni tus tablas, ni tus datos.
+
+| | Lo que **ya trae** la imagen | Lo que **ponen las pruebas** |
+|---|---|---|
+| `postgres:18.6` | El servidor PostgreSQL 18.6; al arrancar por primera vez crea un usuario `postgres` y una base de datos inicial vacía, también llamada `postgres` | La base de datos `gharchivetest`, las tablas `actor`, `repo` y `actor_repo`, y sus filas |
+| `neo4j:2026.10.0-community` | El servidor Neo4j 2026.10.0; una base de datos vacía llamada `neo4j` | Las restricciones de unicidad, los nodos `:Actor` y `:Repo`, y las relaciones `INTERACTED_WITH` |
+
+Es decir: arrancar uno de estos contenedores equivale a tener **un
+PostgreSQL (o un Neo4j) recién instalado**, como el tuyo de Windows justo
+al terminar el instalador, antes de crear `gharchive`. Las variables de
+`-e` (`POSTGRES_HOST_AUTH_METHOD=trust`, `NEO4J_AUTH=none`) hacen el papel
+de las preguntas del instalador ("¿qué contraseña?"): la imagen las lee
+la primera vez que arranca y se configura con ellas.
+
+**¿Se pueden crear bases de datos y cargar datos en un contenedor? Sí.**
+Para tus scripts, un servidor en un contenedor es **un servidor normal**:
+se conectan a él, crean bases de datos, crean tablas, cargan datos con
+`COPY` o `UNWIND` y hacen consultas, exactamente igual que con tus
+servidores de Windows. Es justo lo que hacen las pruebas de integración.
+Lo único que cambia es **dónde vive** el servidor y que es **temporal**.
+
+**Qué pasa, paso a paso, en el trabajo `integration-tests`:**
+
+1. **"Initialize containers":** GitHub descarga las dos imágenes y
+   arranca un contenedor de cada una. Los dos servidores están
+   encendidos, pero vacíos.
+2. GitHub espera a que PostgreSQL responda (el *health check*).
+3. Tus pasos: copiar el código, instalar Python 3.14.0 e instalar los
+   paquetes.
+4. `pytest` empieza. La fixture `csv_dir` escribe los **8 eventos
+   inventados** de `test_integration.py` en un archivo, los pasa por
+   `extract_csv.py` y obtiene los tres CSV.
+5. `wait_for_neo4j` espera a que Neo4j acepte conexiones, y
+   `ensure_test_databases` **crea la base de datos** `gharchivetest` en
+   el PostgreSQL del contenedor (`CREATE DATABASE`). En Neo4j se usa la
+   base `neo4j`, que ya viene en la imagen.
+6. La fixture `loaded` llama a `load_postgres.load` (crea las tablas y
+   las llena con `COPY`) y a `load_neo4j.load` (crea las restricciones,
+   los nodos y las relaciones): **los mismos cargadores** que usa la
+   pipeline con tus bases de datos.
+7. Las 6 pruebas consultan las dos bases de datos y comparan lo que
+   encuentran con lo esperado.
+8. **"Stop containers":** GitHub borra los contenedores, y con ellos
+   todo lo que se cargó.
+
+**¿De dónde salen los datos?** Ni de la imagen ni de GH Archive: salen
+de las propias pruebas (la lista `EVENTS` de `test_integration.py`). Se
+podrían cargar datos reales en un contenedor (por ejemplo, los CSV del
+benchmark, para probar algo sin tocar tus bases de datos), pero para las
+pruebas se usan datos diminutos: así se carga en segundos, se sabe
+exactamente qué resultado esperar, y no hace falta la carpeta `data/`,
+que no está en el repositorio.
+
+**Los datos desaparecen al final.** Todo lo cargado vive **dentro** del
+contenedor y se borra con él. Cada ejecución empieza con los servidores
+vacíos, así que el resultado no depende de lo que dejara la ejecución
+anterior.
+
 **Se puede ver en GitHub:** en Actions → la ejecución →
 `integration-tests`, el primer paso se llama **"Initialize containers"**.
 Al desplegarlo aparecen los comandos `docker` que GitHub ejecutó
