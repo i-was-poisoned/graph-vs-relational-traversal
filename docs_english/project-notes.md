@@ -4697,6 +4697,222 @@ a password. But the normal way is the website: Actions → the red run →
 > can change on its own (packages, Python, the operating system) is
 > pinned.
 
+## Docker from scratch (for beginners)
+
+This section explains Docker **from the beginning**, before it's used in
+the next section, "Integration tests with PostgreSQL and Neo4j (step 3 of
+the plan)". The examples come from there: the CI's containers
+(`services:`) and the `simulate_ci.sh` script, both introduced in that
+section. It also **corrects one sentence** in that section's subsection
+"Docker: a key tool in the project" (see "Why CI needs Docker", further
+down).
+
+### The problem Docker solves
+
+Remember installing PostgreSQL and Neo4j on your computer: an installer
+for each one, choosing a version, passwords, ports, checking that they
+start… And that's on **Windows**: on Linux or Mac the steps are
+different. If someone else wanted to repeat your project, they'd have to
+do all of that, and they could easily end up with **a different version**
+or **a different configuration**. Hence the most famous sentence in
+computing: *"it works on my machine"*.
+
+Docker solves this as follows: **someone installs and configures the
+program once, packages it with everything it needs, and anyone can use
+that package, identically, on any computer that has Docker.**
+
+### The four key words
+
+| Word | What it is | Comparison |
+|---|---|---|
+| **Image** | A **frozen** (read-only) package with a program already installed and configured, plus everything it needs to run: the system libraries and a minimal Linux | The **mould** |
+| **Container** | An image **running**: a working program, isolated from the rest of the computer | The **cake** made with the mould |
+| **Docker Hub** | The public store of images, on the internet (`hub.docker.com`) | Like **PyPI** for Python packages |
+| **Tag** | The version of an image: what comes after the `:` | Like the `==3.3.6` in `requirements.txt` |
+
+One mould can make many cakes: from **one** image, `postgres:18.6`, you
+can start **several** containers at the same time, and each one is an
+independent PostgreSQL.
+
+**Tags** are the exact version, as always in this project:
+
+| Image with tag | What it contains |
+|---|---|
+| `postgres:18.6` | PostgreSQL 18.6 |
+| `neo4j:2026.10.0-community` | Neo4j 2026.10.0, Community edition |
+| `python:3.14.0-slim` | Python 3.14.0 on a reduced (*slim*) Linux |
+| `postgres:latest` | **Whatever is newest** that day: not used here, because of what we learned with `ubuntu-latest` |
+
+### What "isolated" means
+
+A container has **its own**:
+
+- **files**: inside there's a minimal Linux with the program; it can't
+  see your computer's files (unless you give them to it on purpose, as
+  `simulate_ci.sh` does with `-v`, in read-only mode);
+- **network**: its own `localhost` and its own ports;
+- **processes**: it can't see your computer's programs, and they can't
+  see it.
+
+That's why a PostgreSQL in a container and your Windows PostgreSQL can
+run at the same time without getting in each other's way.
+
+And it's **temporary**: when a container is deleted, everything that was
+inside it is deleted too, data included. For tests that's exactly what
+you want: each run starts from scratch and leaves nothing behind. (If you
+wanted to keep the data, there are *volumes*, which aren't used here.)
+
+### Container, virtual machine and `.venv`
+
+| | `.venv` | Container | Virtual machine |
+|---|---|---|---|
+| **What it isolates** | Only the **Python** packages | A whole program, with its libraries and its minimal Linux | A **whole computer**, with its own complete operating system |
+| **Typical size** | Megabytes | Hundreds of megabytes | Gigabytes |
+| **Time to start** | None | Seconds | Minutes |
+| **In this project** | Your scripts on Windows | The databases in CI and in `simulate_ci.sh` | The CI machine (`ubuntu-24.04`) |
+
+The key difference between a container and a virtual machine: a virtual
+machine carries **its own complete operating system**; containers
+**share the kernel** of the system running them, and only carry the
+rest. That's why they're much lighter and faster.
+
+**What about Windows?** This project's images are **Linux** images.
+Docker Desktop, on Windows, starts a **small Linux virtual machine**
+underneath (with WSL 2, the "Windows Subsystem for Linux"), and the
+containers run inside it. That's why Docker Desktop takes a moment to
+start ("Starting the Docker Engine…") and then says "Engine running".
+
+### The pieces of Docker
+
+| Piece | What it is |
+|---|---|
+| **Docker Engine** | The program that actually creates and runs the containers |
+| **Docker Desktop** | The app for Windows/Mac: it installs the engine, starts it, and has a window to see containers and images |
+| **`docker`** (the command) | What you type in the terminal to give orders to the engine |
+
+If Docker Desktop is closed, the engine is off and the `docker` command
+fails with a connection error. That's what happened the first time:
+`docker info` answered "The system cannot find the file specified" until
+you opened Docker Desktop.
+
+### The commands, with `simulate_ci.sh` as the example
+
+| Command | What it does | Where it appears |
+|---|---|---|
+| `docker pull IMAGE` | Downloads an image from Docker Hub | `docker run` does it on its own, the first time |
+| `docker run IMAGE` | Creates a container from the image and starts it | The three `docker run` lines in `simulate_ci.sh` |
+| `docker ps -a` | Lists the containers (`-a`: stopped ones too) | To check that no containers are left over |
+| `docker exec NAME COMMAND` | Runs a command **inside** a container that's already running | `docker exec gvr-ci-postgres pg_isready ...` |
+| `docker rm -f NAME` | Stops and deletes a container | The `cleanup` function in `simulate_ci.sh` |
+| `docker images` | Lists the downloaded images | To see the 1.9 GB kept on disk |
+| `docker info` | Says whether the engine is answering | `simulate_ci.sh` uses it to warn you if Docker is closed |
+
+The `docker run` options that `simulate_ci.sh` uses:
+
+| Option | What it means | Example |
+|---|---|---|
+| `-d` | *detached*: in the background; the terminal stays free | The databases keep running while the tests run |
+| `--name` | A name for the container, to refer to it later | `gvr-ci-neo4j` |
+| `-e KEY=value` | An **environment variable** inside the container | `-e NEO4J_AUTH=none` |
+| `--network container:NAME` | Share another container's network | PostgreSQL and Python use `gvr-ci-neo4j`'s network |
+| `-v SOURCE:DESTINATION:ro` | Make a folder on your computer visible inside the container (`ro`: read-only) | The project shows up as `/src` |
+| `--rm` | Delete the container as soon as it finishes | The Python one |
+
+**Environment variables (`-e`) are how you configure an image.** Each
+image documents on its Docker Hub page which ones it understands. For
+example, the PostgreSQL image understands `POSTGRES_HOST_AUTH_METHOD`
+("how users identify themselves"; `trust` = no password), and the Neo4j
+image understands `NEO4J_AUTH` (`none` = no authentication). They're the
+same ones that appear in `ci.yml`, under `env:`.
+
+### Ports and networks
+
+Inside a container, PostgreSQL listens on **its own** port 5432, on
+**its own** `localhost`. From outside you can't reach it, unless you
+**open a port**:
+
+| Way | What it does | Where it's used |
+|---|---|---|
+| `-p 5432:5432` (in `ci.yml`: `ports:`) | "Whatever arrives at port 5432 **of the machine**, send it to port 5432 **of the container**" | In CI: that's how the scripts, which go to `localhost:5432`, reach the container |
+| `--network container:...` | The containers share **a single private network**, and in it `localhost` is the same for all of them | In `simulate_ci.sh`: Python reaches PostgreSQL and Neo4j through `localhost`, without opening any port on your computer |
+
+On your computer the first way couldn't be used: ports 5432 and 7687
+**are already used by your PostgreSQL and your Neo4j**, and two programs
+can't listen on the same port. That's why `simulate_ci.sh` uses the
+second.
+
+### Why CI needs Docker
+
+The subsection "Docker: a key tool in the project", in the next
+section, says: "Without Docker there would be no PostgreSQL or Neo4j in
+CI". **That's a simplification.** The reality:
+GitHub's `ubuntu-24.04` machine comes with **PostgreSQL 16.15, installed
+but switched off** (not the project's 18.6), **no Neo4j at all**, and
+**Docker 28.0.4**, installed and running. The correct sentence is:
+
+> **Without Docker, PostgreSQL 18.6 and Neo4j would have to be installed
+> and configured by hand on every CI run; with Docker, they're downloaded
+> ready-made and start in seconds.**
+
+Every CI run starts on a new machine, so there are two ways to get both
+databases running:
+
+| | Without Docker | With Docker (`services:`) |
+|---|---|---|
+| **PostgreSQL 18.6** | Steps to ignore 16.15, add the PostgreSQL repository, install 18.6, configure authentication and start it | `image: postgres:18.6` |
+| **Neo4j 2026.10.0** | Steps to install Java, download Neo4j, unzip it, configure it and start it | `image: neo4j:2026.10.0-community` |
+| **Waiting until they work** | Hand-written waiting loops | The *health check* |
+| **At the end** | Nothing to clean up (the machine is destroyed) | Same |
+| **Risk** | Dozens of lines that can fail and that depend on what Ubuntu ships that day | Two lines; the exact version is always the same |
+
+The creators of PostgreSQL and Neo4j already did the work of installing
+and configuring their program once, and published it as an image on
+Docker Hub. **`services:` is a short way of asking GitHub to run the
+`docker` commands for you**: before your steps, GitHub does the
+equivalent of:
+
+```
+docker pull postgres:18.6
+docker run -d -e POSTGRES_HOST_AUTH_METHOD=trust -p 5432:5432 ... postgres:18.6
+docker pull neo4j:2026.10.0-community
+docker run -d -e NEO4J_AUTH=none -p 7687:7687 ... neo4j:2026.10.0-community
+```
+
+And at the end, it deletes the containers. That's why `services:` **only
+works because the machine has Docker**.
+
+**You can see it on GitHub:** in Actions → the run →
+`integration-tests`, the first step is called **"Initialize
+containers"**. When you expand it, the `docker` commands GitHub ran
+appear (`docker pull`, `docker create`, …). The last step, **"Stop
+containers"**, is where it deletes them.
+
+### How to see it in Docker Desktop
+
+While `./simulate_ci.sh` is running, open Docker Desktop:
+
+- **Containers:** `gvr-ci-neo4j` and `gvr-ci-postgres` appear (plus a
+  third one, with a name Docker makes up, for Python) with a green
+  circle, "Running". When it finishes they disappear on their own.
+- **Images:** the three downloaded images, with their tag and size. You
+  can delete them from here to free up space; next time they'd be
+  downloaded again.
+- **Bottom left:** "Engine running" means the engine is on.
+
+### Where this project uses Docker (and where it doesn't)
+
+| Where | Docker? | Why |
+|---|---|---|
+| Your `gharchive` and `gharchive24h` databases | **No**: installed directly on Windows | For the benchmark, the point is to measure the programs installed the normal way, without the layer of Docker Desktop's virtual machine. Besides, they were already installed |
+| The integration tests in CI | **Yes** (`services:`) | Databases with the exact version, in seconds, that disappear at the end |
+| `simulate_ci.sh` | **Yes** | Reproducing CI on your computer without touching your databases |
+
+> 🎯 **Central idea:** an **image** is a program already installed and
+> configured, frozen at its exact version; a **container** is that image
+> running, isolated and temporary. Docker lets you have **the same
+> PostgreSQL and the same Neo4j** on GitHub and on your computer, with
+> two lines instead of a whole installation.
+
 ## Integration tests with PostgreSQL and Neo4j (step 3 of the plan)
 
 This is **step 3** of the plan: checking that the pieces work
@@ -4924,214 +5140,42 @@ run's page they show up as two boxes; on the commit's, as **2 checks**.
 - **Step 5:** scheduling the data pipeline so it runs on its own every
   hour.
 
-## Docker from scratch (for beginners)
+### The three places where the integration tests run
 
-This section explains Docker **from the beginning**, using what's already
-been done in this project as the example. It completes the subsection
-"Docker: a key tool in the project" and **corrects one sentence** in it
-(see "Why CI needs Docker", further down).
+The table "How to run the integration tests" gives three commands. They
+look like three ways of doing the same thing, but in each place the
+pieces live in different spots. Every integration test has **two
+pieces**: **Python**, which runs the tests, and **the databases**.
 
-### The problem Docker solves
+| Place | Command | Where Python (the tests) runs | Where the databases are | Database used |
+|---|---|---|---|---|
+| **1. Simulation** | `./simulate_ci.sh` | In a **container** (`python:3.14.0-slim`) | In **containers** (`postgres:18.6`, `neo4j:2026.10.0-community`) | `gharchivetest` (PostgreSQL) and `neo4j` (Neo4j), inside the containers, which **are deleted** at the end |
+| **2. Your servers** | `./run.sh -m pytest -m integration` | On **your Windows**, with your `.venv` | Your PostgreSQL and Neo4j **installed on Windows**, no Docker | `gharchivetest` on both, which is created and **stays** |
+| **3. GitHub** | `git push` | On GitHub's Ubuntu 24.04 **virtual machine**, no container | In **containers** (`services:`) | `gharchivetest` (PostgreSQL) and `neo4j` (Neo4j), which **are deleted** at the end |
 
-Remember installing PostgreSQL and Neo4j on your computer: an installer
-for each one, choosing a version, passwords, ports, checking that they
-start… And that's on **Windows**: on Linux or Mac the steps are
-different. If someone else wanted to repeat your project, they'd have to
-do all of that, and they could easily end up with **a different version**
-or **a different configuration**. Hence the most famous sentence in
-computing: *"it works on my machine"*.
+What to notice:
 
-Docker solves this as follows: **someone installs and configures the
-program once, packages it with everything it needs, and anyone can use
-that package, identically, on any computer that has Docker.**
+- **1 and 3 use the same database containers**, with the same versions
+  and no passwords. That's why `simulate_ci.sh` is a good imitation of
+  CI.
+- **The only difference between 1 and 3 is where Python runs**: in the
+  simulation, inside a container; on GitHub, directly on the virtual
+  machine. In both cases it's Python 3.14.0 on Linux, so the result is
+  the same.
+- **2 is the only one without Docker.** It uses the same **servers** that
+  hold `gharchive` and `gharchive24h`, but **not those databases**: it
+  creates and uses `gharchivetest`, because every load empties the
+  database before filling it. It checks something the other two don't:
+  that everything works with **your** real servers, with your
+  configuration, your passwords and your Neo4j **Enterprise**.
 
-### The four key words
+**Which ones have already been run** (2026-11-11): **1** (`6 passed`)
+and **3** (✅ in CI runs #3 and #4). **2** hasn't been run yet. To run
+it, with PostgreSQL and Neo4j running:
 
-| Word | What it is | Comparison |
-|---|---|---|
-| **Image** | A **frozen** (read-only) package with a program already installed and configured, plus everything it needs to run: the system libraries and a minimal Linux | The **mould** |
-| **Container** | An image **running**: a working program, isolated from the rest of the computer | The **cake** made with the mould |
-| **Docker Hub** | The public store of images, on the internet (`hub.docker.com`) | Like **PyPI** for Python packages |
-| **Tag** | The version of an image: what comes after the `:` | Like the `==3.3.6` in `requirements.txt` |
-
-One mould can make many cakes: from **one** image, `postgres:18.6`, you
-can start **several** containers at the same time, and each one is an
-independent PostgreSQL.
-
-**Tags** are the exact version, as always in this project:
-
-| Image with tag | What it contains |
-|---|---|
-| `postgres:18.6` | PostgreSQL 18.6 |
-| `neo4j:2026.10.0-community` | Neo4j 2026.10.0, Community edition |
-| `python:3.14.0-slim` | Python 3.14.0 on a reduced (*slim*) Linux |
-| `postgres:latest` | **Whatever is newest** that day: not used here, because of what we learned with `ubuntu-latest` |
-
-### What "isolated" means
-
-A container has **its own**:
-
-- **files**: inside there's a minimal Linux with the program; it can't
-  see your computer's files (unless you give them to it on purpose, as
-  `simulate_ci.sh` does with `-v`, in read-only mode);
-- **network**: its own `localhost` and its own ports;
-- **processes**: it can't see your computer's programs, and they can't
-  see it.
-
-That's why a PostgreSQL in a container and your Windows PostgreSQL can
-run at the same time without getting in each other's way.
-
-And it's **temporary**: when a container is deleted, everything that was
-inside it is deleted too, data included. For tests that's exactly what
-you want: each run starts from scratch and leaves nothing behind. (If you
-wanted to keep the data, there are *volumes*, which aren't used here.)
-
-### Container, virtual machine and `.venv`
-
-| | `.venv` | Container | Virtual machine |
-|---|---|---|---|
-| **What it isolates** | Only the **Python** packages | A whole program, with its libraries and its minimal Linux | A **whole computer**, with its own complete operating system |
-| **Typical size** | Megabytes | Hundreds of megabytes | Gigabytes |
-| **Time to start** | None | Seconds | Minutes |
-| **In this project** | Your scripts on Windows | The databases in CI and in `simulate_ci.sh` | The CI machine (`ubuntu-24.04`) |
-
-The key difference between a container and a virtual machine: a virtual
-machine carries **its own complete operating system**; containers
-**share the kernel** of the system running them, and only carry the
-rest. That's why they're much lighter and faster.
-
-**What about Windows?** This project's images are **Linux** images.
-Docker Desktop, on Windows, starts a **small Linux virtual machine**
-underneath (with WSL 2, the "Windows Subsystem for Linux"), and the
-containers run inside it. That's why Docker Desktop takes a moment to
-start ("Starting the Docker Engine…") and then says "Engine running".
-
-### The pieces of Docker
-
-| Piece | What it is |
-|---|---|
-| **Docker Engine** | The program that actually creates and runs the containers |
-| **Docker Desktop** | The app for Windows/Mac: it installs the engine, starts it, and has a window to see containers and images |
-| **`docker`** (the command) | What you type in the terminal to give orders to the engine |
-
-If Docker Desktop is closed, the engine is off and the `docker` command
-fails with a connection error. That's what happened the first time:
-`docker info` answered "The system cannot find the file specified" until
-you opened Docker Desktop.
-
-### The commands, with `simulate_ci.sh` as the example
-
-| Command | What it does | Where it appears |
-|---|---|---|
-| `docker pull IMAGE` | Downloads an image from Docker Hub | `docker run` does it on its own, the first time |
-| `docker run IMAGE` | Creates a container from the image and starts it | The three `docker run` lines in `simulate_ci.sh` |
-| `docker ps -a` | Lists the containers (`-a`: stopped ones too) | To check that no containers are left over |
-| `docker exec NAME COMMAND` | Runs a command **inside** a container that's already running | `docker exec gvr-ci-postgres pg_isready ...` |
-| `docker rm -f NAME` | Stops and deletes a container | The `cleanup` function in `simulate_ci.sh` |
-| `docker images` | Lists the downloaded images | To see the 1.9 GB kept on disk |
-| `docker info` | Says whether the engine is answering | `simulate_ci.sh` uses it to warn you if Docker is closed |
-
-The `docker run` options that `simulate_ci.sh` uses:
-
-| Option | What it means | Example |
-|---|---|---|
-| `-d` | *detached*: in the background; the terminal stays free | The databases keep running while the tests run |
-| `--name` | A name for the container, to refer to it later | `gvr-ci-neo4j` |
-| `-e KEY=value` | An **environment variable** inside the container | `-e NEO4J_AUTH=none` |
-| `--network container:NAME` | Share another container's network | PostgreSQL and Python use `gvr-ci-neo4j`'s network |
-| `-v SOURCE:DESTINATION:ro` | Make a folder on your computer visible inside the container (`ro`: read-only) | The project shows up as `/src` |
-| `--rm` | Delete the container as soon as it finishes | The Python one |
-
-**Environment variables (`-e`) are how you configure an image.** Each
-image documents on its Docker Hub page which ones it understands. For
-example, the PostgreSQL image understands `POSTGRES_HOST_AUTH_METHOD`
-("how users identify themselves"; `trust` = no password), and the Neo4j
-image understands `NEO4J_AUTH` (`none` = no authentication). They're the
-same ones that appear in `ci.yml`, under `env:`.
-
-### Ports and networks
-
-Inside a container, PostgreSQL listens on **its own** port 5432, on
-**its own** `localhost`. From outside you can't reach it, unless you
-**open a port**:
-
-| Way | What it does | Where it's used |
-|---|---|---|
-| `-p 5432:5432` (in `ci.yml`: `ports:`) | "Whatever arrives at port 5432 **of the machine**, send it to port 5432 **of the container**" | In CI: that's how the scripts, which go to `localhost:5432`, reach the container |
-| `--network container:...` | The containers share **a single private network**, and in it `localhost` is the same for all of them | In `simulate_ci.sh`: Python reaches PostgreSQL and Neo4j through `localhost`, without opening any port on your computer |
-
-On your computer the first way couldn't be used: ports 5432 and 7687
-**are already used by your PostgreSQL and your Neo4j**, and two programs
-can't listen on the same port. That's why `simulate_ci.sh` uses the
-second.
-
-### Why CI needs Docker
-
-The previous subsection said: "Without Docker there would be no
-PostgreSQL or Neo4j in CI". **That's a simplification.** The reality:
-GitHub's `ubuntu-24.04` machine comes with **PostgreSQL 16.15, installed
-but switched off** (not the project's 18.6), **no Neo4j at all**, and
-**Docker 28.0.4**, installed and running. The correct sentence is:
-
-> **Without Docker, PostgreSQL 18.6 and Neo4j would have to be installed
-> and configured by hand on every CI run; with Docker, they're downloaded
-> ready-made and start in seconds.**
-
-Every CI run starts on a new machine, so there are two ways to get both
-databases running:
-
-| | Without Docker | With Docker (`services:`) |
-|---|---|---|
-| **PostgreSQL 18.6** | Steps to ignore 16.15, add the PostgreSQL repository, install 18.6, configure authentication and start it | `image: postgres:18.6` |
-| **Neo4j 2026.10.0** | Steps to install Java, download Neo4j, unzip it, configure it and start it | `image: neo4j:2026.10.0-community` |
-| **Waiting until they work** | Hand-written waiting loops | The *health check* |
-| **At the end** | Nothing to clean up (the machine is destroyed) | Same |
-| **Risk** | Dozens of lines that can fail and that depend on what Ubuntu ships that day | Two lines; the exact version is always the same |
-
-The creators of PostgreSQL and Neo4j already did the work of installing
-and configuring their program once, and published it as an image on
-Docker Hub. **`services:` is a short way of asking GitHub to run the
-`docker` commands for you**: before your steps, GitHub does the
-equivalent of:
-
-```
-docker pull postgres:18.6
-docker run -d -e POSTGRES_HOST_AUTH_METHOD=trust -p 5432:5432 ... postgres:18.6
-docker pull neo4j:2026.10.0-community
-docker run -d -e NEO4J_AUTH=none -p 7687:7687 ... neo4j:2026.10.0-community
+```bash
+./run.sh -m pytest -m integration -v
 ```
 
-And at the end, it deletes the containers. That's why `services:` **only
-works because the machine has Docker**.
-
-**You can see it on GitHub:** in Actions → the run →
-`integration-tests`, the first step is called **"Initialize
-containers"**. When you expand it, the `docker` commands GitHub ran
-appear (`docker pull`, `docker create`, …). The last step, **"Stop
-containers"**, is where it deletes them.
-
-### How to see it in Docker Desktop
-
-While `./simulate_ci.sh` is running, open Docker Desktop:
-
-- **Containers:** `gvr-ci-neo4j` and `gvr-ci-postgres` appear (plus a
-  third one, with a name Docker makes up, for Python) with a green
-  circle, "Running". When it finishes they disappear on their own.
-- **Images:** the three downloaded images, with their tag and size. You
-  can delete them from here to free up space; next time they'd be
-  downloaded again.
-- **Bottom left:** "Engine running" means the engine is on.
-
-### Where this project uses Docker (and where it doesn't)
-
-| Where | Docker? | Why |
-|---|---|---|
-| Your `gharchive` and `gharchive24h` databases | **No**: installed directly on Windows | For the benchmark, the point is to measure the programs installed the normal way, without the layer of Docker Desktop's virtual machine. Besides, they were already installed |
-| The integration tests in CI | **Yes** (`services:`) | Databases with the exact version, in seconds, that disappear at the end |
-| `simulate_ci.sh` | **Yes** | Reproducing CI on your computer without touching your databases |
-
-> 🎯 **Central idea:** an **image** is a program already installed and
-> configured, frozen at its exact version; a **container** is that image
-> running, isolated and temporary. Docker lets you have **the same
-> PostgreSQL and the same Neo4j** on GitHub and on your computer, with
-> two lines instead of a whole installation.
+If it passes, `gharchivetest` will show up in pgAdmin and in Neo4j
+Desktop with 3 actors, 3 repos and 4 connections.
