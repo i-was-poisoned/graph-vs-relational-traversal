@@ -32,19 +32,22 @@ with `gharchive-`. (Names use dashes, never underscores, because Neo4j
 doesn't allow `_` in database names. Several databases on one Neo4j server
 need the Enterprise Edition, which Neo4j Desktop includes for free.)
 
-## What you type once, and what you type every time
+## The order, in short
 
-Most commands in this README are done **once**. To load data, the only
-command you need each time is `build_hours.py`:
+Everything happens in this order. Steps 1-5 are done **once**; after that,
+loading data is only steps 6 and 7.
 
-| Command | How often |
-|---|---|
-| `python -m venv .venv`, `source .venv/Scripts/activate`, `pip install -r ...` | **Once** for the whole project ([Setup](#setup-once-before-anything-else)). If pip says *Requirement already satisfied*, it was already done |
-| `./run.sh scripts/check_connections.py` | Only when you want to check the servers (`build_hours.py` checks them anyway) |
-| `download_gharchive.py` → `extract_csv.py` → `load_postgres.py` → `load_neo4j.py` | **Once**: they build the fixed benchmark `gharchive` ([step 1](#step-1-once-build-the-fixed-benchmark-gharchive)) |
-| `./run.sh scripts/build_hours.py` | **Every time** you want to load data: it asks its questions and does everything else |
+| # | What | How often | Where it's explained |
+|---|---|---|---|
+| 1 | Install **PostgreSQL** and **Neo4j Desktop** (the database servers) | Once | [project-notes.md](docs_english/project-notes.md), "Installing the software" |
+| 2 | Create the **environment** (`python -m venv .venv`) | Once | [Setup A](#a-the-virtual-environment-venv-create-it-only-once) |
+| 3 | Install the **requirements** (`pip install -r requirements.txt`) inside it | Once | [Setup A](#a-the-virtual-environment-venv-create-it-only-once) |
+| 4 | Write your passwords in **`secrets.sh`** | Once | [Setup B](#b-the-passwords-secretssh-once) |
+| 5 | Check that Python reaches both servers (`check_connections.py`) | Once (then only if something seems wrong) | [Setup C](#c-check-that-everything-works) |
+| 6 | Make sure the servers are **running**: PostgreSQL (starts with Windows) and Neo4j Desktop (open it, start the instance) | **Every time** | [Step 0](#step-0-what-must-be-running) |
+| 7 | Run **`build_hours.py`**: it asks which hours you want and puts them in both databases | **Every time** you want data | [Step 2](#step-2-load-the-hours-you-choose) |
 
-So, every time:
+So, once the setup is done, loading data is just:
 
 ```bash
 cd /c/dev/Research
@@ -52,9 +55,13 @@ cd /c/dev/Research
 ```
 
 There's no need to type `source .venv/Scripts/activate` first: `run.sh`
-turns on the project's `.venv` by itself. (Careful with a `.venv` outside
-the project, e.g. `/c/dev/.venv`: it isn't this project's, and `pip` run
-from `/c/dev` can't find `requirements.txt`.)
+turns on the project's `.venv` and loads `secrets.sh` by itself. (Careful
+with a `.venv` outside the project, e.g. `/c/dev/.venv`: it isn't this
+project's, and `pip` run from `/c/dev` can't find `requirements.txt`.)
+
+The fixed benchmark `gharchive` ([step 1](#step-1-once-build-the-fixed-benchmark-gharchive))
+was built once, at the start of the project, and doesn't need to be built
+again.
 
 ## Setup (once, before anything else)
 
@@ -134,7 +141,13 @@ the scripts are always **UTC**.
 
 ### Step 1. Once: build the fixed benchmark (`gharchive`)
 
-The benchmark's reference hour was built step by step, one script per stage:
+The benchmark's reference hour was built at the start of the project, step
+by step, one script per stage. **You don't need to run these yourself any
+more:** `build_hours.py` runs the same four scripts for you, in the same
+order. They're kept because `build_hours.py` and `pipeline.py` use them
+inside (they share one copy of the download, extract and load code, so
+every database is loaded in exactly the same way), and because each one can
+still be run alone, e.g. to redo a single stage of `gharchive`:
 
 ```bash
 ./run.sh scripts/download_gharchive.py    # data/2026-08-27-15.json.gz and .json
@@ -145,7 +158,7 @@ The benchmark's reference hour was built step by step, one script per stage:
 
 Each loader ends with a table comparing the database with the CSV files;
 every line must say `OK` (14,515 actors, 14,995 repos, 15,053 connections).
-This is done once: `gharchive` is frozen and nothing rebuilds it. (The
+This is done once: `gharchive` is frozen and nothing rebuilds it. (`build_hours.py` never writes to `gharchive`: choosing 2026-08-27, 15:00, 1 hour gives the same data in a separate database, `gharchive-2026-08-27-15`.) (The
 database `gharchive` must exist before the first load: `CREATE DATABASE
 gharchive;` in pgAdmin or `psql -U postgres`, and in Neo4j Desktop or Neo4j
 Browser.)
