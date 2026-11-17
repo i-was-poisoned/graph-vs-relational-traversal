@@ -99,6 +99,24 @@
     line-height: 1.7;
     margin: 0;
   }
+  /* ---------- Content sections ---------- */
+  section.chapter { page-break-before: always; }
+  p { margin: 0 0 3mm 0; }
+  ul, ol { margin: 0 0 3mm 0; padding-left: 7mm; }
+  li { margin-bottom: 1mm; }
+  code { font-family: "Consolas", "Courier New", monospace; font-size: 9.5pt; }
+  pre {
+    font-family: "Consolas", "Courier New", monospace;
+    font-size: 9pt;
+    line-height: 1.35;
+    text-align: left;
+    background: #f4f4f4;
+    padding: 3mm 4mm;
+    margin: 3mm 0 4mm 0;
+    white-space: pre;
+  }
+  .caption { text-align: center; font-size: 9.5pt; font-style: italic; margin: 0 0 4mm 0; }
+  td.num, th.num { text-align: right; }
 </style>
 </head>
 <body>
@@ -119,10 +137,160 @@
   <p class="author">Pedro Santos Faustino</p>
   <p class="meta">
     Interim report<br>
-    October 2026
+    November 2026
   </p>
 
   <div class="bottom-space"></div>
+</section>
+
+<section class="chapter">
+  <h2>1. Infrastructure</h2>
+
+  <p>
+    Before measuring anything, we built the tools to get the data, load it
+    into the two databases in exactly the same way, and check that it is
+    correct. This chapter describes that infrastructure. It is now complete
+    and tested, so the next chapters are about measurements.
+  </p>
+
+  <h3>1.1 The question and the data</h3>
+  <p>
+    The project asks: <em>at what traversal depth, and at what data volume,
+    does a graph database answer the same question faster than a relational
+    database?</em> To answer it, both databases must hold the same data and
+    run on the same computer, so that the only difference is the model.
+  </p>
+  <p>
+    The data comes from <strong>GH Archive</strong>, which publishes one file
+    for every hour of public activity on GitHub. Each line of a file is one
+    event, for example a person pushing code to a repository. From each
+    event we keep only who did it (the <em>actor</em>) and where (the
+    <em>repo</em>). Two actors are connected when they worked on the same
+    repo. Bot accounts are removed, because they connect thousands of
+    unrelated repos.
+  </p>
+
+  <h3>1.2 The data model</h3>
+  <p>The same model is built on both sides:</p>
+  <table>
+    <thead>
+      <tr><th>Concept</th><th>PostgreSQL (relational)</th><th>Neo4j (graph)</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Actor</td><td>table <code>actor</code> (id, login)</td><td>node <code>:Actor</code> (id, login)</td></tr>
+      <tr><td>Repo</td><td>table <code>repo</code> (id, name)</td><td>node <code>:Repo</code> (id, name)</td></tr>
+      <tr><td>Connection</td><td>table <code>actor_repo</code> (actor_id, repo_id)</td><td>relationship <code>INTERACTED_WITH</code></td></tr>
+      <tr><td>Keys</td><td>primary keys and an index on <code>repo_id</code></td><td>uniqueness constraints on the ids</td></tr>
+    </tbody>
+  </table>
+  <p>
+    There is one connection per actor and repo pair: ten pushes by the same
+    person to the same repo count as one connection.
+  </p>
+
+  <h3>1.3 Tools</h3>
+  <table>
+    <thead>
+      <tr><th>Tool</th><th>Version</th><th>Role</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>PostgreSQL</td><td>18.6</td><td>Relational database</td></tr>
+      <tr><td>Neo4j</td><td>2026.10.0 Enterprise</td><td>Graph database (through Neo4j Desktop)</td></tr>
+      <tr><td>Python</td><td>3.14.0</td><td>All the scripts</td></tr>
+      <tr><td>psycopg / neo4j driver</td><td>3.3.6 / 6.4.1</td><td>Connect Python to each database</td></tr>
+      <tr><td>pytest</td><td>9.2.0</td><td>Automatic tests</td></tr>
+      <tr><td>GitHub Actions</td><td>&mdash;</td><td>Runs the tests on every change (CI)</td></tr>
+      <tr><td>Docker Desktop</td><td>Engine 28.3.3</td><td>Temporary test databases in containers</td></tr>
+      <tr><td>Windows Task Scheduler</td><td>&mdash;</td><td>Starts the automatic pipeline</td></tr>
+    </tbody>
+  </table>
+  <p>
+    All versions are fixed. If one changes, every measurement is repeated.
+    Everything runs on one laptop, so neither database has a hardware or
+    network advantage.
+  </p>
+
+  <h3>1.4 How the data flows</h3>
+<pre>
+GH Archive hour files (.json.gz)
+        |  download_gharchive.py
+        v
+events  --  extract_csv.py  (keep actor and repo, remove bots)
+        v
+actors.csv   repos.csv   actor_repo.csv
+        |                         |
+        v load_postgres.py        v load_neo4j.py
+   PostgreSQL database       Neo4j database
+   (same name, same data, counts checked on both sides)
+</pre>
+
+  <h3>1.5 The scripts</h3>
+  <table>
+    <thead>
+      <tr><th>Script</th><th>What it does</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>download_gharchive.py</code></td><td>Downloads one hour of data</td></tr>
+      <tr><td><code>peek_data.py</code>, <code>summarize_data.py</code>, <code>profile_schema.py</code></td><td>Explore a file; used to design the model</td></tr>
+      <tr><td><code>extract_csv.py</code></td><td>Turns events into three CSV files</td></tr>
+      <tr><td><code>load_postgres.py</code></td><td>Loads the CSV files into PostgreSQL and checks the counts</td></tr>
+      <tr><td><code>load_neo4j.py</code></td><td>Loads the same CSV files into Neo4j and checks the counts</td></tr>
+      <tr><td><code>build_hours.py</code></td><td>Manual pipeline: asks for a date and a number of hours, then downloads, empties, loads and checks a new database on both sides</td></tr>
+      <tr><td><code>pipeline.py</code></td><td>Automatic pipeline: once a day, reloads the last 24 hours</td></tr>
+      <tr><td><code>check_connections.py</code></td><td>Checks that both databases can be reached</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1.6 Two processes</h3>
+  <p>
+    <strong>Manual pipeline.</strong> You choose the hours. Each choice goes
+    into its own database, named after the data it holds, for example
+    <code>gharchive-2026-08-27-15-3h</code> (three hours starting on
+    27 August 2026 at 15:00 UTC). Before loading, the database is deleted,
+    created again and checked to be empty. This process gives the fixed data
+    sets used for the measurements.
+  </p>
+  <p>
+    <strong>Automatic pipeline.</strong> Task Scheduler checks every 15
+    minutes. Once a day, as soon as the computer is on and both databases
+    answer, it reloads <code>gharchive24h</code> with the last 24 hours. It
+    shows how a scheduled data pipeline works, but it is not used for the
+    measurements, because its data changes every day.
+  </p>
+
+  <h3>1.7 Quality checks</h3>
+  <ul>
+    <li>Every load compares the rows in each database with the CSV files.</li>
+    <li>48 unit tests check the logic without the internet or databases.</li>
+    <li>6 integration tests load a small known data set into real databases
+        and check that PostgreSQL and Neo4j give the same answers, including
+        a two-step traversal.</li>
+    <li>GitHub Actions runs all the tests on every change, with PostgreSQL
+        and Neo4j in Docker containers.</li>
+  </ul>
+
+  <h3>1.8 The reference data set</h3>
+  <p>
+    The first measurements use one busy weekday hour: Thursday 27 August
+    2026, 15:00&ndash;16:00 UTC, when activity in America and Europe
+    overlaps. It is stored in the database <code>gharchive</code> and never
+    changes.
+  </p>
+  <table>
+    <thead>
+      <tr><th></th><th class="num">Actors</th><th class="num">Repos</th><th class="num">Connections</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>PostgreSQL</td><td class="num">14,515</td><td class="num">14,995</td><td class="num">15,053</td></tr>
+      <tr><td>Neo4j</td><td class="num">14,515</td><td class="num">14,995</td><td class="num">15,053</td></tr>
+    </tbody>
+  </table>
+  <p class="caption">Table 1. The reference hour holds exactly the same data in both databases.</p>
+  <p>
+    Larger data sets (3, 6 and 24 hours, then one week) will be built with
+    the manual pipeline, starting on the same day, so that only the volume
+    changes.
+  </p>
 </section>
 
 </body>

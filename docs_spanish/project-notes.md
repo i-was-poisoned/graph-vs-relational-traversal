@@ -5452,3 +5452,141 @@ Neo4j.
 > es **su propio edificio**: por eso no choca con tus programas, nadie
 > de fuera entra si no se le abre una puerta, y `localhost` dentro de un
 > contenedor es **el contenedor**, no tu ordenador.
+
+## La infraestructura está lista: fin de la fase de construcción
+
+Hasta aquí, todo el trabajo ha servido para **preparar** la investigación:
+conseguir los datos, cargarlos igual en las dos bases de datos, comprobar
+que son correctos y automatizar lo que se repite. A partir de ahora el
+proyecto entra en su segunda fase: **medir**. Esta sección resume, de forma
+ligera, todo lo que existe y para qué sirve, y añade lo construido en la
+última semana (que aún no estaba en estas notas).
+
+### Las herramientas
+
+| Herramienta | Versión | Para qué la usamos |
+|---|---|---|
+| Python | 3.14.0 | Todos los scripts: descargar, extraer, cargar y (pronto) medir |
+| PostgreSQL | 18.6 | La base de datos **relacional** (tablas y `JOIN`) |
+| Neo4j | 2026.10.0 Enterprise (con Neo4j Desktop) | La base de datos de **grafos** (nodos y relaciones) |
+| psycopg / neo4j (driver) | 3.3.6 / 6.4.1 | Los conectores: cómo Python habla con cada base de datos |
+| pytest | 9.2.0 | Las pruebas automáticas |
+| Git y GitHub | — | El historial del código y el repositorio público |
+| GitHub Actions | — | El CI: las pruebas se ejecutan solas en cada `git push` |
+| Docker Desktop | Engine 28.3.3 | Bases de datos temporales en contenedores, iguales a las del CI |
+| Programador de tareas de Windows | — | El disparador de la pipeline automática |
+| Git Bash | — | El terminal donde se escriben todos los comandos del proyecto |
+
+**Neo4j es Enterprise, y lo comprobamos.** Al preguntarle al propio
+servidor (`CALL dbms.components()`), contesta `edition: enterprise`.
+Neo4j Desktop trae esa edición gratis para desarrollo local. Importa
+porque la edición Community solo permite **una** base de datos de
+usuario, y este proyecto usa varias (`gharchive`, `gharchive24h`,
+`gharchive-...`). Por eso en el CI, que usa la imagen Community de
+Docker, las pruebas usan la base `neo4j`.
+
+### Los scripts, en una línea cada uno
+
+| Script | Qué hace |
+|---|---|
+| `run.sh` | El "lanzador": activa `.venv`, carga las contraseñas de `secrets.sh` y ejecuta el script de Python que le digas |
+| `check_connections.py` | Comprueba que Python llega a las dos bases de datos |
+| `download_gharchive.py` | Descarga una hora de GH Archive (por defecto, la del benchmark) |
+| `peek_data.py`, `summarize_data.py`, `profile_schema.py` | Exploración inicial: ver los primeros eventos, contar tipos y descubrir qué campos hay. Sirvieron para diseñar el esquema |
+| `extract_csv.py` | Lee los eventos, deja fuera los bots y escribe `actors.csv`, `repos.csv` y `actor_repo.csv` |
+| `load_postgres.py` | Crea las tablas en PostgreSQL, las llena con los CSV y comprueba las cuentas |
+| `load_neo4j.py` | Crea los nodos y las relaciones en Neo4j con los mismos CSV y comprueba las cuentas |
+| `build_hours.py` | **Proceso 1 (manual):** pregunta qué horas cargar y lo hace todo de una vez en una base nueva |
+| `pipeline.py` | **Proceso 2 (automático):** mantiene `gharchive24h` con las últimas 24 horas |
+| `simulate_ci.sh` | Ejecuta en Docker las mismas pruebas de integración que el CI |
+| `report/build_pdf.sh` | Convierte el report de HTML a PDF |
+
+Las pruebas viven en `tests/`: **48 pruebas unitarias** (sin internet ni
+bases de datos) y **6 pruebas de integración** (con bases de datos de
+verdad).
+
+### Las bases de datos
+
+Cada base tiene **el mismo nombre en los dos servidores** y el mismo
+esquema (`actor`, `repo` y la conexión entre ellos), cargada desde los
+mismos CSV. Así, cualquier diferencia que midamos vendrá del **modelo**
+(relacional o grafo), no de los datos.
+
+| Base | Qué contiene | Quién la crea |
+|---|---|---|
+| `gharchive` | La hora fija del benchmark (jueves 27/08/2026, 15:00 UTC): 14.515 actores, 14.995 repos, 15.053 conexiones. **No cambia nunca** | A mano, una vez |
+| `gharchive-<fecha>-<hora>` (y `...-<n>h`) | Las horas que elijas, por ejemplo `gharchive-2026-11-09-9-5h` (5 horas) | `build_hours.py` |
+| `gharchive24h` | Las últimas 24 horas | `pipeline.py` |
+| `gharchivetest` | Datos inventados de las pruebas | Las pruebas de integración |
+
+### Lo nuevo de la última semana
+
+**1. El proceso manual: `build_hours.py`.** Pregunta tres cosas (la
+fecha, la primera hora y cuántas horas seguidas, de 1 a 168), con valores
+por defecto si pulsas Enter. Si una respuesta está mal o esas horas aún
+no se han publicado, lo explica y vuelve a preguntar. Después:
+
+1. comprueba que **los dos** servidores responden (si uno no responde,
+   para sin tocar nada: así nunca se vacía un lado y el otro no);
+2. descarga las horas a `data/hours/`;
+3. extrae los CSV;
+4. **borra la base entera y la vuelve a crear** en los dos lados, y
+   **comprueba que está vacía** (tablas, nodos, relaciones y
+   restricciones a 0);
+5. carga los datos en PostgreSQL y en Neo4j y comprueba las cuentas.
+
+Cada paso anuncia lo que va a hacer y lo confirma, siempre con el nombre
+de la base. Por seguridad, solo puede vaciar bases cuyo nombre empiece
+por `gharchive-`: nunca `gharchive` ni `gharchive24h`.
+
+**2. La pipeline automática: `pipeline.py --scheduled`.** No se toca
+nunca. El Programador de tareas la lanza al iniciar sesión y cada 15
+minutos, oculta (`conhost.exe --headless`). Cada vez comprueba dos
+cosas: si **hoy ya cargó con éxito** (entonces no hace nada) y si
+**PostgreSQL y Neo4j responden** (si no, lo reintenta 15 minutos
+después). En la práctica: enciendes el ordenador, abres Neo4j Desktop, y
+la carga del día se hace sola una vez.
+
+**3. El README, reordenado:** primero el Setup (con el aviso de usar
+Git Bash), luego la pipeline manual paso a paso y al final la
+automática, sin pasos, porque se ejecuta sola.
+
+**Una lección práctica: Git Bash, no PowerShell.** `source` y `./run.sh`
+solo funcionan en Git Bash (la línea termina en `$`). PowerShell se
+reconoce por `PS C:\...>`. Y `python -m venv .venv` se hace **una sola
+vez**: repetirlo con `.venv` ya activado da "Unable to copy ...
+venvlauncher.exe", sin romper nada.
+
+### Por qué la pipeline de 24 horas queda para después
+
+La pipeline automática sirvió para **repasar cómo se construye una
+pipeline de datos** de principio a fin (ventana de tiempo, descargas
+incrementales, cargas completas, registro, bloqueo, disparador), que es
+lo mismo que se hace en la nube con otras herramientas. Ese objetivo
+está cumplido. Para la investigación no hace falta ahora: las
+mediciones necesitan datos **fijos** que se puedan repetir, y la ventana
+de 24 horas cambia cada día. Queda lista para cuando la necesitemos.
+
+### Lo siguiente: medir
+
+El plan acordado para la fase de mediciones:
+
+1. **Empezar por una hora de día laborable con muchos datos:**
+   `gharchive` (jueves, 15:00 UTC) ya lo es.
+2. **Definir el recorrido**, igual en SQL y en Cypher: desde un actor,
+   ¿cuántos actores distintos se alcanzan en *n* saltos
+   actor → repo → actor? Y comprobar que **las dos bases dan la misma
+   cuenta** a cada profundidad.
+3. **Medir desde Python**, no desde Neo4j Browser ni pgAdmin (sus tiempos
+   incluyen dibujar el resultado): varias repeticiones, un límite de
+   tiempo, y apuntar también **si una consulta falla** o no termina.
+4. **Subir el volumen** con `build_hours.py` empezando el mismo jueves
+   (3 horas, 6, 24 y, al final, una semana) para ver cómo crece la
+   dificultad para cada base de datos.
+5. **Guardarlo todo en el report:** las consultas, las cuentas, los
+   tiempos, los cálculos, lo que encontremos y capturas de pantalla.
+
+> 🎯 **Idea central:** la infraestructura está terminada y probada: dos
+> bases de datos con exactamente los mismos datos, dos formas de
+> cargarlas (manual y automática), pruebas y CI. Desde aquí, el trabajo
+> es medir y anotar en el report lo que encontramos.
