@@ -106,8 +106,14 @@ def test_database_name_never_clashes_with_the_other_databases():
 
 # ---------- ask_hours ----------
 
-def test_ask_hours_enter_keeps_the_benchmark_hour():
-    assert ask_hours(NOW, ask=answers("", "", "", "")) == [utc(2026, 8, 27, 15)]
+def test_ask_hours_has_no_default_date_or_hour(capsys):
+    # Pressing Enter at the date or the hour doesn't pick one: it asks again.
+    reply = answers("",                      # no date
+                    "2026-08-27", "",        # no hour
+                    "2026-08-27", "15", "", "")   # Enter at the count = 1 hour; Enter to confirm
+    assert ask_hours(NOW, ask=reply) == [utc(2026, 8, 27, 15)]
+    printed = capsys.readouterr().out
+    assert "Please type a date" in printed and "Please type an hour" in printed
 
 
 def test_ask_hours_chosen_date_hour_and_count():
@@ -129,7 +135,7 @@ def test_ask_hours_asks_again_after_bad_answers(capsys):
 
 
 def test_ask_hours_no_means_nothing_is_done():
-    assert ask_hours(NOW, ask=answers("", "", "", "n")) is None
+    assert ask_hours(NOW, ask=answers("2026-08-27", "15", "", "n")) is None
 
 
 # ---------- may_be_emptied / recreate_databases (the safety check before deleting) ----------

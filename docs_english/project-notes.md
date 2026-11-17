@@ -5388,8 +5388,10 @@ CSV files. So any difference we measure comes from the **model**
 ### What's new from the last week
 
 **1. The manual process: `build_hours.py`.** It asks three things (the
-date, the first hour and how many consecutive hours, from 1 to 168), with
-defaults if you press Enter. If an answer is wrong, or those hours aren't
+date, the first hour and how many consecutive hours, from 1 to 168). The date
+and the hour have **no default**: they're always typed, so data is never
+loaded for a date nobody chose. Only the number of hours has one
+(Enter = 1). If an answer is wrong, or those hours aren't
 published yet, it explains why and asks again. Then it:
 
 1. checks that **both** servers answer (if one doesn't, it stops without
@@ -5444,8 +5446,10 @@ The plan agreed for the measuring phase:
 3. **Measure from Python**, not from Neo4j Browser or pgAdmin (their
    times include drawing the result): several repetitions, a time limit,
    and also recording **whether a query fails** or doesn't finish.
-4. **Increase the volume** with `build_hours.py`, starting on the same
-   Thursday (3 hours, 6, 24 and finally a week), to see how the difficulty
+4. **Increase the volume step by step** with `build_hours.py`, with data
+   from the same day: first **1 hour**, then **3 hours**, then **12
+   hours**, and later 24 hours or up to a week. Each step is measured and
+   written down before moving to the next, to see how the difficulty
    grows for each database.
 5. **Save everything in the report:** the queries, the counts, the times,
    the calculations, what we find, and screenshots.

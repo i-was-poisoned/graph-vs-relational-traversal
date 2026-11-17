@@ -32,6 +32,30 @@ with `gharchive-`. (Names use dashes, never underscores, because Neo4j
 doesn't allow `_` in database names. Several databases on one Neo4j server
 need the Enterprise Edition, which Neo4j Desktop includes for free.)
 
+## What you type once, and what you type every time
+
+Most commands in this README are done **once**. To load data, the only
+command you need each time is `build_hours.py`:
+
+| Command | How often |
+|---|---|
+| `python -m venv .venv`, `source .venv/Scripts/activate`, `pip install -r ...` | **Once** for the whole project ([Setup](#setup-once-before-anything-else)). If pip says *Requirement already satisfied*, it was already done |
+| `./run.sh scripts/check_connections.py` | Only when you want to check the servers (`build_hours.py` checks them anyway) |
+| `download_gharchive.py` → `extract_csv.py` → `load_postgres.py` → `load_neo4j.py` | **Once**: they build the fixed benchmark `gharchive` ([step 1](#step-1-once-build-the-fixed-benchmark-gharchive)) |
+| `./run.sh scripts/build_hours.py` | **Every time** you want to load data: it asks its questions and does everything else |
+
+So, every time:
+
+```bash
+cd /c/dev/Research
+./run.sh scripts/build_hours.py
+```
+
+There's no need to type `source .venv/Scripts/activate` first: `run.sh`
+turns on the project's `.venv` by itself. (Careful with a `.venv` outside
+the project, e.g. `/c/dev/.venv`: it isn't this project's, and `pip` run
+from `/c/dev` can't find `requirements.txt`.)
+
 ## Setup (once, before anything else)
 
 **Use Git Bash, not PowerShell.** Every command in this README is written for
@@ -132,21 +156,23 @@ Browser.)
 ./run.sh scripts/build_hours.py
 ```
 
-It asks three questions (press Enter to keep the value in brackets):
+It asks three questions. The date and the hour have **no default**: you
+always type them, so nothing is ever loaded for a date you didn't choose.
+Only the number of hours has one (press Enter for 1):
 
-| Question | Default (Enter) | Accepted answers |
+| Question | If you press Enter | Accepted answers |
 |---|---|---|
-| `Date (UTC)` | `2026-08-27` | A date written `YYYY-MM-DD`, from 2015-01-01 (older files use another format) |
-| `First hour (UTC, 0-23)` | `15` | An hour from 0 to 23, in UTC |
-| `How many consecutive hours` | `1` | From 1 to 168 (a week); the hours may cross midnight |
+| `Date (UTC)` | Asked again | A date written `YYYY-MM-DD`, from 2015-01-01 (older files use another format) |
+| `First hour (UTC, 0-23)` | Asked again | An hour from 0 to 23, in UTC |
+| `How many consecutive hours` | `1` hour | From 1 to 168 (a week); the hours may cross midnight |
 
 A wrong answer, or hours GH Archive hasn't published yet, are explained and
 asked again. A last question confirms the choice (`n`, or `Ctrl+C`, = do
 nothing):
 
 ```
-Date (UTC) [2026-08-27]: 2026-11-10
-First hour (UTC, 0-23) [15]: 9
+Date (UTC, e.g. 2026-08-27): 2026-11-10
+First hour (UTC, 0-23): 9
 How many consecutive hours [1]: 3
 Load 2026-11-10 09:00 -> 2026-11-10 12:00 UTC (3 hours) into "gharchive-2026-11-10-9-3h"? (if that database already exists, it's emptied first) [Y/n]: y
 ```
@@ -345,6 +371,16 @@ The full design, decisions and results are in
 [docs_english/project-notes.md](docs_english/project-notes.md), section "The
 24-hour pipeline".
 
+## Measurements (in progress)
+
+The infrastructure is finished; the project is now measuring the same
+traversal in both databases while the data grows: first **1 hour** (the
+fixed benchmark hour, a busy weekday), then **3 hours**, then **12 hours**,
+and later more (24 hours, up to a week), each loaded with `build_hours.py`
+from the same day so that only the volume changes. The plan, the queries,
+the counts, the timings and the findings are recorded in the report:
+[report/report.pdf](report/report.pdf).
+
 ## Dataset
 
 Data source: [GH Archive](https://www.gharchive.org/), which publishes hourly
@@ -361,7 +397,7 @@ The **benchmark** uses a single, fixed hour for reproducibility:
   building a meaningfully connected graph. It is also comfortably in the past,
   so the file is guaranteed to be published and available.
 
-It's also the default answer of `build_hours.py`. How it was downloaded and
+How it was downloaded and
 loaded is in [step 1](#step-1-once-build-the-fixed-benchmark-gharchive).
 
 ## Schema

@@ -45,6 +45,8 @@ MAX_HOURS = 168
 
 def parse_date(text: str) -> date:
     # "2026-08-27" -> date(2026, 8, 27); anything else raises ValueError with a readable message.
+    if not text.strip():
+        raise ValueError("Please type a date, like 2026-08-27 (year-month-day)")
     try:
         day = datetime.strptime(text.strip(), "%Y-%m-%d").date()
     except ValueError:
@@ -56,6 +58,8 @@ def parse_date(text: str) -> date:
 
 def parse_hour(text: str) -> int:
     # "15" -> 15. GH Archive hours are UTC, 0 to 23.
+    if not text.strip():
+        raise ValueError("Please type an hour from 0 to 23 (UTC)")
     if not text.strip().isdigit() or not 0 <= int(text) <= 23:
         raise ValueError(f"'{text}' isn't an hour from 0 to 23 (UTC)")
     return int(text)
@@ -98,11 +102,12 @@ def ask_hours(now: datetime, ask=input) -> list[datetime] | None:
     # Asks for the date, the first hour and how many hours until all are valid, then asks for
     # confirmation. Returns None if the answer to the confirmation is "n".
     # "ask" is input() unless a test replaces it.
-    default_date, default_hour = download_gharchive.DEFAULT_DATE, download_gharchive.DEFAULT_HOUR
+    # The date and the hour have no default: they must always be typed, so data is never
+    # loaded for a date nobody chose. Only the number of hours has one (Enter = 1).
     while True:
         try:
-            day = parse_date(ask(f"Date (UTC) [{default_date}]: ") or default_date)
-            hour = parse_hour(ask(f"First hour (UTC, 0-23) [{default_hour}]: ") or str(default_hour))
+            day = parse_date(ask("Date (UTC, e.g. 2026-08-27): "))
+            hour = parse_hour(ask("First hour (UTC, 0-23): "))
             count = parse_count(ask("How many consecutive hours [1]: ") or "1")
         except ValueError as error:
             print(error)

@@ -287,10 +287,63 @@ actors.csv   repos.csv   actor_repo.csv
   </table>
   <p class="caption">Table 1. The reference hour holds exactly the same data in both databases.</p>
   <p>
-    Larger data sets (3, 6 and 24 hours, then one week) will be built with
-    the manual pipeline, starting on the same day, so that only the volume
-    changes.
+    Larger data sets (3 hours, then 12 hours, then more) will be built with
+    the manual pipeline, from the same day, so that only the volume changes
+    (see chapter 2).
   </p>
+</section>
+
+<section class="chapter">
+  <h2>2. Measurement plan</h2>
+
+  <p>
+    The measurements grow step by step. We start with a small amount of
+    data, measure, and only then add more. At each step the same traversal
+    is run in both databases, and the results are written down in this
+    report before moving on.
+  </p>
+
+  <h3>2.1 The steps</h3>
+  <table>
+    <thead>
+      <tr><th>Step</th><th>Data</th><th>Database</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td>1 hour: Thursday 27 August 2026, 15:00 UTC</td><td><code>gharchive</code></td></tr>
+      <tr><td>2</td><td>3 hours from the same start</td><td><code>gharchive-2026-08-27-15-3h</code></td></tr>
+      <tr><td>3</td><td>12 hours</td><td><code>gharchive-2026-08-27-...-12h</code></td></tr>
+      <tr><td>4 (later)</td><td>24 hours, and possibly a full week</td><td>built the same way</td></tr>
+    </tbody>
+  </table>
+  <p class="caption">Table 2. Each step adds data from the same day, so only the volume changes.</p>
+  <p>
+    We use a weekday because it has much more activity than a weekend, so
+    the graph is better connected. The exact hours for steps 3 and 4 will be
+    chosen when we get there.
+  </p>
+
+  <h3>2.2 What we do at each step</h3>
+  <ol>
+    <li>Load the data with the manual pipeline (<code>build_hours.py</code>)
+        and check that both databases hold the same counts.</li>
+    <li>Run the traversal at increasing depths (1, 2, 3, &hellip; hops)
+        in SQL and in Cypher.</li>
+    <li>Check that both databases return <strong>the same answer</strong>.
+        If they don't, the timing is not compared.</li>
+    <li>Measure the time from Python, several times, with a time limit.</li>
+    <li>Write down whether each query <strong>finished, failed or ran out of
+        time</strong>. A query that cannot finish is also a result.</li>
+  </ol>
+
+  <h3>2.3 What we record</h3>
+  <ul>
+    <li>the exact queries (SQL and Cypher);</li>
+    <li>the counts at each depth, for both databases;</li>
+    <li>the times, and the calculations made with them (for example, the
+        median of the repetitions);</li>
+    <li>what we find, in plain words;</li>
+    <li>screenshots, for example of the graph in Neo4j.</li>
+  </ul>
 </section>
 
 </body>

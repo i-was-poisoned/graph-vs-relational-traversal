@@ -5522,8 +5522,9 @@ mismos CSV. Así, cualquier diferencia que midamos vendrá del **modelo**
 ### Lo nuevo de la última semana
 
 **1. El proceso manual: `build_hours.py`.** Pregunta tres cosas (la
-fecha, la primera hora y cuántas horas seguidas, de 1 a 168), con valores
-por defecto si pulsas Enter. Si una respuesta está mal o esas horas aún
+fecha, la primera hora y cuántas horas seguidas, de 1 a 168). La fecha y la hora **no tienen valor por defecto**: hay que
+escribirlas siempre, para que nunca se carguen datos de una fecha que
+nadie eligió. Solo el número de horas tiene uno (Enter = 1). Si una respuesta está mal o esas horas aún
 no se han publicado, lo explica y vuelve a preguntar. Después:
 
 1. comprueba que **los dos** servidores responden (si uno no responde,
@@ -5580,9 +5581,11 @@ El plan acordado para la fase de mediciones:
 3. **Medir desde Python**, no desde Neo4j Browser ni pgAdmin (sus tiempos
    incluyen dibujar el resultado): varias repeticiones, un límite de
    tiempo, y apuntar también **si una consulta falla** o no termina.
-4. **Subir el volumen** con `build_hours.py` empezando el mismo jueves
-   (3 horas, 6, 24 y, al final, una semana) para ver cómo crece la
-   dificultad para cada base de datos.
+4. **Subir el volumen paso a paso** con `build_hours.py`, con datos del
+   mismo día: primero **1 hora**, después **3 horas**, después **12
+   horas** y, más adelante, 24 horas o hasta una semana. En cada paso se
+   mide y se anota todo antes de pasar al siguiente, para ver cómo crece
+   la dificultad para cada base de datos.
 5. **Guardarlo todo en el report:** las consultas, las cuentas, los
    tiempos, los cálculos, lo que encontremos y capturas de pantalla.
 

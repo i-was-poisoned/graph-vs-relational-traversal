@@ -5730,7 +5730,10 @@ mêmes CSV. Ainsi, toute différence mesurée viendra du **modèle**
 
 **1. Le processus manuel : `build_hours.py`.** Il pose trois questions
 (la date, la première heure et le nombre d'heures consécutives, de 1 à
-168), avec des valeurs par défaut si l'on appuie sur Entrée. Si une
+168). La date et l'heure **n'ont pas de valeur par défaut** : il faut
+toujours les taper, pour que l'on ne charge jamais les données d'une
+date que personne n'a choisie. Seul le nombre d'heures en a une
+(Entrée = 1). Si une
 réponse est fausse, ou si ces heures ne sont pas encore publiées, il
 l'explique et repose la question. Ensuite, il :
 
@@ -5793,9 +5796,11 @@ Le plan convenu pour la phase de mesures :
    temps incluent le dessin du résultat) : plusieurs répétitions, une
    limite de temps, et noter aussi **si une requête échoue** ou ne se
    termine pas.
-4. **Augmenter le volume** avec `build_hours.py` en partant du même jeudi
-   (3 heures, 6, 24 et, à la fin, une semaine) pour voir comment la
-   difficulté augmente pour chaque base de données.
+4. **Augmenter le volume pas à pas** avec `build_hours.py`, avec des
+   données du même jour : d'abord **1 heure**, puis **3 heures**, puis
+   **12 heures** et, plus tard, 24 heures ou jusqu'à une semaine. Chaque
+   étape est mesurée et notée avant de passer à la suivante, pour voir
+   comment la difficulté augmente pour chaque base de données.
 5. **Tout enregistrer dans le rapport :** les requêtes, les comptes, les
    temps, les calculs, ce que nous trouvons et des captures d'écran.
 
