@@ -80,7 +80,9 @@ from neo4j import GraphDatabase
 # POSTGRES_SETTINGS est un dictionnaire dont les clés sont exactement les
 # noms qu'attend la fonction connect() de psycopg :
 #   host="localhost"     la base de données tourne sur ce même ordinateur
-#   dbname="gharchive"   la base de données créée à l'étape 1
+#   dbname="postgres"    la base propre au serveur, qui existe toujours (les
+#                        bases du projet ont pu être supprimées par
+#                        drop_databases.py ; ce test n'a besoin que du serveur)
 #   user="postgres"      le superutilisateur créé par l'installateur
 # Il n'y a volontairement AUCUN mot de passe ici : voir check_postgres().
 #
@@ -90,7 +92,7 @@ from neo4j import GraphDatabase
 #   navigateur).
 # NEO4J_USER = "neo4j" — l'utilisateur Neo4j par défaut.
 # ---------------------------------------------------------------------
-POSTGRES_SETTINGS = {"host": "localhost", "dbname": "gharchive", "user": "postgres"}
+POSTGRES_SETTINGS = {"host": "localhost", "dbname": "postgres", "user": "postgres"}
 NEO4J_URI = "neo4j://localhost:7687"
 NEO4J_USER = "neo4j"
 
@@ -101,7 +103,7 @@ NEO4J_USER = "neo4j"
 # psycopg.connect(**POSTGRES_SETTINGS)
 #   `**` DÉPAQUETTE un dictionnaire en arguments nommés, donc c'est
 #   exactement la même chose que d'écrire :
-#       psycopg.connect(host="localhost", dbname="gharchive", user="postgres")
+#       psycopg.connect(host="localhost", dbname="postgres", user="postgres")
 #
 # Où est le mot de passe ? PGPASSWORD est un nom de variable
 # d'environnement standard que la bibliothèque cliente de PostgreSQL

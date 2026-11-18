@@ -14,7 +14,7 @@ import sys
 import psycopg
 from neo4j import GraphDatabase
 
-POSTGRES_SETTINGS = {"host": "localhost", "dbname": "gharchive", "user": "postgres"}
+POSTGRES_SETTINGS = {"host": "localhost", "dbname": "postgres", "user": "postgres"}
 NEO4J_URI = "neo4j://localhost:7687"
 NEO4J_USER = "neo4j"
 
