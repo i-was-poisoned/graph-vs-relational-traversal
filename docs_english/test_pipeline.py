@@ -11,12 +11,19 @@
 # names, assert, how to run the tests) are explained there and NOT
 # repeated here. This file focuses on what's NEW: building UTC dates with
 # datetime, comparing them, timedelta, and zip() to walk through pairs of
-# neighbours in a list.
+# neighbours in a list. NEW IN THIS VERSION: three tests for
+# already_ran_today(), the "once a day" check of the --scheduled mode,
+# using `date` (a day without a time) and `assert not`.
 #
-# Its job in the project: check the two pure functions of pipeline.py —
-# the ones that decide WHICH hours the live pipeline downloads and WHAT
-# their files are called. If either were wrong, the pipeline would load
-# the wrong window or ask GH Archive for files that don't exist.
+# Its job in the project: check the pure functions of pipeline.py —
+# the ones that decide WHICH hours the live pipeline downloads, WHAT
+# their files are called, and WHETHER the scheduled task still has to
+# run today. If any were wrong, the pipeline would load the wrong window,
+# ask GH Archive for files that don't exist, or run several times a day
+# (or never).
+#
+# How to run the real tests (from the project folder):
+#     python -m pytest
 ########################################################################
 
 """Unit tests for the pure functions of scripts/pipeline.py (no network, no databases).
@@ -24,17 +31,20 @@
 Run with:  python -m pytest
 """
 
+# date: a calendar DAY with no time, e.g. date(2026, 11, 12). NEW here,
+#   for the already_ran_today() tests at the end.
 # datetime: a date AND time in one object, e.g. 2026-10-22 11:15.
 # timedelta: a DURATION, e.g. "1 hour". Subtracting two datetimes gives a
 #   timedelta; adding a timedelta to a datetime gives another datetime.
 # timezone: timezone.utc marks a datetime as UTC. GH Archive names its
 #   files in UTC, so the pipeline (and these tests) always work in UTC.
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
-# The two functions under test. "pure" means: same input -> same output,
-# with no files, network or clock involved. That's what makes them so
-# easy to test — we give them a fixed "now" instead of the real time.
-from pipeline import compute_window, hour_file_name
+# The three functions under test. "pure" means: same input -> same
+# output, with no files, network or clock involved. That's what makes
+# them so easy to test — we give them a fixed "now" (or a fixed "today")
+# instead of the real time.
+from pipeline import already_ran_today, compute_window, hour_file_name
 
 
 # ---------------------------------------------------------------------
@@ -112,3 +122,37 @@ def test_hour_file_name_two_digit_hour():
 
 def test_hour_file_name_midnight():
     assert hour_file_name(utc(2026, 10, 21, 0)) == "2026-10-21-0.json.gz"
+
+
+# ---------------------------------------------------------------------
+# already_ran_today(last_success, today) — see docs_english/pipeline.py.
+# It gets the TEXT of last_success_date.txt (or None if that file doesn't
+# exist) and today's date, and says whether today's run already
+# succeeded. Because both are parameters, the tests need no file and no
+# real clock: they pass a ready-made text and a fixed date.
+#
+# The three situations the scheduled task can meet:
+#   never ran before           (no file: None)      -> must run
+#   already succeeded today    (file says today)    -> must NOT run again
+#   last success was yesterday (file says yesterday) -> must run
+#
+# `assert not X` claims X is False. It's the way to check that a
+# function answers "no".
+#
+# The texts end in "\n" on purpose: that's how pipeline.py writes the
+# file, so the tests also prove that the line ending doesn't confuse the
+# comparison (already_ran_today() strips it).
+# ---------------------------------------------------------------------
+
+# ---------- already_ran_today (--scheduled: once a day) ----------
+
+def test_never_ran_before():
+    assert not already_ran_today(None, date(2026, 11, 12))
+
+
+def test_already_ran_today():
+    assert already_ran_today("2026-11-12\n", date(2026, 11, 12))
+
+
+def test_ran_yesterday_so_runs_again_today():
+    assert not already_ran_today("2026-11-11\n", date(2026, 11, 12))

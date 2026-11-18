@@ -9,13 +9,22 @@
 # Ce fichier suppose que vous avez déjà lu docs_french/test_extract_csv.py —
 # les bases de pytest qui y sont expliquées (le nom test_, assert, les
 # fonctions d'aide, les fixtures) ne sont PAS réexpliquées ici. Les
-# fonctions testées (compute_window, hour_file_name) sont expliquées dans
-# docs_french/pipeline.py.
+# fonctions testées (compute_window, hour_file_name, already_ran_today)
+# sont expliquées dans docs_french/pipeline.py.
 #
-# Son rôle dans le projet : vérifier les deux calculs « invisibles » de la
-# pipeline. Si la fenêtre était décalée d'une heure ou si un nom de fichier
-# était faux, la pipeline ne planterait pas forcément : elle chargerait
-# simplement les mauvaises heures, ou recevrait des 404.
+# NOUVEAU DANS CETTE VERSION : trois tests pour already_ran_today(), la
+# vérification « une fois par jour » du mode --scheduled, avec `date` (un
+# jour sans heure) et `assert not`.
+#
+# Son rôle dans le projet : vérifier les calculs « invisibles » de la
+# pipeline — QUELLES heures elle télécharge, COMMENT s'appellent leurs
+# fichiers, et SI la tâche planifiée doit encore tourner aujourd'hui. Si
+# l'un d'eux était faux, la pipeline ne planterait pas forcément : elle
+# chargerait simplement les mauvaises heures, recevrait des 404, ou
+# tournerait plusieurs fois par jour (ou jamais).
+#
+# Comment lancer les vrais tests (depuis le dossier du projet) :
+#     python -m pytest
 ########################################################################
 
 """Unit tests for the pure functions of scripts/pipeline.py (no network, no databases).
@@ -23,21 +32,27 @@
 Run with:  python -m pytest
 """
 
-# datetime, timedelta, timezone : déjà expliqués dans docs_french/pipeline.py.
+# date, datetime, timedelta, timezone : déjà expliqués dans
+# docs_french/pipeline.py.
+# date est un JOUR du calendrier sans heure, par exemple
+# date(2026, 11, 12). NOUVEAU ici, pour les tests d'already_ran_today()
+# à la fin.
 # timedelta est une DURÉE (par exemple timedelta(hours=1) = une heure) ;
 # soustraire deux datetime donne un timedelta.
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 # ---------------------------------------------------------------------
-# On n'importe que les deux fonctions « pures » de pipeline.py : elles
+# On n'importe que les trois fonctions « pures » de pipeline.py : elles
 # calculent un résultat à partir de leurs paramètres, sans Internet, sans
-# base de données et sans fichiers.
+# base de données, sans fichiers et sans horloge. C'est ce qui les rend si
+# faciles à tester : on leur donne un « maintenant » (ou un
+# « aujourd'hui ») fixe au lieu de l'heure réelle.
 #
 # Importer pipeline importe aussi psycopg et neo4j (pipeline.py en a
 # besoin), mais sans se connecter à rien : aucune base n'est contactée
 # tant qu'on n'appelle pas les fonctions qui s'y connectent.
 # ---------------------------------------------------------------------
-from pipeline import compute_window, hour_file_name
+from pipeline import already_ran_today, compute_window, hour_file_name
 
 
 # ---------------------------------------------------------------------
@@ -123,3 +138,40 @@ def test_hour_file_name_two_digit_hour():
 # Minuit : l'heure 0 doit donner "-0", pas "-00" ni une chaîne vide.
 def test_hour_file_name_midnight():
     assert hour_file_name(utc(2026, 10, 21, 0)) == "2026-10-21-0.json.gz"
+
+
+# ---------------------------------------------------------------------
+# already_ran_today(last_success, today) — voir docs_french/pipeline.py.
+# Elle reçoit le TEXTE de last_success_date.txt (ou None si ce fichier
+# n'existe pas) et la date du jour, et dit si l'exécution du jour a déjà
+# réussi. Comme les deux sont des paramètres, les tests n'ont besoin ni
+# de fichier ni de vraie horloge : ils passent un texte tout prêt et une
+# date fixe.
+#
+# Les trois situations que la tâche planifiée peut rencontrer :
+#   jamais exécutée          (pas de fichier : None)  -> doit tourner
+#   déjà réussie aujourd'hui (le fichier dit aujourd'hui)
+#                                                     -> ne doit PAS
+#                                                        retourner
+#   dernier succès hier      (le fichier dit hier)    -> doit tourner
+#
+# `assert not X` affirme que X vaut False. C'est la façon de vérifier
+# qu'une fonction répond « non ».
+#
+# Les textes se terminent volontairement par "\n" : c'est ainsi que
+# pipeline.py écrit le fichier, donc les tests prouvent aussi que la fin
+# de ligne ne perturbe pas la comparaison (already_ran_today() l'enlève).
+# ---------------------------------------------------------------------
+
+# ---------- already_ran_today (--scheduled: once a day) ----------
+
+def test_never_ran_before():
+    assert not already_ran_today(None, date(2026, 11, 12))
+
+
+def test_already_ran_today():
+    assert already_ran_today("2026-11-12\n", date(2026, 11, 12))
+
+
+def test_ran_yesterday_so_runs_again_today():
+    assert not already_ran_today("2026-11-11\n", date(2026, 11, 12))

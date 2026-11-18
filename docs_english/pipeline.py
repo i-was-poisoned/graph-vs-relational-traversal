@@ -16,13 +16,29 @@
 # a LOCK FILE so two runs never overlap, IDEMPOTENT database creation,
 # try/except/finally around a whole run, and EXIT CODES for a scheduler.
 #
-# WHY IT EXISTS — the project now has TWO processes:
-#   1. the BENCHMARK: one fixed, frozen hour in the "gharchive" databases,
-#      loaded by hand, never changed automatically (so measurements can
-#      always be repeated on the same data);
+# NEW IN THIS VERSION — the --scheduled mode ("once a day, on its own"):
+# already_ran_today(), servers_not_ready(), skip_scheduled_run(), and two
+# small STATUS FILES (last_success_date.txt, scheduled_status.txt). Also
+# new: `date` (a day without a time), local date vs UTC date, CONNECTION
+# TIMEOUTS, and type hints like `str | None` ("a str, or None").
+#
+# WHY IT EXISTS — the project has TWO kinds of data:
+#   1. FIXED data for the research: the frozen benchmark hour in the
+#      "gharchive" databases, plus the hours YOU choose, loaded by hand
+#      with build_hours.py into their own "gharchive-..." databases (see
+#      docs_english/build_hours.py). Never changed automatically, so
+#      measurements can always be repeated on the same data;
 #   2. this LIVE PIPELINE: a rolling 24-hour window in SEPARATE databases
-#      called "gharchive24h", rebuilt every time it runs (meant to run
-#      every hour, scheduled by Windows Task Scheduler).
+#      called "gharchive24h", rebuilt once a day.
+#
+# HOW IT GETS STARTED — Windows Task Scheduler runs
+#     ./run.sh scripts/pipeline.py --scheduled
+# when you log on and then every 15 minutes, HIDDEN (no window) through
+# `conhost.exe --headless`. Most of those starts find nothing to do
+# (today's run already succeeded, or Neo4j Desktop isn't open yet) and
+# stop in a fraction of a second — see skip_scheduled_run(). For now the
+# automatic pipeline is POSTPONED: the research phase uses the fixed data
+# of point 1. The code stays ready for when it's switched on.
 ########################################################################
 
 """Live pipeline: rebuild the "gharchive24h" databases from a rolling 24-hour window.
@@ -42,12 +58,15 @@ the "gharchive" databases (which it never touches). Each run:
 
 If anything fails before loading (a missing hour, a database that isn't
 running), the databases keep the previous window: nothing is half-replaced.
-It's meant to be run every hour by Windows Task Scheduler (see project notes).
+It runs on its own, once a day: Windows Task Scheduler starts it with --scheduled
+every 15 minutes, and it only does the work if today's run hasn't succeeded yet
+and both servers are answering (see README, step 6). It never asks anything.
 
 Usage:
     ./run.sh scripts/pipeline.py
     ./run.sh scripts/pipeline.py --dry-run
     ./run.sh scripts/pipeline.py --window-hours 6 --lag-hours 2
+    ./run.sh scripts/pipeline.py --scheduled     # what Task Scheduler runs
 """
 
 # ---------------------------------------------------------------------
@@ -56,6 +75,10 @@ Usage:
 #             (see setup_logging()).
 #   datetime, timedelta, timezone   NEW: dates/times and arithmetic on
 #             them (see compute_window()).
+#   date      NEW: a calendar DAY with no time (e.g. 2026-11-12).
+#             date.today() is today's date on YOUR computer's clock (local
+#             time, not UTC) — used by the --scheduled mode to decide
+#             "has today's run already happened?" (see already_ran_today()).
 #   os        for os.getpid() and os.environ (as in check_connections.py).
 #   argparse, sys, time, Path: already explained in earlier scripts.
 # ---------------------------------------------------------------------
@@ -64,7 +87,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 # psycopg and GraphDatabase: the two database connectors (see
@@ -103,8 +126,8 @@ import load_postgres
 #   data/live/pipeline.lock      exists only while a run is in progress
 #   data/live/current_window.txt the last window loaded successfully
 #   logs/pipeline.log            the history of every run
-# The benchmark's files (data/2026-08-27-15.json, data/csv/) are separate
-# and never touched.
+# The benchmark's files (data/2026-08-27-15.json, data/csv/) and
+# build_hours.py's files (data/hours/) are separate and never touched.
 # ---------------------------------------------------------------------
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 LIVE_DIR = PROJECT_DIR / "data" / "live"
@@ -113,6 +136,26 @@ CSV_DIR = LIVE_DIR / "csv"
 LOCK_FILE = LIVE_DIR / "pipeline.lock"
 WINDOW_FILE = LIVE_DIR / "current_window.txt"
 LOG_FILE = PROJECT_DIR / "logs" / "pipeline.log"
+# ---------------------------------------------------------------------
+# Two STATUS FILES, used only by the --scheduled mode. Each holds a
+# single line and is OVERWRITTEN every time (it's not a history — the
+# log is the history):
+#   last_success_date.txt   the date of the last successful run, e.g.
+#                           "2026-11-12". This is the pipeline's MEMORY
+#                           between starts: each start is a brand-new
+#                           Python process that remembers nothing, so
+#                           "did I already run today?" has to be written
+#                           down in a file.
+#   scheduled_status.txt    what the LAST start found, e.g.
+#                           "2026-11-12 10:15 (your time): Neo4j isn't
+#                           answering (...); will try again at the next
+#                           check" or "... run SUCCEEDED". Since the task
+#                           runs hidden, this is the quickest way to see
+#                           what it's doing.
+# ---------------------------------------------------------------------
+# --scheduled only: the local date of the last successful run, and what the last attempt found.
+LAST_SUCCESS_FILE = LIVE_DIR / "last_success_date.txt"
+SCHEDULED_STATUS_FILE = LIVE_DIR / "scheduled_status.txt"
 
 # ---------------------------------------------------------------------
 # DEFAULT_DATABASE = "gharchive24h"
@@ -244,10 +287,12 @@ def hour_file_name(hour: datetime) -> str:
 # ---------------------------------------------------------------------
 # def acquire_lock() -> bool:
 #
-# A LOCK FILE prevents two runs from working at the same time. If one run
-# took longer than an hour, the scheduler would start the next one while
-# the first is still loading — and both would empty and fill the same
-# databases at once.
+# A LOCK FILE prevents two runs from working at the same time. Task
+# Scheduler starts the pipeline every 15 minutes; if a run took longer
+# than that (a slow download, a big window), the next start could begin
+# while the first is still loading — and both would empty and fill the
+# same databases at once. (Someone running it by hand during a scheduled
+# run would cause the same problem.)
 #
 #   - No lock file?                -> create it and go ahead (True).
 #   - Lock file younger than 3 h?  -> another run is in progress: don't
@@ -364,7 +409,8 @@ def ensure_databases(database: str) -> None:
 #   6. load PostgreSQL, then Neo4j, reusing the loaders, with the
 #      database name passed in;
 #   7. if both loads match their CSVs, record the window in
-#      current_window.txt.
+#      current_window.txt — and, for the real "gharchive24h" database,
+#      today's date in last_success_date.txt (see below).
 # Returns True only if both loads' checks came out OK.
 #
 # The ORDER is deliberate: everything that can fail without harm
@@ -411,6 +457,24 @@ def run(window_hours: int, lag_hours: int, database: str, dry_run: bool) -> bool
 
     if postgres_ok and neo4j_ok:
         WINDOW_FILE.write_text(f"{window}\n{len(actors)} actors, {len(repos)} repos, {len(pairs)} connections\n")
+        # -------------------------------------------------------------
+        # Remember "today's run succeeded" — but only when the REAL
+        # database was rebuilt. A test run like --database gharchivetest
+        # must not make the scheduled task think the day's work is done.
+        #
+        # date.today() is the LOCAL date (your computer's calendar), on
+        # purpose, even though everything else here is in UTC: "once a
+        # day" is meant from your point of view. Near midnight the two
+        # can differ — at 00:30 in Madrid in winter it's still yesterday
+        # in UTC — and a UTC date would make the daily run "change day"
+        # at an odd local hour.
+        #
+        # f"{date.today():%Y-%m-%d}" formats it as "2026-11-12" (the same
+        # date pattern as in hour_file_name()); "\n" ends the line.
+        # -------------------------------------------------------------
+        if database == DEFAULT_DATABASE:
+            # Your computer's date, not UTC: "once a day" means once per day of yours.
+            LAST_SUCCESS_FILE.write_text(f"{date.today():%Y-%m-%d}\n")
     log.info("Run finished in %.1f s", time.perf_counter() - run_start)
     return postgres_ok and neo4j_ok
 
@@ -422,8 +486,16 @@ def run(window_hours: int, lag_hours: int, database: str, dry_run: bool) -> bool
 #   --lag-hours      how far back it ends
 #   --database       which database to rebuild on both sides
 #   --dry-run        show the plan only (a FLAG, like --exclude-bots was)
+#   --scheduled      NEW: another flag, the one Task Scheduler passes.
+#                    It adds the "is there anything to do?" checks of
+#                    skip_scheduled_run() before the run (see main()).
+#                    Run by hand without it, the pipeline always runs.
 # formatter_class=RawDescriptionHelpFormatter keeps the docstring's line
 # breaks when --help prints it.
+#
+# Note the help= text of --scheduled: two string literals side by side
+# ("... run " "already ...") are JOINED into one by Python. It's a way to
+# split a long text over two lines without a + sign.
 # ---------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -435,12 +507,154 @@ def parse_args() -> argparse.Namespace:
                          help=f"Database to rebuild on both sides (default: {DEFAULT_DATABASE})")
     parser.add_argument("--dry-run", action="store_true",
                          help="Only show the window and which files would be downloaded; change nothing")
+    parser.add_argument("--scheduled", action="store_true",
+                         help="For Task Scheduler, which starts it every 15 minutes: do nothing if today's run "
+                              "already succeeded, or if PostgreSQL or Neo4j isn't answering yet")
     return parser.parse_args()
+
+
+# ---------------------------------------------------------------------
+# def already_ran_today(last_success, today) -> bool:
+#
+# Answers "did today's run already succeed?", given:
+#   last_success   the TEXT of last_success_date.txt, e.g. "2026-11-12\n",
+#                  or None if the file doesn't exist yet (never ran);
+#   today          today's date.
+#
+# `str | None` is a type hint meaning "a str OR None". The `|` reads as
+# "or". It's only a note for the reader (Python doesn't enforce it), but
+# it warns that the function must handle None.
+#
+# How it decides, left to right:
+#   last_success is not None   — if it IS None, `and` stops right here
+#                                and the answer is False. (That also
+#                                avoids calling .strip() on None, which
+#                                would be an error.)
+#   last_success.strip()       — removes the "\n" (and any spaces) at the
+#                                ends, so "2026-11-12\n" becomes
+#                                "2026-11-12";
+#   == f"{today:%Y-%m-%d}"     — compares it with today written the same
+#                                way.
+#
+# Why is it so small and separate? It's a PURE function: it gets the
+# file's text and the date as PARAMETERS, instead of reading the file and
+# the clock itself. So it can be TESTED with any date, without files —
+# the same reason compute_window() takes `now` as a parameter (see
+# docs_english/test_pipeline.py).
+# ---------------------------------------------------------------------
+def already_ran_today(last_success: str | None, today: date) -> bool:
+    # last_success is the text of LAST_SUCCESS_FILE (None if it doesn't exist yet).
+    return last_success is not None and last_success.strip() == f"{today:%Y-%m-%d}"
+
+
+# ---------------------------------------------------------------------
+# def servers_not_ready() -> str | None:
+#
+# Asks both servers "are you there?", the cheapest possible way, and
+# answers with:
+#   None                 both answered — ready to work;
+#   a short text         the REASON one didn't (e.g. "Neo4j isn't
+#                        answering (...)").
+# Returning "the problem, or None if there's none" is a common pattern:
+# the caller checks `if reason is not None:` and has the message ready
+# to show.
+#
+# It's the same kind of connection as in check_connections.py, with two
+# differences:
+#   - TIMEOUTS: connect_timeout=5 (psycopg) and connection_timeout=5
+#     (Neo4j) give up after 5 seconds. When a server isn't running, the
+#     check should fail QUICKLY, not hang — it's repeated every 15
+#     minutes in the background.
+#   - The exceptions are CAUGHT and turned into a message instead of
+#     stopping the program: here, a server that isn't answering is a
+#     normal situation (e.g. you haven't opened Neo4j Desktop yet), not
+#     an error.
+#
+# "SELECT 1" is the smallest possible SQL query: it just proves the
+# connection works. verify_connectivity() does the same for Neo4j (see
+# check_connections.py).
+#
+# The password: PostgreSQL's comes from PGPASSWORD by itself, Neo4j's is
+# read from os.environ — exactly as in check_connections.py. Both come
+# from secrets.sh via run.sh; neither is ever written in the code.
+#
+# build_hours.py reuses this function as its "step 0" (see
+# docs_english/build_hours.py).
+# ---------------------------------------------------------------------
+def servers_not_ready() -> str | None:
+    # Returns None if both servers answer, or a short reason if one doesn't (it isn't running yet).
+    try:
+        with psycopg.connect(host="localhost", user="postgres", dbname="postgres", connect_timeout=5) as conn:
+            conn.execute("SELECT 1")
+    except Exception:
+        return "PostgreSQL isn't answering"
+    try:
+        auth = (load_neo4j.NEO4J_USER, os.environ["NEO4J_PASSWORD"])
+        with GraphDatabase.driver(load_neo4j.NEO4J_URI, auth=auth, connection_timeout=5) as driver:
+            driver.verify_connectivity()
+    except Exception:
+        return "Neo4j isn't answering (is Neo4j Desktop open, with the instance started?)"
+    return None
+
+
+# ---------------------------------------------------------------------
+# def skip_scheduled_run() -> bool:
+#
+# The --scheduled mode's GATE. Returns True if this start should do
+# nothing, False if the real run should go ahead. Two reasons to skip,
+# checked in this order:
+#   1. today's run already succeeded  -> nothing to do until tomorrow;
+#   2. a server isn't answering       -> try again in 15 minutes.
+# The cheap check (reading a one-line file) comes first, so on most
+# starts the servers aren't even contacted.
+#
+# Line by line:
+#   X if condition else Y   (seen before) — read the file's text if it
+#       exists, otherwise None, which already_ran_today() understands.
+#   reason += "; will try ..."   `+=` adds text to the END of a string
+#       ("a" += "b" gives "ab"). Only done if reason isn't None — adding
+#       to None would be an error.
+#   if reason is None: return False   nothing stops the run.
+#   Otherwise: write ONE line to scheduled_status.txt (write_text
+#       replaces the whole file, so it always shows the LAST check),
+#       print it too, and return True.
+#
+# datetime.now() WITHOUT timezone.utc gives your computer's LOCAL time —
+# hence "(your time)" in the text. That file is meant to be read by you,
+# so local time is clearer; the log keeps using UTC.
+#
+# WHY IT RUNS BEFORE setup_logging(): it can be called up to 96 times a day (every
+# 15 minutes) and almost always finds nothing to do. If each of those
+# checks wrote to logs/pipeline.log, the real runs would be buried in
+# thousands of "nothing to do" lines. So the checks only overwrite their
+# one-line status file, and the log only gets the real runs.
+# ---------------------------------------------------------------------
+def skip_scheduled_run() -> bool:
+    # Runs before logging is set up, so the frequent "nothing to do" checks don't fill
+    # logs/pipeline.log: their result only goes to SCHEDULED_STATUS_FILE (overwritten each time).
+    last_success = LAST_SUCCESS_FILE.read_text() if LAST_SUCCESS_FILE.exists() else None
+    if already_ran_today(last_success, date.today()):
+        reason = "today's run already succeeded; nothing to do"
+    else:
+        reason = servers_not_ready()
+        if reason is not None:
+            reason += "; will try again at the next check"
+    if reason is None:
+        return False
+    LIVE_DIR.mkdir(parents=True, exist_ok=True)
+    SCHEDULED_STATUS_FILE.write_text(f"{datetime.now():%Y-%m-%d %H:%M} (your time): {reason}\n")
+    print(reason)
+    return True
 
 
 # ---------------------------------------------------------------------
 # def main() -> None:
 #
+# 0. NEW — SCHEDULED GATE: with --scheduled (and not --dry-run), ask
+#    skip_scheduled_run() first; if there's nothing to do, stop at once
+#    with sys.exit(0) — success, because "nothing to do" is normal. This
+#    happens BEFORE setup_logging(), so these quick exits never touch the
+#    log (see skip_scheduled_run()).
 # 1. SAFETY GUARD: refuse to touch "gharchive", the frozen benchmark
 #    database — even if someone types --database gharchive by mistake.
 # 2. LOCK: if another run is in progress, skip this one. sys.exit(0)
@@ -452,13 +666,23 @@ def parse_args() -> argparse.Namespace:
 #               instead of crashing without leaving a trace in the log;
 #      finally  runs in EVERY case, success or failure: remove the lock
 #               file, so the next run isn't blocked.
-# 4. EXIT CODE: sys.exit(0) on success, sys.exit(1) on failure. A
-#    scheduler like Windows Task Scheduler shows this code as the task's
-#    "last run result", so a failed run can be spotted without opening
-#    the log.
+# 4. NEW — with --scheduled, write the run's OUTCOME to
+#    scheduled_status.txt, so the file always tells what the last start
+#    did, whether it skipped, succeeded or failed.
+# 5. EXIT CODE: sys.exit(0) on success, sys.exit(1) on failure. Useful
+#    when you run it by hand or from another script. BUT: Task
+#    Scheduler's "Last Run Result" always shows 0x0 here, even after a
+#    failure, because the hidden launcher (conhost.exe --headless)
+#    doesn't pass the exit code on. That's why the status file of step 4
+#    exists: it's where a scheduled failure can be seen.
 # ---------------------------------------------------------------------
 def main() -> None:
     args = parse_args()
+    # Step 0. `and` evaluates left to right and stops at the first False,
+    # so skip_scheduled_run() (which may contact the servers) is only
+    # called when --scheduled was given and it's not a dry run.
+    if args.scheduled and not args.dry_run and skip_scheduled_run():
+        sys.exit(0)
     setup_logging()
 
     if args.database == "gharchive":
@@ -478,6 +702,12 @@ def main() -> None:
             LOCK_FILE.unlink(missing_ok=True)
 
     log.info("Status: %s", "SUCCESS" if ok else "FAILURE")
+    # Step 4: the outcome, in your local time, for whoever opens
+    # data/live/scheduled_status.txt. On failure it points to the log,
+    # where log.exception() wrote the full details.
+    if args.scheduled and not args.dry_run:
+        outcome = "run SUCCEEDED" if ok else "run FAILED (see logs/pipeline.log); will try again at the next check"
+        SCHEDULED_STATUS_FILE.write_text(f"{datetime.now():%Y-%m-%d %H:%M} (your time): {outcome}\n")
     sys.exit(0 if ok else 1)
 
 

@@ -308,6 +308,8 @@ what each of these commands actually does, the staging-area concept behind
 
 ## Exploration Stage (download_gharchive.py --> peek_data.py)
 
+> 📖 **Before reading this section**, read the annotated copies of [download_gharchive.py](download_gharchive.py) and [peek_data.py](peek_data.py), in this order.
+
 Now that we have a dataset downloaded and decompressed into JSON Lines format
 (`data/2026-08-27-15.json`), the next step is to actually look at what's in
 it, before trying to model it relationally or as a graph.
@@ -334,6 +336,8 @@ python scripts/peek_data.py --file data/2026-08-27-15.json --lines 10
 ```
 
 ## Summary Stage (summarize_data.py)
+
+> 📖 **Before reading this section**, read the annotated copy of [summarize_data.py](summarize_data.py).
 
 With the shape of a single event confirmed by `peek_data.py`, the next step
 is to get a sense of *volume and connectivity* across the whole downloaded
@@ -585,6 +589,8 @@ the Schema Design Stage below), and the connectivity measured by
    both, so the comparison stays equivalent.
 
 ## Schema Design Stage (profile_schema.py)
+
+> 📖 **Before reading this section**, read the annotated copy of [profile_schema.py](profile_schema.py).
 
 The data is inherently **bipartite**: every event connects one `actor` to
 one `repo` (see [gh-archive-guide.md](gh-archive-guide.md#actors-repos-and-events)
@@ -1168,6 +1174,8 @@ compared.
 
 
 ## Installing the software (PostgreSQL, Neo4j and the Python connectors)
+
+> 📖 **Before reading this section**, read the annotated copy of [check_connections.py](check_connections.py).
 
 With the minimal schema decided (tables `actor`, `repo` and `actor_repo`
 in the relational database; nodes `Actor` and `Repo` with an edge between
@@ -2139,6 +2147,8 @@ with.
 
 ## Extraction Stage (extract_csv.py)
 
+> 📖 **Before reading this section**, read the annotated copy of [extract_csv.py](extract_csv.py).
+
 With both databases installed and checked, the next step is to fill them.
 Before loading anything, the data they'll receive has to be prepared.
 
@@ -2335,6 +2345,8 @@ picture right above `extract()`.
 
 
 ## Loading Stage (load_postgres.py and load_neo4j.py)
+
+> 📖 **Before reading this section**, read the annotated copies of [load_postgres.py](load_postgres.py) and [load_neo4j.py](load_neo4j.py), in this order.
 
 With the three CSVs prepared by `extract_csv.py`, the next step is to **fill
 both databases** with them. Two scripts do it, one per database, reading
@@ -3624,6 +3636,8 @@ the scripts: the databases can always be rebuilt from scratch.
 
 ## The 24-hour pipeline (pipeline.py): a data-engineering perspective
 
+> 📖 **Before reading this section**, read the annotated copy of [pipeline.py](pipeline.py).
+
 Up to now, the whole project worked with **a single hand-picked hour**
 (2026-08-27, 15:00 UTC). It's perfect for the benchmark, because it never
 changes, but it isn't how real data is handled: in data engineering, data
@@ -4146,6 +4160,8 @@ data-engineering practices.
 
 ## Unit tests with pytest (step 1 of the plan)
 
+> 📖 **Before reading this section**, read the annotated copies of [test_extract_csv.py](test_extract_csv.py), [test_loaders.py](test_loaders.py) and [test_pipeline.py](test_pipeline.py), in this order.
+
 This is **step 1** of the plan in the previous section: unit tests that
 check, in a couple of seconds and with no internet or databases, that the
 parts of the pipeline with their own logic do what they should.
@@ -4482,6 +4498,8 @@ almost entirely SQL and Cypher, and that can only really be checked
 against a real database, in step 3.
 
 ## CI with GitHub Actions (step 2 of the plan)
+
+> 📖 **Before reading this section**, read the annotated copy of [ci.yml](ci.yml).
 
 This is **step 2** of the plan: GitHub runs the 24 unit tests **on its
 own**, on its machines, every time code is pushed.
@@ -4974,6 +4992,8 @@ While `./simulate_ci.sh` is running, open Docker Desktop:
 
 ## Integration tests with PostgreSQL and Neo4j (step 3 of the plan)
 
+> 📖 **Before reading this section**, read the annotated copies of [test_integration.py](test_integration.py) and [ci.yml](ci.yml), in this order.
+
 This is **step 3** of the plan: checking that the pieces work
 **together**, with **real** databases. The unit tests check each piece
 separately; these check the whole path: events → `extract_csv.py` → CSV
@@ -5322,6 +5342,8 @@ three containers share the Neo4j container's network.
 
 ## The infrastructure is ready: end of the building phase
 
+> 📖 **Before reading this section**, read the annotated copies of [build_hours.py](build_hours.py), [test_build_hours.py](test_build_hours.py), [pipeline.py](pipeline.py) and [test_pipeline.py](test_pipeline.py), in this order.
+
 Up to here, all the work has been **preparation** for the research:
 getting the data, loading it the same way into both databases, checking
 that it's correct and automating what repeats. From now on the project
@@ -5458,3 +5480,247 @@ The plan agreed for the measuring phase:
 > databases with exactly the same data, two ways to load them (manual and
 > automatic), tests and CI. From here, the work is measuring and recording
 > what we find in the report.
+
+## The research scripts: from empty servers to a table of results
+
+> 📖 **Before reading this section**, read the annotated copies of [drop_databases.py](drop_databases.py), [test_drop_databases.py](test_drop_databases.py), [traversal.py](traversal.py), [choose_starts.py](choose_starts.py), [measure.py](measure.py), [analyze.py](analyze.py), [research.sh](research.sh) and [test_research.py](test_research.py), in this order.
+
+The previous section ended with a plan. This one explains the scripts that
+carry it out, and above all **why** they work the way they do: almost every
+line in them comes from a decision taken while discussing how to measure
+fairly. The annotated copies (`drop_databases.py`, `traversal.py`,
+`choose_starts.py`, `measure.py`, `analyze.py`, `research.sh` and their
+tests, all in this folder) explain the code line by line; here we discuss
+the ideas.
+
+### The order of one measurement
+
+| Step | Command | What it does |
+|---|---|---|
+| 0 | `./run.sh scripts/drop_databases.py` | Deletes **every** project database on both servers, so we start from nothing |
+| 1 | `./run.sh scripts/build_hours.py` | Loads the chosen hours into a new database, the same on both sides |
+| 2 | `./research.sh` | Asks which database to measure and runs the three steps below |
+| 2a | `choose_starts.py` | Chooses the 20 starting actors and saves them |
+| 2b | `measure.py` | Runs the traversal from each actor, at each depth, on both sides |
+| 2c | `analyze.py` | Turns the thousands of runs into small tables |
+
+Steps 2a, 2b and 2c can also be run alone with `./run.sh`, but there's no
+need: `research.sh` runs them in order and **stops at the first one that
+fails**, so a half-finished step never feeds the next one.
+
+### Step 0: starting from nothing (`drop_databases.py`)
+
+During the building phase several databases piled up: `gharchive` (the
+benchmark hour), `gharchive-2026-11-09-9-5h` (a 5-hour test) and
+`gharchive24h` (the pipeline). For the research we want each volume built
+**the same way**, by the same script, so the first step deletes them all.
+
+This contradicts the table in the previous section, where `gharchive`
+"never changes". That table described the building phase. From now on
+every volume, including a single hour, is built with `build_hours.py`, so
+nothing is lost: any database can be rebuilt in a few minutes.
+
+Three safety rules, because deleting is the one thing that can't be undone:
+
+- it only touches names that start with `gharchive`; the servers' own
+  databases (`postgres`, `template0`, `template1`, `neo4j`, `system`) are
+  never on the list, even by mistake;
+- it shows the list and **asks you to type `delete`**: pressing Enter, or
+  typing "yes", deletes nothing;
+- afterwards it **checks again** that nothing is left, instead of trusting
+  that the deletions worked.
+
+### Defining the traversal (`traversal.py`)
+
+The question "from one actor, how many distinct actors can be reached in
+*n* hops actor → repo → actor?" has to be asked in **exactly the same way**
+in both languages, otherwise we'd be comparing two different questions. The
+queries live in a single file so that `choose_starts.py` and `measure.py`
+use the same text.
+
+- **In SQL** there's no way to write "repeat this `JOIN` *n* times" when *n*
+  is chosen at run time. That was one of the questions from the planning
+  ("can I do a `JOIN` a number of times I don't know in advance?"). The
+  answer is a **recursive CTE** (`WITH RECURSIVE`): a starting row (the
+  actor, at depth 0) plus a rule that, from each row found, finds the next
+  ones (depth + 1), until the depth limit. `UNION` (not `UNION ALL`) drops
+  repeated rows, so an actor already found at a given depth isn't explored
+  twice from there.
+- **In Cypher** the same idea is one pattern repeated `{1,N}` times (a
+  *quantified path pattern*). Neo4j doesn't accept the depth as a parameter
+  (`$depth`), so the number is written into the query text. It's safe
+  because it's always an integer checked by the code, never text typed by
+  someone.
+
+**Checked:** on the 5-hour database, both sides give **the same count at
+every depth from 1 to 6**. Without that, any time comparison would be
+meaningless.
+
+### Choosing where to start (`choose_starts.py`)
+
+The plan was clear on one point: **don't guess**. If we chose the actors by
+hand we could, without meaning to, pick ones that favour one side. So the
+script chooses, following fixed rules:
+
+- **The top 10:** the actors that reach the most other actors in one hop.
+  They're the *hubs*, the most demanding case: from them the traversal
+  grows fastest. That's where a graph database is supposed to shine.
+- **The 10 "median" actors:** those whose one-hop reach is closest to the
+  median. They represent a **typical** actor. Actors that reach nobody are
+  left out: their traversal ends at the first step and tells us nothing.
+  An actor already in the top 10 is never repeated.
+- **Ties:** first the one with more repos, then the smaller id. We'd have
+  liked "more events" as the first tie-break, but the database doesn't
+  store how many events each connection had, only that it exists. The id
+  rule only exists so the choice **never changes** between two runs.
+
+Two more rules:
+
+- **Both databases must choose exactly the same 20 actors**, with the same
+  numbers. If not, nothing is saved and the differences are shown. It's
+  another check that the data really is the same on both sides.
+- The list is saved to `results/<database>/starts.csv` and **reused**: a
+  measurement repeated another day starts from the same actors (`--force`
+  chooses again). Each volume has its own list, because the top actors of
+  one hour aren't the top actors of a week.
+
+### A finding before measuring: one hour is too fragmented
+
+Before writing `measure.py`, we looked at **how connected** the graph is,
+by grouping the actors that can reach each other (*connected components*):
+
+| Volume | Largest group of connected actors |
+|---|---|
+| 1 hour | 8 actors (99.3 % of the actors share no repo with anyone) |
+| 5 hours | 45 actors |
+| 24 hours | 1,527 actors, out of 362,730 |
+
+With one hour, a traversal from any actor **runs out of actors after one or
+two hops**: there's no "depth 4" to measure, and both databases finish in
+an instant. That changed the plan: instead of starting with 1 hour, the
+first measurement uses **6 hours**, and the volume grows from there.
+
+This is also a result in itself: GitHub activity is made of **many small
+islands** (people working on their own repos) and a few larger groups
+around popular projects. The more time we load, the more islands get
+joined.
+
+### How a measurement is made (`measure.py`)
+
+For each starting actor and each depth from 1 to 6:
+
+1. **A first run on each side that doesn't count** ("run 0"). The first
+   time Neo4j sees a query with a new shape, it spends about **5 seconds**
+   preparing its plan, even for a tiny answer. Counting that would measure
+   the preparation, not the traversal. Run 0 is also when **the counts of
+   both sides are compared**: if they differ, that actor stops there.
+2. **Five timed runs**, alternating which side goes first (PostgreSQL first
+   in runs 1, 3 and 5; Neo4j first in 2 and 4).
+3. **One run with `EXPLAIN (ANALYZE, BUFFERS)` / `PROFILE`**, which shows
+   the work done **inside** each database: how much it read from memory
+   and from disk, and how much memory it used. Time says *how long*; these
+   figures help explain *why*.
+
+Each run has a **time limit** (60 seconds by default). If one side runs out
+of time at depth 4, it isn't tried at 5 and 6 for that actor: it can only
+be slower. That isn't an error, it's a result ("didn't finish in 60 s"),
+and it's recorded as such.
+
+Everything is measured **from Python** and not from Neo4j Browser or
+pgAdmin, whose times include drawing the result on screen.
+
+Next to the times, the script saves `conditions.json`: versions, memory
+settings, database sizes and the options used. A time without its context
+is hard to interpret six months later.
+
+### Measuring on a laptop that's in use
+
+The ideal would be a computer doing nothing else. That isn't possible here,
+so the method makes up for it:
+
+- **Alternating the order:** if something else slows the computer down for
+  a moment, it affects both sides alike, not always the same one.
+- **Recording the load:** before each run, how busy the CPU and the memory
+  are.
+- **Median, not average:** one slow run (an antivirus scan, an email
+  arriving) moves the average a lot and the median hardly at all.
+- **Flagging "noisy" results:** if the slowest run took more than 3 times
+  the fastest, or the CPU was above 80 %, that actor and depth is flagged,
+  so it can be repeated or read with care.
+- **Large volumes at lunch or at night**, when the computer is quiet.
+
+### The memory each database is allowed to use
+
+Both servers run with their **default settings**, and they aren't equal:
+
+| | PostgreSQL | Neo4j |
+|---|---|---|
+| Data cache | `shared_buffers` 128 MB | page cache 512 MB |
+| Working memory | `work_mem` 4 MB per operation | heap 512 MB, up to 1 GB |
+| Other | `effective_cache_size` 4 GB, JIT on, 2 parallel workers | transactions up to 716.8 MiB in total |
+
+(The laptop has 31.6 GB of RAM and an i7-1260P with 16 threads.)
+
+With small volumes the data fits easily in either cache, so it hardly
+matters. With 24 hours or more it might. **The decision for now:** record
+the settings with every measurement (that's what `conditions.json` is for)
+and decide later, when the volumes are large, whether to give both the same
+memory. Changing it now would be tuning before knowing whether it's needed.
+
+### Reading the results (`analyze.py`)
+
+`measure.py` produces one line per run: thousands of lines. `analyze.py`
+reduces them:
+
+- `per_actor.csv`: for each actor, depth and side, the median, minimum and
+  maximum time, how many runs finished, ran out of time or failed, and
+  whether it was noisy;
+- `summary.csv`: the same per group (top / median) and depth, plus **how
+  many times slower PostgreSQL was than Neo4j**. Above 1, Neo4j was faster;
+  below 1, PostgreSQL was;
+- `results/all_databases.csv`: every volume measured so far, together. This
+  is the file that will answer the research question: in which row
+  (volume) and at which depth the ratio goes above 1 and stays there.
+
+### One command: `research.sh`
+
+During the planning came the question: "can there be a single script that
+runs everything and asks me the questions along the way?". `research.sh` is
+that script. It's written in **bash** and not in Python because it does no
+work itself: it only runs the Python scripts in order, asks one question
+(which database), and stops if a step fails (`set -eo pipefail`). That's
+the same role `run.sh` already has, one level up.
+
+### Tested, but not yet against real data
+
+The research scripts have **19 new unit tests** (67 unit tests in the
+project in total). They check the rules without any database: the order of
+the top 10 and its ties, the median group, the alternating order, the
+Cypher text, ignoring run 0, the noisy flag and the ratio.
+
+What hasn't been tested yet is the full run against PostgreSQL and Neo4j.
+The **first 6-hour measurement** will be that test. The parts most likely
+to need a fix are the ones that depend on what each server returns: the
+names of the `PROFILE` figures in Neo4j, how Neo4j reports a query stopped
+by the time limit, and the keys of PostgreSQL's `EXPLAIN` in JSON. A short
+first run is a good idea:
+
+```bash
+./research.sh --max-depth 3 --repeats 2
+```
+
+### Questions still open
+
+- **Should `results/` go into the repository?** They're small CSV files and
+  they're the evidence of the research, so probably yes.
+- **Give both databases the same memory?** To be decided with 24 hours or
+  more (see above).
+- **The report:** it will get a chapter with the traversal definition, the
+  fragmentation table and the memory settings, and then one per volume.
+
+> 🎯 **Key idea:** measuring fairly takes more decisions than measuring
+> quickly: the same question in both languages, checked to give the same
+> answer; starting actors chosen by rules and not by hand; first runs that
+> don't count; alternating order; the median; and every time saved with its
+> context. The scripts only apply those decisions in a way that can be
+> repeated.

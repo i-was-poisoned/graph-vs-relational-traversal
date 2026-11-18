@@ -342,6 +342,8 @@ de cuentas.
 
 ## Etapa de Exploración (download_gharchive.py --> peek_data.py)
 
+> 📖 **Antes de leer esta sección**, lee las anotaciones de los scripts [download_gharchive.py](download_gharchive.py) y [peek_data.py](peek_data.py), en este orden.
+
 Ahora que tenemos un conjunto de datos descargado y descomprimido en
 formato JSON Lines (`data/2026-08-27-15.json`), el siguiente paso es
 observar realmente qué contiene, antes de intentar modelarlo de forma
@@ -370,6 +372,8 @@ python scripts/peek_data.py --file data/2026-08-27-15.json --lines 10
 ```
 
 ## Etapa de resumen (summarize_data.py)
+
+> 📖 **Antes de leer esta sección**, lee la anotación del script [summarize_data.py](summarize_data.py).
 
 Con la forma de un solo evento ya confirmada por `peek_data.py`, el
 siguiente paso es hacerse una idea del *volumen y la conectividad* en toda
@@ -633,6 +637,8 @@ conexiones entre actores vienen de los *repos compartidos*.
    dos, para que la comparación siga siendo equivalente.
 
 ## Etapa de diseño del esquema (profile_schema.py)
+
+> 📖 **Antes de leer esta sección**, lee la anotación del script [profile_schema.py](profile_schema.py).
 
 Los datos son intrínsecamente **bipartitos**: cada evento conecta un
 `actor` con un `repo` (ver
@@ -1229,6 +1235,8 @@ comparando.
 
 
 ## Instalación del software (PostgreSQL, Neo4j y los conectores de Python)
+
+> 📖 **Antes de leer esta sección**, lee la anotación del script [check_connections.py](check_connections.py).
 
 Con el esquema mínimo decidido (tablas `actor`, `repo` y `actor_repo` en
 la base de datos relacional; nodos `Actor` y `Repo` con una arista entre
@@ -2211,6 +2219,8 @@ se hizo.
 
 ## Etapa de extracción (extract_csv.py)
 
+> 📖 **Antes de leer esta sección**, lee la anotación del script [extract_csv.py](extract_csv.py).
+
 Con las dos bases de datos instaladas y comprobadas, el siguiente paso es
 llenarlas. Antes de cargar nada, hay que preparar los datos que van a
 recibir.
@@ -2412,6 +2422,8 @@ dibujo justo encima de `extract()`.
 
 
 ## Etapa de carga (load_postgres.py y load_neo4j.py)
+
+> 📖 **Antes de leer esta sección**, lee las anotaciones de los scripts [load_postgres.py](load_postgres.py) y [load_neo4j.py](load_neo4j.py), en este orden.
 
 Con los tres CSV preparados por `extract_csv.py`, el siguiente paso es
 **llenar las dos bases de datos** con ellos. Lo hacen dos scripts, uno por
@@ -3730,6 +3742,8 @@ scripts: las bases de datos siempre se pueden reconstruir desde cero.
 
 ## La pipeline de 24 horas (pipeline.py): una perspectiva de ingeniería de datos
 
+> 📖 **Antes de leer esta sección**, lee la anotación del script [pipeline.py](pipeline.py).
+
 Hasta aquí, todo el proyecto trabajaba con **una sola hora elegida a mano**
 (2026-08-27, 15:00 UTC). Es perfecta para el benchmark, porque nunca
 cambia, pero no es como se trabaja con datos de verdad: en ingeniería de
@@ -4262,6 +4276,8 @@ reales de ingeniería de datos.
 
 ## Pruebas unitarias con pytest (paso 1 del plan)
 
+> 📖 **Antes de leer esta sección**, lee las anotaciones de los scripts [test_extract_csv.py](test_extract_csv.py), [test_loaders.py](test_loaders.py) y [test_pipeline.py](test_pipeline.py), en este orden.
+
 Este es el **paso 1** del plan de la sección anterior: unas pruebas
 unitarias que comprueban, en un par de segundos y sin internet ni bases
 de datos, que las piezas con lógica propia de la pipeline hacen lo que
@@ -4606,6 +4622,8 @@ datos son casi solo SQL y Cypher, y eso solo se comprueba de verdad
 contra una base real, en el paso 3.
 
 ## CI con GitHub Actions (paso 2 del plan)
+
+> 📖 **Antes de leer esta sección**, lee la anotación del script [ci.yml](ci.yml).
 
 Este es el **paso 2** del plan: que GitHub ejecute las 24 pruebas
 unitarias **él solo**, en sus máquinas, cada vez que se sube código.
@@ -5102,6 +5120,8 @@ Mientras se ejecuta `./simulate_ci.sh`, abre Docker Desktop:
 
 ## Pruebas de integración con PostgreSQL y Neo4j (paso 3 del plan)
 
+> 📖 **Antes de leer esta sección**, lee las anotaciones de los scripts [test_integration.py](test_integration.py) y [ci.yml](ci.yml), en este orden.
+
 Este es el **paso 3** del plan: comprobar que las piezas funcionan
 **juntas**, con bases de datos **de verdad**. Las pruebas unitarias
 comprueban cada pieza por separado; estas comprueban el recorrido
@@ -5455,6 +5475,8 @@ Neo4j.
 
 ## La infraestructura está lista: fin de la fase de construcción
 
+> 📖 **Antes de leer esta sección**, lee las anotaciones de los scripts [build_hours.py](build_hours.py), [test_build_hours.py](test_build_hours.py), [pipeline.py](pipeline.py) y [test_pipeline.py](test_pipeline.py), en este orden.
+
 Hasta aquí, todo el trabajo ha servido para **preparar** la investigación:
 conseguir los datos, cargarlos igual en las dos bases de datos, comprobar
 que son correctos y automatizar lo que se repite. A partir de ahora el
@@ -5593,3 +5615,266 @@ El plan acordado para la fase de mediciones:
 > bases de datos con exactamente los mismos datos, dos formas de
 > cargarlas (manual y automática), pruebas y CI. Desde aquí, el trabajo
 > es medir y anotar en el report lo que encontramos.
+
+## Los scripts de investigación: de servidores vacíos a una tabla de resultados
+
+> 📖 **Antes de leer esta sección**, lee las anotaciones de los scripts [drop_databases.py](drop_databases.py), [test_drop_databases.py](test_drop_databases.py), [traversal.py](traversal.py), [choose_starts.py](choose_starts.py), [measure.py](measure.py), [analyze.py](analyze.py), [research.sh](research.sh) y [test_research.py](test_research.py), en este orden.
+
+La sección anterior terminaba con un plan. Esta explica los scripts que lo
+llevan a cabo y, sobre todo, **por qué** funcionan como funcionan: casi
+cada línea viene de una decisión tomada al hablar de cómo medir de forma
+justa. Las copias anotadas (`drop_databases.py`, `traversal.py`,
+`choose_starts.py`, `measure.py`, `analyze.py`, `research.sh` y sus
+pruebas, todas en esta carpeta) explican el código línea por línea; aquí
+se discuten las ideas.
+
+### El orden de una medición
+
+| Paso | Comando | Qué hace |
+|---|---|---|
+| 0 | `./run.sh scripts/drop_databases.py` | Borra **todas** las bases del proyecto en los dos servidores, para empezar desde cero |
+| 1 | `./run.sh scripts/build_hours.py` | Carga las horas elegidas en una base nueva, igual en los dos lados |
+| 2 | `./research.sh` | Pregunta qué base medir y ejecuta los tres pasos de abajo |
+| 2a | `choose_starts.py` | Elige los 20 actores de partida y los guarda |
+| 2b | `measure.py` | Ejecuta el recorrido desde cada actor, a cada profundidad, en los dos lados |
+| 2c | `analyze.py` | Convierte los miles de ejecuciones en tablas pequeñas |
+
+Los pasos 2a, 2b y 2c también se pueden ejecutar por separado con
+`./run.sh`, pero no hace falta: `research.sh` los ejecuta en orden y **se
+para en el primero que falle**, así un paso a medias nunca alimenta al
+siguiente.
+
+### Paso 0: empezar desde cero (`drop_databases.py`)
+
+Durante la fase de construcción se fueron acumulando varias bases:
+`gharchive` (la hora del benchmark), `gharchive-2026-11-09-9-5h` (una
+prueba de 5 horas) y `gharchive24h` (la pipeline). Para la investigación
+queremos que cada volumen se construya **de la misma manera**, con el
+mismo script, así que el primer paso las borra todas.
+
+Esto contradice la tabla de la sección anterior, donde `gharchive` "no
+cambia nunca". Esa tabla describía la fase de construcción. A partir de
+ahora cada volumen, incluida una sola hora, se construye con
+`build_hours.py`, así que no se pierde nada: cualquier base se puede
+reconstruir en unos minutos.
+
+Tres reglas de seguridad, porque borrar es lo único que no se puede
+deshacer:
+
+- solo toca nombres que empiezan por `gharchive`; las bases propias de los
+  servidores (`postgres`, `template0`, `template1`, `neo4j`, `system`)
+  nunca están en la lista, ni por error;
+- enseña la lista y **pide escribir `delete`**: pulsar Enter, o escribir
+  "sí", no borra nada;
+- después **vuelve a comprobar** que no queda ninguna, en lugar de confiar
+  en que los borrados funcionaron.
+
+### Definir el recorrido (`traversal.py`)
+
+La pregunta "desde un actor, ¿cuántos actores distintos se alcanzan en *n*
+saltos actor → repo → actor?" tiene que hacerse **exactamente igual** en
+los dos lenguajes; si no, estaríamos comparando dos preguntas distintas.
+Las consultas viven en un solo archivo para que `choose_starts.py` y
+`measure.py` usen el mismo texto.
+
+- **En SQL** no se puede escribir "repite este `JOIN` *n* veces" cuando *n*
+  se elige al ejecutar. Era una de las preguntas de la planificación
+  ("¿puedo hacer un `JOIN` un número de veces que no sé antes?"). La
+  respuesta es un **CTE recursivo** (`WITH RECURSIVE`): una fila de partida
+  (el actor, a profundidad 0) más una regla que, desde cada fila
+  encontrada, encuentra las siguientes (profundidad + 1), hasta el límite.
+  `UNION` (no `UNION ALL`) quita las filas repetidas, así un actor ya
+  encontrado a una profundidad no se explora dos veces desde ahí.
+- **En Cypher** la misma idea es un patrón repetido `{1,N}` veces (un
+  *quantified path pattern*). Neo4j no acepta la profundidad como
+  parámetro (`$depth`), así que el número se escribe dentro del texto de la
+  consulta. Es seguro porque siempre es un número entero comprobado por el
+  código, nunca texto escrito por alguien.
+
+**Comprobado:** en la base de 5 horas, los dos lados dan **la misma cuenta
+en todas las profundidades de 1 a 6**. Sin eso, cualquier comparación de
+tiempos no tendría sentido.
+
+### Elegir desde dónde empezar (`choose_starts.py`)
+
+El plan era claro en un punto: **no adivinar**. Si eligiéramos los actores
+a mano, podríamos, sin querer, escoger algunos que favorecen a un lado. Así
+que el script elige, siguiendo reglas fijas:
+
+- **El top 10:** los actores que alcanzan a más actores en un salto. Son
+  los *hubs*, el caso más exigente: desde ellos el recorrido crece más
+  rápido. Ahí es donde se supone que una base de grafos brilla.
+- **Los 10 actores "medianos":** aquellos cuyo alcance en un salto está más
+  cerca de la mediana. Representan a un actor **típico**. Se dejan fuera
+  los actores que no alcanzan a nadie: su recorrido termina en el primer
+  paso y no nos dice nada. Un actor que ya está en el top 10 nunca se
+  repite.
+- **Empates:** primero el que tiene más repos, luego el id más pequeño. Nos
+  habría gustado "más eventos" como primer desempate, pero la base no
+  guarda cuántos eventos tuvo cada conexión, solo que existe. La regla del
+  id solo existe para que la elección **no cambie nunca** entre dos
+  ejecuciones.
+
+Dos reglas más:
+
+- **Las dos bases tienen que elegir exactamente los mismos 20 actores**,
+  con los mismos números. Si no, no se guarda nada y se enseñan las
+  diferencias. Es otra comprobación de que los datos son de verdad iguales
+  en los dos lados.
+- La lista se guarda en `results/<base>/starts.csv` y **se reutiliza**: una
+  medición repetida otro día parte de los mismos actores (`--force` vuelve
+  a elegir). Cada volumen tiene su propia lista, porque los actores top de
+  una hora no son los de una semana.
+
+### Un hallazgo antes de medir: una hora está demasiado fragmentada
+
+Antes de escribir `measure.py`, miramos **cuán conectado** está el grafo,
+agrupando los actores que pueden alcanzarse entre sí (*componentes
+conexas*):
+
+| Volumen | Mayor grupo de actores conectados |
+|---|---|
+| 1 hora | 8 actores (el 99,3 % de los actores no comparte repo con nadie) |
+| 5 horas | 45 actores |
+| 24 horas | 1.527 actores, de 362.730 |
+
+Con una hora, un recorrido desde cualquier actor **se queda sin actores
+después de uno o dos saltos**: no hay "profundidad 4" que medir, y las dos
+bases terminan en un instante. Eso cambió el plan: en vez de empezar con 1
+hora, la primera medición usa **6 horas**, y el volumen crece a partir de
+ahí.
+
+Esto también es un resultado en sí mismo: la actividad en GitHub está
+hecha de **muchas islas pequeñas** (personas trabajando en sus propios
+repos) y unos pocos grupos más grandes alrededor de proyectos populares.
+Cuanto más tiempo cargamos, más islas se unen.
+
+### Cómo se hace una medición (`measure.py`)
+
+Para cada actor de partida y cada profundidad de 1 a 6:
+
+1. **Una primera ejecución en cada lado que no cuenta** ("run 0"). La
+   primera vez que Neo4j ve una consulta con una forma nueva, tarda unos
+   **5 segundos** en preparar su plan, incluso para una respuesta mínima.
+   Contarlo sería medir la preparación, no el recorrido. En la run 0 es
+   también cuando **se comparan las cuentas de los dos lados**: si son
+   distintas, ese actor se para ahí.
+2. **Cinco ejecuciones cronometradas**, alternando qué lado va primero
+   (PostgreSQL primero en las ejecuciones 1, 3 y 5; Neo4j primero en la 2
+   y la 4).
+3. **Una ejecución con `EXPLAIN (ANALYZE, BUFFERS)` / `PROFILE`**, que
+   enseña el trabajo hecho **dentro** de cada base: cuánto leyó de memoria
+   y de disco, y cuánta memoria usó. El tiempo dice *cuánto tarda*; estas
+   cifras ayudan a explicar *por qué*.
+
+Cada ejecución tiene un **límite de tiempo** (60 segundos por defecto). Si
+un lado se queda sin tiempo a profundidad 4, no se intenta a 5 y 6 para
+ese actor: solo podría ser más lento. No es un error, es un resultado ("no
+terminó en 60 s"), y se apunta como tal.
+
+Todo se mide **desde Python** y no desde Neo4j Browser o pgAdmin, cuyos
+tiempos incluyen dibujar el resultado en pantalla.
+
+Junto a los tiempos, el script guarda `conditions.json`: versiones,
+configuración de memoria, tamaños de las bases y las opciones usadas. Un
+tiempo sin su contexto es difícil de interpretar seis meses después.
+
+### Medir en un portátil que se está usando
+
+Lo ideal sería un ordenador que no hiciera nada más. Aquí no es posible,
+así que el método lo compensa:
+
+- **Alternar el orden:** si otra cosa frena el ordenador un momento, afecta
+  a los dos lados por igual, no siempre al mismo.
+- **Apuntar la carga:** antes de cada ejecución, cuán ocupados están la CPU
+  y la memoria.
+- **Mediana, no media:** una ejecución lenta (un análisis del antivirus, un
+  correo que llega) mueve mucho la media y casi nada la mediana.
+- **Marcar los resultados "ruidosos":** si la ejecución más lenta tardó más
+  de 3 veces la más rápida, o la CPU estaba por encima del 80 %, ese actor
+  y profundidad se marcan, para repetirlos o leerlos con cuidado.
+- **Los volúmenes grandes, a la hora de comer o por la noche**, cuando el
+  ordenador está tranquilo.
+
+### La memoria que cada base puede usar
+
+Los dos servidores funcionan con su **configuración por defecto**, y no es
+igual:
+
+| | PostgreSQL | Neo4j |
+|---|---|---|
+| Caché de datos | `shared_buffers` 128 MB | page cache 512 MB |
+| Memoria de trabajo | `work_mem` 4 MB por operación | heap de 512 MB, hasta 1 GB |
+| Otros | `effective_cache_size` 4 GB, JIT activado, 2 workers en paralelo | transacciones hasta 716,8 MiB en total |
+
+(El portátil tiene 31,6 GB de RAM y un i7-1260P con 16 hilos.)
+
+Con volúmenes pequeños los datos caben de sobra en cualquiera de las dos
+cachés, así que apenas importa. Con 24 horas o más podría importar. **La
+decisión por ahora:** apuntar la configuración en cada medición (para eso
+está `conditions.json`) y decidir más adelante, con volúmenes grandes, si
+dar a las dos la misma memoria. Cambiarla ahora sería ajustar antes de
+saber si hace falta.
+
+### Leer los resultados (`analyze.py`)
+
+`measure.py` produce una línea por ejecución: miles de líneas.
+`analyze.py` las reduce:
+
+- `per_actor.csv`: para cada actor, profundidad y lado, la mediana, el
+  mínimo y el máximo, cuántas ejecuciones terminaron, se quedaron sin
+  tiempo o fallaron, y si hubo ruido;
+- `summary.csv`: lo mismo por grupo (top / mediana) y profundidad, más
+  **cuántas veces más lenta fue PostgreSQL que Neo4j**. Por encima de 1,
+  Neo4j fue más rápida; por debajo de 1, lo fue PostgreSQL;
+- `results/all_databases.csv`: todos los volúmenes medidos hasta ahora,
+  juntos. Este es el archivo que responderá a la pregunta de la
+  investigación: en qué volumen y a qué profundidad la proporción pasa de 1
+  y se queda ahí.
+
+### Un solo comando: `research.sh`
+
+Durante la planificación surgió la pregunta: "¿puede haber un solo script
+que lo ejecute todo y me haga las preguntas a lo largo de la ejecución?".
+`research.sh` es ese script. Está escrito en **bash** y no en Python
+porque no hace ningún trabajo por sí mismo: solo ejecuta los scripts de
+Python en orden, hace una pregunta (qué base) y se para si un paso falla
+(`set -eo pipefail`). Es el mismo papel que ya tiene `run.sh`, un nivel
+más arriba.
+
+### Probado, pero todavía no con datos reales
+
+Los scripts de investigación tienen **19 pruebas unitarias nuevas** (67
+pruebas unitarias en todo el proyecto). Comprueban las reglas sin ninguna
+base de datos: el orden del top 10 y sus empates, el grupo de la mediana,
+el orden alterno, el texto de Cypher, ignorar la run 0, la marca de ruido
+y la proporción.
+
+Lo que aún no se ha probado es la ejecución completa contra PostgreSQL y
+Neo4j. La **primera medición de 6 horas** será esa prueba. Las partes que
+más probablemente necesiten un arreglo son las que dependen de lo que
+devuelve cada servidor: los nombres de las cifras de `PROFILE` en Neo4j,
+cómo avisa Neo4j de una consulta parada por el límite de tiempo, y las
+claves del `EXPLAIN` de PostgreSQL en JSON. Una primera ejecución corta es
+buena idea:
+
+```bash
+./research.sh --max-depth 3 --repeats 2
+```
+
+### Preguntas todavía abiertas
+
+- **¿Subir `results/` al repositorio?** Son CSV pequeños y son las pruebas
+  de la investigación, así que probablemente sí.
+- **¿Dar a las dos bases la misma memoria?** Se decidirá con 24 horas o
+  más (ver arriba).
+- **El report:** tendrá un capítulo con la definición del recorrido, la
+  tabla de fragmentación y la configuración de memoria, y después uno por
+  volumen.
+
+> 🎯 **Idea central:** medir de forma justa exige más decisiones que medir
+> rápido: la misma pregunta en los dos lenguajes, comprobada para que dé la
+> misma respuesta; actores de partida elegidos por reglas y no a mano;
+> primeras ejecuciones que no cuentan; orden alterno; la mediana; y cada
+> tiempo guardado con su contexto. Los scripts solo aplican esas decisiones
+> de una forma que se puede repetir.
