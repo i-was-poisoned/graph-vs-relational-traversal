@@ -41,7 +41,7 @@ server need the Enterprise Edition, which Neo4j Desktop includes for free.)
 ## The order, in short
 
 Everything happens in this order. Steps 1-5 are the setup, done **once**.
-Steps 6-10 are the research.
+Steps 6-11 are the research.
 
 | # | What | How often | Where it's explained |
 |---|---|---|---|
@@ -55,6 +55,7 @@ Steps 6-10 are the research.
 | 8 | Run **`build_hours.py`**: it asks which hours you want and puts them in both databases | Once **per volume** (6 hours, 12 hours, ...) | [Step 2](#step-2-load-the-hours-you-choose) |
 | 9 | Run **`research.sh`**: it measures one database and writes the results to `results/` | Once **per volume** | [Step 4](#step-4-measure-researchsh) |
 | 10 | Read the results | After each measurement | [Step 5](#step-5-read-the-results) |
+| 11 | **Save the iteration**: commit `results/` to Git | After each volume, **before** loading the next one | [Step 6](#step-6-save-the-iteration) |
 
 So, once the setup is done, a research is just:
 
@@ -63,9 +64,10 @@ cd /c/dev/Research
 ./run.sh scripts/drop_databases.py   # step 1: delete the databases of earlier research (type "delete")
 ./run.sh scripts/build_hours.py      # step 2: load the hours you choose, e.g. 6 hours
 ./research.sh                        # step 4: measure that database and summarise the results
+git add results/ && git commit -m "Results: 6 hours (gharchive-2026-08-27-12-6h)" && git push   # step 6: save the iteration
 ```
 
-and then `build_hours.py` + `research.sh` again for every bigger volume
+and then `build_hours.py` + `research.sh` + the commit again for every bigger volume
 (12 hours, 1 day, ...). `drop_databases.py` is **not** run between volumes
 of the same research: only once, at the very start.
 
@@ -151,7 +153,8 @@ Step 2  load a volume                              ./run.sh scripts/build_hours.
 Step 3    (what build_hours.py does, stage by stage)
 Step 4  measure it                                 ./research.sh                        (once per volume)
 Step 5  read the results                           results/
-Step 6  next volume: back to step 2
+Step 6  save the iteration                         git add results/ ; git commit ; git push   (once per volume)
+Step 7  next volume: back to step 2
 ```
 
 The plan is to measure several volumes, each one loaded **from the same
@@ -397,13 +400,47 @@ results/
 `results/all_databases.csv` is the file that answers the research question:
 the volume and depth where the ratio goes above 1 and stays there.
 
-### Step 6. The next volume
+### Step 6. Save the iteration
+
+Before moving to the next volume, **save this one in Git**. `results/` only
+exists on your computer until it's committed; once pushed, every iteration
+is kept in the repository's history with its date, and anyone can compare
+their own results with it.
+
+```bash
+git status                     # check: only files under results/ should be new or changed
+git add results/
+git commit -m "Results: 6 hours (gharchive-2026-08-27-12-6h)"
+git push
+```
+
+Change the message for each iteration, e.g. `"Results: 12 hours
+(gharchive-2026-08-27-12-12h)"`, `"Results: 1 day (gharchive-2026-08-27-0-24h)"`.
+
+What each iteration leaves behind, and why nothing is lost:
+
+- **Each volume has its own folder** (`results/<database>/`), named after
+  the database, so a new volume never writes into an earlier one.
+- **Each measurement has its own sub-folder** (`<date-time>/`): measuring the
+  same volume again doesn't overwrite the earlier measurement.
+- **`results/all_databases.csv` grows**: after every measurement it's
+  rebuilt with all the volumes measured so far (6 hours; then 6 + 12 hours;
+  ...). If a volume was measured more than once, it uses the **latest**
+  measurement; the earlier ones stay in their folders.
+- **Deleting databases doesn't touch `results/`**: `drop_databases.py` only
+  deletes databases, never files.
+
+Besides the numbers, each iteration also gets its **text**: a chapter in the
+report (tables, what we see, screenshots) and a section at the end of the
+project notes, in the three languages.
+
+### Step 7. The next volume
 
 Go back to [Step 2](#step-2-load-the-hours-you-choose) with more hours from
-the same day (e.g. `2026-08-27`, `12`, `12`), then measure it with
-`./research.sh` (Step 4). **Don't run `drop_databases.py` between volumes**:
-it's only for the start of a new research. Every new measurement is added
-to `results/all_databases.csv`.
+the same day (e.g. `2026-08-27`, `12`, `12`), measure it with
+`./research.sh` (Step 4) and save it (Step 6). **Don't run
+`drop_databases.py` between volumes**: it's only for the start of a new
+research.
 
 ### Measuring on a computer that is in use
 
@@ -466,7 +503,7 @@ research scripts", and the findings are recorded in the report:
 
 ## 2. The automatic 24-hour pipeline
 
-This process is **independent of the research**: nothing in steps 0 to 6
+This process is **independent of the research**: nothing in steps 0 to 7
 above needs it, and the research doesn't use its data for now. It's kept
 because it shows, end to end, how an automatic data pipeline is built.
 
