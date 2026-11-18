@@ -13,3 +13,6 @@ psycopg[binary]==3.3.6
 
 # Official Neo4j connector
 neo4j==6.4.1
+
+# Machine load (CPU and memory) while the measurements run, to spot noisy runs
+psutil==7.2.2
