@@ -346,5 +346,222 @@ actors.csv   repos.csv   actor_repo.csv
   </ul>
 </section>
 
+<section class="chapter">
+  <h2>3. How the two databases are compared</h2>
+
+  <p>
+    This chapter explains what is measured, and how the measurements decide
+    which database is better, and from which depth. It replaces the general
+    ideas of chapter 2 with the method actually used by the scripts.
+  </p>
+  <p>
+    One change to the plan of chapter 2: the first measurements showed that
+    one hour of data is too fragmented (99.3&nbsp;% of the actors share no
+    repository with anyone, and the largest group of connected actors has
+    only 8 actors), so there is nothing deep to traverse. The measurements
+    therefore start at <strong>6 hours</strong> and grow from there
+    (24 hours, 3 days, up to a week), always from the same day.
+  </p>
+
+  <h3>3.1 The question asked at each depth</h3>
+  <p>
+    From one starting actor: <em>how many different actors can be reached
+    in at most N hops?</em> One <strong>hop</strong> goes from an actor to a
+    repository it worked on, and from that repository to another actor who
+    also worked on it (actor &rarr; repo &rarr; actor). So every hop crosses
+    <strong>two</strong> connections, and the work grows with every hop:
+  </p>
+  <table>
+    <thead>
+      <tr><th class="num">Depth (hops)</th><th>Path</th><th class="num">JOINs in SQL</th><th class="num">Relationships followed in Cypher</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="num">1</td><td>actor &rarr; repo &rarr; actor</td><td class="num">2</td><td class="num">2</td></tr>
+      <tr><td class="num">2</td><td>&hellip; &rarr; repo &rarr; actor</td><td class="num">4</td><td class="num">4</td></tr>
+      <tr><td class="num">3</td><td>&hellip; &rarr; repo &rarr; actor</td><td class="num">6</td><td class="num">6</td></tr>
+      <tr><td class="num">4</td><td>&hellip;</td><td class="num">8</td><td class="num">8</td></tr>
+      <tr><td class="num">5</td><td>&hellip;</td><td class="num">10</td><td class="num">10</td></tr>
+      <tr><td class="num">6</td><td>&hellip;</td><td class="num">12</td><td class="num">12</td></tr>
+    </tbody>
+  </table>
+  <p class="caption">Table 3. Every hop adds two JOINs in SQL and two relationships in Cypher.</p>
+  <p>
+    This is the heart of the research question: in a relational database
+    every extra hop means joining tables again, while a graph database
+    follows connections that are already stored next to each node. The
+    deeper the traversal, the more this difference should show.
+  </p>
+
+  <h3>3.2 The queries</h3>
+  <p>
+    Both databases must give <strong>exactly the same answer</strong> at every
+    depth; a time is only compared when they do. In SQL, the number of hops
+    isn't known when the query is written, so a <em>recursive</em> query is
+    used: it starts from the actor and repeats the two JOINs once per hop,
+    keeping each actor only once per level.
+  </p>
+<pre>WITH RECURSIVE reach(actor_id, depth) AS (
+    SELECT :start, 0
+    UNION
+    SELECT ar2.actor_id, r.depth + 1
+    FROM reach r
+    JOIN actor_repo ar1 ON ar1.actor_id = r.actor_id   -- actor -> repo
+    JOIN actor_repo ar2 ON ar2.repo_id  = ar1.repo_id  -- repo  -> actor
+    WHERE r.depth &lt; :depth
+)
+SELECT count(DISTINCT actor_id) FROM reach WHERE actor_id &lt;&gt; :start</pre>
+  <p>
+    In Cypher, two versions are measured, because the first results showed
+    that the way the query is written matters as much as the database:
+  </p>
+  <ul>
+    <li><strong><code>paths</code></strong>: the natural way to write it, one
+        pattern repeated 1 to N times. Neo4j follows <em>every path</em> and
+        removes repeated actors only at the end. Two actors who share 27
+        repositories are joined by 27 paths, then 27&nbsp;&times;&nbsp;27, and so on.</li>
+    <li><strong><code>levels</code></strong>: level by level, like the SQL.
+        Each step starts from the actors found in the step before and keeps
+        only actors never seen before.</li>
+  </ul>
+<pre>// paths, depth 3
+MATCH (a:Actor {id: $start})
+      ((:Actor)-[:INTERACTED_WITH]-&gt;(:Repo)&lt;-[:INTERACTED_WITH]-(:Actor)){1,3}
+      (b:Actor)
+WHERE b &lt;&gt; a
+RETURN count(DISTINCT b)</pre>
+  <p>
+    Comparing <code>levels</code> with the SQL compares the two databases
+    using the same method; comparing <code>paths</code> with
+    <code>levels</code> shows the cost of writing the query the obvious way.
+  </p>
+
+  <h3>3.3 Where the traversals start</h3>
+  <p>
+    The starting actors are chosen by a script, never by hand, so that the
+    choice can't favour one database. For every volume of data, two groups
+    of 10 actors:
+  </p>
+  <ul>
+    <li><strong>top</strong>: the 10 actors connected to the most other
+        actors in one hop (the hardest case, where a traversal grows fastest);</li>
+    <li><strong>median</strong>: the 10 actors whose number of connections
+        is closest to the median (a typical actor).</li>
+  </ul>
+  <p>
+    Ties are broken by the number of repositories, then by the smaller id,
+    so the choice never changes. Both databases must choose exactly the same
+    20 actors.
+  </p>
+
+  <h3>3.4 The four measurements</h3>
+  <p>
+    A database is better if it gives the same answer with less of four
+    things. Each of them is measured in both databases, for every starting
+    actor, every depth and every volume:
+  </p>
+  <table>
+    <thead>
+      <tr><th>What</th><th>How it is measured</th><th>Why it matters</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>1. Data processed</strong></td>
+        <td>How many data pages the database went through to answer, in MB.
+            Both databases store data in pages of 8&nbsp;KB, so the numbers
+            can be compared directly. Reported by <code>EXPLAIN (ANALYZE, BUFFERS)</code>
+            in PostgreSQL and <code>PROFILE</code> in Neo4j. The part read
+            from disk is recorded separately.</td>
+        <td>The amount of work each model needs for the same answer,
+            whatever the speed of the computer.</td>
+      </tr>
+      <tr>
+        <td><strong>2. Time</strong></td>
+        <td>Seconds, measured from Python: the <em>median</em> of 5 runs.
+            The first run is recorded apart, because it includes preparing
+            the query. Each run has a limit of 60 seconds.</td>
+        <td>The most visible result: how long a user waits.</td>
+      </tr>
+      <tr>
+        <td><strong>3. Space</strong></td>
+        <td>The memory the query used while it ran (in MB), what PostgreSQL
+            had to write to disk because it didn't fit in memory, and the
+            size of each database on disk.</td>
+        <td>A database can be fast by using a lot of memory; and the same
+            data can take more or less room in each model.</td>
+      </tr>
+      <tr>
+        <td><strong>4. Computing power</strong></td>
+        <td>The CPU seconds used by the database server during the query,
+            read from the operating system before and after each run; and
+            CPU seconds &divide; time, which says how many processor cores
+            worked at the same time.</td>
+        <td>Time alone hides whether a database is fast because it works
+            less, or because it uses several cores at once.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="caption">Table 4. The four things compared at every depth.</p>
+  <p>Four more facts are recorded with every result, so it can be trusted:</p>
+  <ul>
+    <li>whether both databases gave <strong>the same answer</strong> (if not,
+        the result is not used);</li>
+    <li>whether each query <strong>finished</strong>, <strong>ran out of
+        time</strong>, or was <strong>skipped</strong> because it had already
+        run out of time at a smaller depth (a query that can't finish is a
+        result too);</li>
+    <li>whether the result is <strong>reliable</strong>: the measurements are
+        made on a laptop that is also used for other work, so a result is
+        flagged when the computer was busy (CPU above 80&nbsp;%) or the 5 runs
+        were very uneven (the slowest more than 3 times the fastest). To
+        reduce this, the order of the databases changes on every run, and
+        large volumes are measured when the computer is quiet;</li>
+    <li>the size of the data: the hours loaded and from when, and the
+        number of actors, repositories and connections.</li>
+  </ul>
+
+  <h3>3.5 How the results decide the question</h3>
+  <p>For every volume of data, the results are read in this order:</p>
+  <ol>
+    <li><strong>Check the answers.</strong> Only lines where both databases
+        gave the same number of actors are compared.</li>
+    <li><strong>Who is faster at each depth.</strong> For each depth, the
+        median time of the 10 top actors and of the 10 median actors, in each
+        database, and how many times faster the winner was. When one side
+        ran out of time, the other side was at least 60&nbsp;s &divide; its time
+        faster.</li>
+    <li><strong>The crossing depth.</strong> The smallest depth from which
+        Neo4j is faster for most actors <em>and stays faster</em> at every
+        greater depth. This is the answer to &ldquo;from which depth&rdquo;
+        for that volume.</li>
+    <li><strong>Why.</strong> The data processed, the memory and the CPU
+        explain the times: a database that is faster because it processes
+        less data has a real advantage; one that is faster only because it
+        uses more memory or more cores has a different one.</li>
+    <li><strong>Across volumes.</strong> Putting the volumes side by side
+        (6 hours, 24 hours, 3 days, &hellip;) shows whether the crossing depth
+        moves as the data grows. This is the answer to &ldquo;at what data
+        volume&rdquo;.</li>
+  </ol>
+  <p>
+    Both Cypher versions are read this way. The <code>levels</code> version
+    gives the fair comparison of the two databases; the <code>paths</code>
+    version shows what happens when the query is written the natural way.
+  </p>
+
+  <h3>3.6 Where the results are kept</h3>
+  <p>
+    Every measurement writes <strong>one CSV file</strong> in the folder
+    <code>results/</code>, named after the database and the moment it was
+    measured, for example
+    <code>gharchive-2026-10-08-9-24h_2026-11-19_14-05-12.csv</code>. Each line
+    answers one question (one starting actor, one depth, one Cypher version)
+    and has three parts: first the test (the data, the date, the hours, the
+    number of actors, repositories and connections, the starting actor and
+    the depth), then a PostgreSQL block and a Neo4j block with exactly the
+    same columns, and finally which database was faster and by how much.
+    Every column is explained in the project's README.
+  </p>
+</section>
+
 </body>
 </html>
