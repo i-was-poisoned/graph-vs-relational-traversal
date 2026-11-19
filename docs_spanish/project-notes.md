@@ -5878,3 +5878,137 @@ buena idea:
 > primeras ejecuciones que no cuentan; orden alterno; la mediana; y cada
 > tiempo guardado con su contexto. Los scripts solo aplican esas decisiones
 > de una forma que se puede repetir.
+
+## Las primeras mediciones, y una forma más sencilla de guardarlas
+
+> 📖 **Antes de leer esta sección**, lee las anotaciones de los scripts [traversal.py](traversal.py), [choose_starts.py](choose_starts.py), [measure.py](measure.py), [research.sh](research.sh) y [test_research.py](test_research.py), en este orden.
+
+Los scripts de investigación de la sección anterior se ejecutaron de verdad
+por primera vez, con dos volúmenes del mismo día (2026-10-08, desde las
+09:00 UTC): **6 horas** y **24 horas**. Los scripts funcionaron de principio
+a fin, y las respuestas de las dos bases coincidieron en todas las líneas.
+Pero los resultados enseñaron tres cosas, y cambiaron tanto la consulta como
+la forma de guardar los resultados. (Desde entonces `analyze.py` ya no
+existe: la flecha de la sección anterior apunta a un script que fue
+sustituido por lo que se describe aquí.)
+
+### Lo que mostraron los dos primeros volúmenes
+
+**6 horas** (121.501 actores, 132.050 repos, 135.944 conexiones): todo
+respondió en milisegundos. El mayor grupo de actores conectados tenía solo
+329 actores, así que cualquier recorrido se quedaba sin actores nuevos
+después de 2 o 3 saltos. Neo4j tenía un coste fijo de unos 7 ms por consulta
+(el driver y la sesión), PostgreSQL de menos de 1 ms. Neo4j solo ganaba a
+partir de la profundidad 4, por unos milisegundos. Y el grupo "median" no
+servía: el actor típico comparte repo con **una** sola persona, así que 8 de
+los 10 actores medianos nunca pasaron de 1 actor alcanzado.
+
+**24 horas**: los grupos se unen y un recorrido alcanza unos 2.680 actores.
+Para los 10 actores top:
+
+| Profundidad | PostgreSQL | Neo4j | Más rápida |
+|---|---|---|---|
+| 1 | 1,7 ms | 9 ms | PostgreSQL |
+| 2 | 62 ms | 12 ms | **Neo4j, 5 veces** |
+| 3 | 248 ms | 30 ms | **Neo4j, 8 veces** |
+| 4 | 469 ms | 637 ms | PostgreSQL |
+| 5 | 0,7 s | 3,8 s | PostgreSQL |
+| 6 | 0,9 s | 9 de 10 no terminaron en 60 s | PostgreSQL |
+
+A las profundidades 2 y 3 Neo4j es claramente más rápida: es la ventaja que
+se espera de una base de grafos. Pero a partir de la profundidad 4 se hunde,
+y **no** es por el volumen de datos. La prueba vino de un actor "median" que
+comparte 27 repos con una sola persona: la respuesta es siempre 2 actores, a
+todas las profundidades, y aun así el tiempo de Neo4j pasó de 0,007 s a 5,9
+s, 800 veces más, mientras PostgreSQL se quedó en 0,003 s.
+
+### Por qué: caminos frente a niveles
+
+La consulta Cypher estaba escrita como un patrón repetido de 1 a N veces.
+Neo4j la responde siguiendo **todos los caminos**, y solo quita los actores
+repetidos al final. Dos personas que comparten 27 repos están unidas por 27
+caminos; de ida y vuelta, 27 × 27; y así: los caminos se multiplican con la
+profundidad aunque las personas no. El SQL, en cambio, quita los actores
+repetidos **en cada nivel** (`UNION`), así que nunca hace más trabajo que
+actores hay.
+
+O sea, estábamos comparando dos **métodos** distintos, no solo dos bases.
+Para ser justos, se escribió una segunda versión de Cypher, `levels`, que
+funciona como el SQL: cada paso empieza desde los actores encontrados en el
+paso anterior (la "frontera") y solo se queda con actores nunca vistos. Las
+dos versiones dan exactamente la misma respuesta que el SQL; se miden las
+dos:
+
+- `paths` es la forma obvia de escribirlo en Cypher, y la que escribiría
+  alguien que empieza. Su resultado es un hallazgo en sí: escrito de forma
+  natural, un recorrido profundo en Cypher puede explotar.
+- `levels` compara el mismo método en las dos bases.
+
+La diferencia entre las dos enseña cuánto depende de la **base de datos** y
+cuánto de **cómo se escribe la consulta**.
+
+### Cuatro archivos CSV eran demasiados
+
+Cada medición dejaba `runs.csv`, `work.csv`, `per_actor.csv`,
+`summary.csv`, `conditions.json` y `starts.csv`, con nombres de columnas
+técnicos (`blocks_from_memory`, `db_hits`, ...). Eran difíciles de leer
+incluso para quien hace la investigación. La decisión: **un solo archivo CSV
+por medición** (`results/<base>_<fecha>_<hora>.csv`), y el significado de cada columna escrito en el
+README.
+
+- **Una línea = una pregunta respondida por las dos bases**: desde este
+  actor, a esta profundidad, con este volumen. Las cifras de PostgreSQL y de
+  Neo4j están en la misma línea, una al lado de la otra, así que se comparan
+  leyendo de izquierda a derecha.
+- **Cada línea tiene tres partes**: primero el test (los datos, su fecha y
+  sus horas, el número de actores, repos y conexiones, y la pregunta),
+  después **un bloque de PostgreSQL y otro de Neo4j con exactamente las
+  mismas columnas** (`pg_time_s` / `neo4j_time_s`, `pg_cpu_s` / `neo4j_cpu_s`, ...),
+  y al final quién fue más rápida. Cada base se puede leer por separado,
+  como dos tablas una al lado de la otra.
+- **Cada medición escribe su propio archivo**: uno para 6 horas, otro para
+  24 horas, otro para 3 días... Todos tienen las mismas columnas, así que
+  se pueden juntar para comparar los volúmenes.
+- Junto a los resultados, cada línea lleva lo **esencial para entenderla**:
+  las horas de datos cargadas y desde cuándo, el número de actores, repos y
+  conexiones, cuántos `JOIN` hace el SQL y cuántas relaciones sigue el
+  Cypher (2 por salto en los dos).
+
+### Las cuatro cosas que se comparan
+
+Se eligieron cuatro cosas que hacen que una base sea mejor que la otra.
+Cada una se convirtió en columnas, para las dos bases:
+
+| Qué | Columnas | Cómo se mide |
+|---|---|---|
+| **Datos procesados** | `..._data_processed_mb`, `..._data_from_disk_mb` | Las dos bases leen los datos en páginas de 8 KB. El `EXPLAIN (BUFFERS)` de PostgreSQL y el `PROFILE` de Neo4j dicen por cuántas páginas pasó cada consulta; páginas × 8 KB = MB. Como las dos usan el mismo tamaño de página, las cifras se pueden comparar directamente |
+| **Tiempo** | `..._time_s`, `..._first_run_s` | La mediana de 5 ejecuciones, y la primera ejecución aparte |
+| **Espacio** | `..._memory_mb`, `pg_temp_disk_mb`, `..._database_mb` | La memoria que usó la consulta (PostgreSQL 18 la da para cada paso de su plan; Neo4j para la consulta entera), lo que PostgreSQL tuvo que escribir en disco, y el tamaño de cada base en disco |
+| **Potencia de cálculo** | `..._cpu_s`, `..._cores_used` | Los segundos de CPU que usaron los procesos del **servidor** de cada base durante cada ejecución, leídos del sistema operativo con `psutil` antes y después. Dividido por el tiempo, dice cuántos núcleos trabajaron a la vez |
+
+Se mantuvieron dos ideas de antes: `answers_match` (comparar tiempos solo
+tiene sentido si las dos respondieron lo mismo) y `reliable` (un portátil en
+uso puede alterar una medición).
+
+**Comprobado con la base real** (PostgreSQL, 24 horas, un actor top,
+profundidad 3): 1.437 MB de páginas procesadas, 19 MB de ellas desde el
+disco, 0,4 MB de memoria, y 0,20 segundos de CPU para una consulta de 0,30 s.
+La parte de Neo4j todavía no se pudo comprobar (Neo4j Desktop estaba
+cerrado): la próxima medición será su primera prueba real.
+
+### Todavía abierto
+
+- **Bots que el filtro no ve.** El actor top de las 24 horas es `Copilot`, y
+  el grupo median tenía `regro-cf-autotick-bot`, `svc-cli-bot` y
+  `osuny-bot`. El filtro solo reconoce logins que terminan en `[bot]`. Los
+  bots conectan a personas que no tienen nada que ver entre sí, así que
+  cambian la forma del grafo. Arreglarlo obliga a volver a cargar las bases.
+- **El coste fijo de Neo4j** (unos 7 ms por consulta, en parte por abrir una
+  sesión cada vez) todavía hay que revisarlo.
+- **El report** tendrá un capítulo con estos primeros resultados.
+
+> 🎯 **Idea central:** los primeros resultados reales dieron una respuesta
+> parcial (Neo4j es de 5 a 8 veces más rápida a las profundidades 2 y 3 con
+> 24 horas de datos) y un aviso: cómo se escribe una consulta puede importar
+> tanto como la base de datos. Por eso ahora se miden las dos versiones de
+> Cypher, y por eso cada medición va a un solo archivo con cada columna explicada.

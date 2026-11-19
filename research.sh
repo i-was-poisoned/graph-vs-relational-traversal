@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Run the whole research for one database, in order:
-#     1. choose_starts.py  - the 10 top and 10 median starting actors (same on both sides)
-#     2. measure.py        - the traversal in PostgreSQL and Neo4j, timed and checked
-#     3. analyze.py        - the summary tables, and the comparison of every volume measured
+# Run the research for one database:
+#     0. check that both servers answer
+#     1. ask which database to measure (unless --database is given)
+#     2. measure.py: choose (or reuse) the starting actors, measure the traversal in
+#        PostgreSQL and Neo4j, and write the results to one CSV file in results/
 #
 # Usage (from Git Bash, with PostgreSQL running and Neo4j Desktop open):
 #     ./research.sh                                     # asks which database to measure
-#     ./research.sh --database gharchive-2026-08-27-12-6h
-#     ./research.sh --database ... --max-depth 4 --repeats 5 --timeout 60
+#     ./research.sh --database gharchive-2026-10-08-9-24h
+#     ./research.sh --database ... --max-depth 4 --repeats 5 --timeout 60 --cypher both
+#     ./research.sh --new-starts                        # choose the starting actors again
 #
 # The work is done by the Python scripts; this file only runs them in order,
-# asks the one question, and stops at the first step that fails. Each script
-# can also be run alone with ./run.sh (see README).
+# asks the one question, and stops at the first step that fails.
 
 set -eo pipefail
 cd "$(dirname "$0")"
@@ -21,7 +22,8 @@ MEASURE_OPTIONS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --database) DATABASE="$2"; shift 2 ;;
-        --max-depth|--repeats|--timeout) MEASURE_OPTIONS+=("$1" "$2"); shift 2 ;;
+        --max-depth|--repeats|--timeout|--cypher) MEASURE_OPTIONS+=("$1" "$2"); shift 2 ;;
+        --new-starts) MEASURE_OPTIONS+=("$1"); shift ;;
         *) echo "Unknown option: $1 (see the top of research.sh)" >&2; exit 1 ;;
     esac
 done
@@ -49,15 +51,7 @@ if [ -z "$DATABASE" ]; then
 fi
 
 echo ""
-echo "== 1. Choose the starting actors in \"$DATABASE\""
-./run.sh scripts/choose_starts.py --database "$DATABASE"
-
-echo ""
-echo "== 2. Measure the traversal in \"$DATABASE\""
+echo "== 1. Measure \"$DATABASE\""
 ./run.sh scripts/measure.py --database "$DATABASE" "${MEASURE_OPTIONS[@]}"
 
-echo ""
-echo "== 3. Analyse"
-./run.sh scripts/analyze.py --database "$DATABASE"
-
-echo "Done. Everything is in results/$DATABASE/"
+echo "Done. The results are in results/ (one CSV per measurement; its columns are explained in the README)."

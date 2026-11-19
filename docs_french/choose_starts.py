@@ -9,11 +9,10 @@
 #
 # Lisez d'abord ces copies annotées ; ce qu'elles expliquent n'est PAS
 # répété ici :
-#   - download_gharchive.py   argparse, Path, main() et la garde __name__
-#   - extract_csv.py          le module csv, open(..., newline=""),
-#                             mkdir(parents=True, exist_ok=True),
-#                             sorted(...)
-#   - load_neo4j.py           csv.DictReader, database_=
+#   - download_gharchive.py   argparse, Path, main() et la garde __name__,
+#                             lever une erreur
+#   - extract_csv.py          sorted(...)
+#   - load_neo4j.py           database_=
 #   - summarize_data.py       les compréhensions de dictionnaire, les
 #                             largeurs de colonnes dans les f-strings
 #   - pipeline.py             RawDescriptionHelpFormatter
@@ -29,10 +28,17 @@
 #     négatifs pour trier certaines parties du plus grand au plus petit ;
 #   - statistics.median() et « le plus proche de la médiane » ;
 #   - lambda (une fonction d'une ligne, sans nom) ;
-#   - comparer le choix fait par les deux bases, et l'enregistrer UNE
-#     SEULE FOIS (results/<database>/starts.csv) pour qu'il ne change plus
-#     jamais ensuite ;
+#   - faire le choix dans les DEUX bases et refuser de continuer si elles
+#     ne sont pas d'accord (choose_in_both(), raise RuntimeError) ;
 #   - les options action="store_true" et parser.error().
+#
+# Ce fichier est désormais surtout une BIBLIOTHÈQUE : measure.py
+# l'importe et appelle choose_in_both() quand il a besoin d'acteurs de
+# départ. Les acteurs choisis ne sont plus enregistrés dans un fichier à
+# part : ils sont écrits dans chaque ligne du fichier CSV de la mesure,
+# dans results/, et une mesure ultérieure de la même base les reprend
+# dans son CSV le plus récent (voir previous_starts dans
+# docs_french/measure.py).
 #
 # POURQUOI CHOISIR LES ACTEURS DE DÉPART ? La traversée mesurée (REACH
 # dans traversal.py) part d'UN acteur. L'identité de cet acteur change
@@ -45,9 +51,8 @@
 #   - 10 acteurs « top » : les plus connectés (le cas le plus difficile) ;
 #   - 10 acteurs « median » : des acteurs typiques (le cas habituel).
 #
-# Comment il est censé être lancé — normalement via research.sh, ou
-# seul :
-#     ./run.sh scripts/choose_starts.py --database gharchive-2026-08-27-12-6h
+# Comment il est lancé seul (research.sh le fait pour construire son
+# menu des bases) :
 #     ./run.sh scripts/choose_starts.py --list-databases
 ########################################################################
 
@@ -65,14 +70,13 @@ and then picks two groups of 10:
 
 Ties are broken by more repos, then by the smaller id, so the choice never
 changes. Both databases must give exactly the same 20 actors (with the same
-numbers); otherwise nothing is saved.
+numbers); otherwise the measurement doesn't start.
 
-The list is saved to results/<database>/starts.csv. If that file already
-exists it's kept, so a measurement repeated another day uses the same actors;
---force chooses them again.
+measure.py uses choose_in_both(). The chosen actors are saved as part of every
+line of the measurement's CSV in results/, so a measurement repeated another
+day reuses them.
 
-Usage:
-    ./run.sh scripts/choose_starts.py --database gharchive-2026-08-27-12-6h
+Usage (only to list the databases that can be measured; research.sh uses it):
     ./run.sh scripts/choose_starts.py --list-databases
 """
 
@@ -84,32 +88,19 @@ Usage:
 # `import drop_databases` / `import traversal` : nos propres scripts,
 # utilisés comme modules. drop_databases fournit les fonctions qui listent
 # les bases du projet ; traversal fournit les requêtes et les connexions.
+# (csv, sys et Path ne sont plus nécessaires : rien n'est enregistré dans
+# un fichier ici, et un désaccord est LEVÉ comme une erreur pour
+# measure.py.)
 # ---------------------------------------------------------------------
 import argparse
-import csv
 import statistics
-import sys
 import time
-from pathlib import Path
 
 import drop_databases
 import traversal
 
-# ---------------------------------------------------------------------
-# RESULTS_DIR : <projet>/results (même recette Path que PROJECT_DIR dans
-# load_postgres.py). Chaque base a son propre sous-dossier :
-#     results/gharchive-2026-08-27-12-6h/starts.csv
-# parce que chaque VOLUME de données est sa propre base, avec ses propres
-# acteurs.
-#
 # GROUP_SIZE = 10 : la taille de chaque groupe (top, median).
-# FIELDS : les colonnes de starts.csv, dans l'ordre.
-#   group, rank   quel groupe, et la position à l'intérieur (de 1 à 10)
-#   actor_id, login, reached, repos   l'acteur et ses deux comptes
-# ---------------------------------------------------------------------
-RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 GROUP_SIZE = 10
-FIELDS = ["group", "rank", "actor_id", "login", "reached", "repos"]
 
 
 # ---------------------------------------------------------------------
@@ -220,7 +211,7 @@ def pick_median(actors: list[dict], exclude: set[int], size: int = GROUP_SIZE) -
 
 
 # ---------------------------------------------------------------------
-# def choose(actors) -> list[dict]:  — les deux groupes, sous forme de lignes pour starts.csv
+# def choose(actors) -> list[dict]:  — les deux groupes, sous forme d'une liste de lignes
 #
 # exclude={a["actor_id"] for a in top} : une COMPRÉHENSION D'ENSEMBLE
 # (accolades, sans clé: valeur) — l'ensemble des id du groupe top.
@@ -240,7 +231,9 @@ def pick_median(actors: list[dict], exclude: set[int], size: int = GROUP_SIZE) -
 #   valeurs de ce dictionnaire dans le nouveau (le même `**` que pour les
 #   arguments nommés dans check_connections.py). Résultat, par ex. :
 #   {"group": "top", "rank": 1, "actor_id": 19, "login": "...",
-#    "reached": 340, "repos": 12} — exactement les FIELDS du CSV.
+#    "reached": 340, "repos": 12}. measure.py les recopie dans les
+#   colonnes start_... du CSV de résultats (start_group, start_rank,
+#   start_actor_id, start_login, start_reach_1_hop).
 # ---------------------------------------------------------------------
 def choose(actors: list[dict]) -> list[dict]:
     top = pick_top(actors)
@@ -281,6 +274,61 @@ def neo4j_actors(database: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------
+# def choose_in_both(database) -> list[dict]:  — LE MÊME CHOIX, FAIT DEUX FOIS
+#
+# C'est ce que measure.py appelle. Le choix est fait DEUX FOIS, de façon
+# indépendante : une fois à partir des comptes de PostgreSQL, une fois à
+# partir de ceux de Neo4j. Chacun prend un moment sur une grosse base,
+# donc le temps est affiché (perf_counter : load_postgres.py ; :.1f = une
+# décimale). La première f-string utilise des guillemets simples '...'
+# pour pouvoir contenir des guillemets "doubles" ; deux chaînes écrites
+# l'une à côté de l'autre sont collées en une seule.
+#
+# LES DEUX BASES DOIVENT ÊTRE D'ACCORD
+#
+# in_postgres != in_neo4j compare les deux LISTES de dictionnaires
+# élément par élément : même longueur, même ordre, et chaque
+# dictionnaire égal (mêmes clés, mêmes valeurs). La moindre différence —
+# un autre acteur, ou le même acteur avec un autre compte — signifie que
+# les deux bases ne contiennent pas les mêmes données, et comparer leurs
+# vitesses n'aurait aucun sens. Donc rien n'est mesuré.
+#
+# differences : une compréhension de liste qui ne garde que les paires
+# qui diffèrent (zip : test_pipeline.py), chacune écrite sur deux lignes,
+# celle de PostgreSQL au-dessus de celle de Neo4j ("\n" est un retour à
+# la ligne à l'intérieur du texte).
+#
+# raise RuntimeError(...) — au lieu d'afficher un message et d'appeler
+# elle-même sys.exit(1), la fonction LÈVE une erreur (raise :
+# download_gharchive.py). RuntimeError est l'erreur générale de Python
+# pour « quelque chose s'est mal passé pendant l'exécution ». Une
+# fonction de bibliothèque ne devrait pas arrêter tout le programme de
+# son propre chef : elle signale le problème, et c'est l'appelant qui
+# décide. measure.py attrape RuntimeError tout en bas de son code,
+# affiche le message (les différences y sont ajoutées avec "\n".join) et
+# se termine avec 1.
+#
+# Elles sont d'accord : renvoyer la liste de PostgreSQL (de toute façon
+# égale à celle de Neo4j).
+# ---------------------------------------------------------------------
+def choose_in_both(database: str) -> list[dict]:
+    # The same choice made in each database; they must agree, or nothing is measured.
+    print(f'Choosing the starting actors: counting, for every actor of "{database}", '
+          "how many actors it reaches in one hop ...")
+    begin = time.perf_counter()
+    in_postgres = choose(postgres_actors(database))
+    print(f"  PostgreSQL done in {time.perf_counter() - begin:.1f} s.")
+    begin = time.perf_counter()
+    in_neo4j = choose(neo4j_actors(database))
+    print(f"  Neo4j done in {time.perf_counter() - begin:.1f} s.")
+    if in_postgres != in_neo4j:
+        differences = [f"  PostgreSQL {p}\n  Neo4j      {n}" for p, n in zip(in_postgres, in_neo4j) if p != n]
+        raise RuntimeError("The two databases DON'T choose the same actors; nothing was measured.\n"
+                           + "\n".join(differences))
+    return in_postgres
+
+
+# ---------------------------------------------------------------------
 # def existing_databases() -> list[str]:
 #
 # Une base ne peut être mesurée que si elle existe sur les DEUX serveurs
@@ -297,121 +345,33 @@ def existing_databases() -> list[str]:
     return [name for name in drop_databases.postgres_databases() if name in in_neo4j]
 
 
-# ---------------------------------------------------------------------
-# def save(rows, path) -> None:
-#
-# path.parent.mkdir(...) : crée results/<database>/ si nécessaire
-# (extract_csv.py).
-#
-# csv.DictWriter est le jumeau en écriture de csv.DictReader
-# (load_neo4j.py) : il écrit des DICTIONNAIRES sous forme de lignes CSV,
-# en plaçant chaque valeur dans la colonne du même nom.
-# fieldnames=FIELDS fixe les colonnes et leur ordre.
-#   writeheader()    la première ligne : group,rank,actor_id,login,reached,repos
-#   writerows(rows)  une ligne par dictionnaire.
-# ---------------------------------------------------------------------
-def save(rows: list[dict], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def main() -> None:
     # -----------------------------------------------------------------
-    # Les options de la ligne de commande.
-    #   --database         la base sur laquelle travailler (le même nom
-    #                      existe sur les deux serveurs).
-    #   --force, --list-databases : action="store_true" crée un
-    #                      INTERRUPTEUR MARCHE/ARRÊT qui ne prend pas de
-    #                      valeur : False s'il est absent, True s'il est
-    #                      écrit. (argparse transforme le tiret en tiret
-    #                      bas : args.list_databases.)
-    # Le texte d'aide de --list-databases est réparti sur deux lignes à
-    # l'intérieur des parenthèses, ce que Python permet.
+    # Les options de la ligne de commande : il n'en reste qu'une.
+    #   --list-databases   action="store_true" crée un INTERRUPTEUR
+    #                      MARCHE/ARRÊT qui ne prend pas de valeur : False
+    #                      s'il est absent, True s'il est écrit. (argparse
+    #                      transforme le tiret en tiret bas :
+    #                      args.list_databases.)
+    # Le texte d'aide est réparti sur deux lignes à l'intérieur des
+    # parenthèses, ce que Python permet.
+    #
+    # Sans --list-databases, il n'y a rien à faire (choisir les acteurs
+    # est désormais le travail de measure.py), donc parser.error("...")
+    # affiche la ligne d'utilisation et le message, et arrête le
+    # programme avec le code de sortie 2 — comme les propres erreurs
+    # d'argparse.
+    #
+    # Avec : afficher les noms, un par ligne ("\n".join). research.sh lit
+    # cette sortie pour construire son menu (voir docs_french/research.sh).
     # -----------------------------------------------------------------
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--database", help="The database to choose the actors in (same name on both sides)")
-    parser.add_argument("--force", action="store_true", help="Choose again even if starts.csv already exists")
     parser.add_argument("--list-databases", action="store_true",
-                        help="Only print the project databases that exist on both servers, one per line")
+                        help="Print the project databases that exist on both servers, one per line")
     args = parser.parse_args()
-
-    # --list-databases : affiche les noms, un par ligne ("\n".join), et
-    # s'arrête. Sinon, --database est nécessaire. Elle n'est pas déclarée
-    # required=True parce que --list-databases fonctionne sans elle ; on
-    # la vérifie donc à la main. parser.error("...") affiche la ligne
-    # d'utilisation et le message, et arrête le programme avec le code de
-    # sortie 2 — comme les propres erreurs d'argparse.
-    if args.list_databases:
-        print("\n".join(existing_databases()))
-        return
-    if not args.database:
-        parser.error("--database is required")
-
-    # -----------------------------------------------------------------
-    # CHOISIS UNE FOIS, PUIS CONSERVÉS
-    #
-    # Si starts.csv existe déjà, il n'est PAS recalculé (sauf avec
-    # --force). Pourquoi ? La recherche compare des mesures : la même
-    # base mesurée à nouveau un autre jour doit utiliser les MÊMES 20
-    # acteurs, sinon les deux exécutions ne seraient pas comparables. La
-    # règle est déterministe, donc recalculer donnerait normalement la
-    # même liste de toute façon — mais conserver le fichier rend cela
-    # CERTAIN (par ex. même si la règle était améliorée plus tard), et
-    # cela évite le coût des lourdes requêtes ONE_HOP.
-    # \" dans la f-string est un guillemet double échappé.
-    # -----------------------------------------------------------------
-    path = RESULTS_DIR / args.database / "starts.csv"
-    if path.exists() and not args.force:
-        print(f"The starting actors for \"{args.database}\" were already chosen: {path}")
-        print("They're kept, so this measurement uses the same actors (use --force to choose again).")
-        return
-
-    # -----------------------------------------------------------------
-    # Le choix est fait DEUX FOIS, de façon indépendante : une fois à
-    # partir des comptes de PostgreSQL, une fois à partir de ceux de
-    # Neo4j. Chacun prend un moment sur une grosse base, donc le temps
-    # est affiché (perf_counter : load_postgres.py ; :.1f = une
-    # décimale).
-    # -----------------------------------------------------------------
-    print(f'Counting, for every actor of "{args.database}", how many actors it reaches in one hop ...')
-    begin = time.perf_counter()
-    in_postgres = choose(postgres_actors(args.database))
-    print(f"PostgreSQL done in {time.perf_counter() - begin:.1f} s.")
-    begin = time.perf_counter()
-    in_neo4j = choose(neo4j_actors(args.database))
-    print(f"Neo4j done in {time.perf_counter() - begin:.1f} s.")
-
-    # -----------------------------------------------------------------
-    # LES DEUX BASES DOIVENT ÊTRE D'ACCORD
-    #
-    # in_postgres != in_neo4j compare les deux LISTES de dictionnaires
-    # élément par élément : même longueur, même ordre, et chaque
-    # dictionnaire égal (mêmes clés, mêmes valeurs). La moindre
-    # différence — un autre acteur, ou le même acteur avec un autre
-    # compte — signifie que les deux bases ne contiennent pas les mêmes
-    # données, et comparer leurs vitesses n'aurait aucun sens. Donc rien
-    # n'est enregistré, les lignes qui diffèrent sont affichées côte à
-    # côte (zip : test_pipeline.py), et le code de sortie est 1.
-    # -----------------------------------------------------------------
-    if in_postgres != in_neo4j:
-        print("\nThe two databases DON'T choose the same actors; nothing was saved.")
-        for p, n in zip(in_postgres, in_neo4j):
-            if p != n:
-                print(f"  PostgreSQL {p}\n  Neo4j      {n}")
-        sys.exit(1)
-
-    # Elles sont d'accord : afficher la liste sous forme de tableau
-    # (largeurs de colonnes :<7, :>4 ... : summarize_data.py), puis
-    # l'enregistrer.
-    print(f"\nBoth databases choose the same {len(in_postgres)} actors:")
-    print(f"  {'group':<7} {'rank':>4} {'actor_id':>12} {'reached':>8} {'repos':>6}  login")
-    for row in in_postgres:
-        print(f"  {row['group']:<7} {row['rank']:>4} {row['actor_id']:>12} {row['reached']:>8} {row['repos']:>6}  {row['login']}")
-    save(in_postgres, path)
-    print(f"\nSaved to {path}")
+    if not args.list_databases:
+        parser.error("the only option is --list-databases (measure.py chooses the actors)")
+    print("\n".join(existing_databases()))
 
 
 # La garde __name__ : download_gharchive.py.

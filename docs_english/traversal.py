@@ -24,22 +24,25 @@
 #   - the "one hop" counts for every actor (used to choose who to start
 #     from), in SQL (a self-join + GROUP BY) and in Cypher;
 #   - the MEASURED traversal: "how many actors can be reached in at most
-#     N hops?", written as a SQL RECURSIVE CTE (WITH RECURSIVE) and as a
-#     Cypher QUANTIFIED PATH PATTERN ( ... ){1,N};
+#     N hops?", written as a SQL RECURSIVE CTE (WITH RECURSIVE) and in
+#     TWO Cypher versions: "paths" (a QUANTIFIED PATH PATTERN ( ... ){1,N})
+#     and "levels" (level by level like the SQL, with CALL { ... },
+#     UNWIND, collect() and lists);
+#   - sql_joins() / cypher_hops(): how many joins / relationships one
+#     depth means on each side;
 #   - a TIME LIMIT on each query (statement_timeout / Query(timeout=));
 #   - a @dataclass (Outcome) to return a result in one tidy object;
 #   - asking each database HOW MUCH WORK it did: EXPLAIN (ANALYZE, BUFFERS)
-#     in PostgreSQL and PROFILE in Neo4j;
-#   - the difference between the time the SERVER reports and the time
-#     Python measures.
+#     in PostgreSQL and PROFILE in Neo4j, turned into figures that can be
+#     compared: MB of 8 KB pages processed, and MB of memory used.
 #
 # The research question: at what traversal DEPTH, and with how much DATA,
 # does Neo4j (a graph database) start beating PostgreSQL (a relational
 # one)? This file holds the one question asked to both, written once, so
 # both scripts that use it ask exactly the same thing.
 #
-# How the real file is used (never directly):
-#     ./run.sh scripts/choose_starts.py --database <name>
+# How the real file is used (never directly: measure.py imports it, and
+# so does choose_starts.py, which measure.py calls):
 #     ./run.sh scripts/measure.py --database <name> ...
 ########################################################################
 
@@ -126,7 +129,10 @@ import load_neo4j
 # the answer. The Cypher version behaves the same way.
 #
 # This query runs on the WHOLE table, so it's heavy on big databases —
-# that's why choose_starts.py runs it once and saves the result.
+# that's why it runs only when the starting actors are CHOSEN. The chosen
+# actors are written into every line of the measurement's CSV file in
+# results/, and later measurements of the same database reuse them from
+# the latest one (see previous_starts in docs_english/measure.py).
 # ---------------------------------------------------------------------
 SQL_ONE_HOP = """
 WITH reach AS (
@@ -252,7 +258,36 @@ SELECT count(DISTINCT actor_id) FROM reach WHERE actor_id <> %(start)s
 """
 
 # ---------------------------------------------------------------------
-# CYPHER_REACH — a QUANTIFIED PATH PATTERN (Neo4j 5.9 and later)
+# TWO CYPHER VERSIONS OF THE SAME QUESTION — WHY?
+#
+# The first measurements used only the "paths" version below, and on 24
+# hours of data it EXPLODED at depth 5-6 (it ran out of time) while the
+# SQL didn't. Was that because of the DATABASE, or because of HOW the
+# Cypher query was WRITTEN? To tell the two apart, the same question is
+# also asked a second way, "levels", that follows the SQL's strategy:
+#   paths    Neo4j's natural way: describe the walk as a pattern.
+#   levels   the SQL's level-by-level strategy, written in Cypher.
+# If "levels" stays fast where "paths" explodes, the problem was the way
+# the query was written, not Neo4j itself. measure.py measures both (or
+# one, with --cypher) and writes one results CSV line per version; both
+# must give exactly the SQL's count.
+#
+# CYPHER_VERSIONS = ("paths", "levels"): the two names, in one tuple, used
+# by measure.py (the choices of --cypher) and checked by cypher_reach().
+# ---------------------------------------------------------------------
+# Two ways of asking the same question in Cypher (both must give the SQL's count):
+#
+# "paths"   A quantified path pattern: the group in brackets (one hop, actor -> repo ->
+#           actor) is repeated from 1 to N times. Neo4j follows every PATH and removes
+#           repeated actors only at the end, so the work grows with the number of paths.
+# "levels"  Level by level, like the SQL: each step starts from the actors found in the
+#           step before (the "frontier") and keeps only actors never seen before.
+#
+# N can't be a query parameter, so it's written into the text.
+CYPHER_VERSIONS = ("paths", "levels")
+
+# ---------------------------------------------------------------------
+# CYPHER_REACH_PATHS — "paths": a QUANTIFIED PATH PATTERN (Neo4j 5.9 and later)
 #
 # Once the Python formatting below has been applied, the query reads (for N = 3):
 #
@@ -277,8 +312,10 @@ SELECT count(DISTINCT actor_id) FROM reach WHERE actor_id <> %(start)s
 # recursive part of the CTE — but the thinking is different. Cypher's
 # MATCH looks for PATHS (in one path, the same edge can't be used twice)
 # and DISTINCT removes repeated end actors only at the END; the SQL removes
-# repeats at EVERY level. Both give the same set of actors; how much work
-# each needs to get there is exactly what the research measures.
+# repeats at EVERY level. Both give the same set of actors, but here the
+# work grows with the number of PATHS, and that number multiplies at
+# every hop (every popular repo opens dozens of new paths): that's what
+# exploded at depth 5-6 on 24 hours of data.
 #
 # WHY THE DEPTH IS WRITTEN INTO THE TEXT: Cypher only accepts a literal
 # number inside {1,N}, not a $parameter. So the query is a TEMPLATE, and
@@ -289,9 +326,7 @@ SELECT count(DISTINCT actor_id) FROM reach WHERE actor_id <> %(start)s
 #   {{1,{depth}}}       becomes   {1,3}       (with depth=3)
 # $start stays a normal parameter, filled by the driver.
 # ---------------------------------------------------------------------
-# A quantified path pattern: the group in brackets (one hop, actor -> repo -> actor) is
-# repeated from 1 to N times. N can't be a query parameter, so it's written into the text.
-CYPHER_REACH = """
+CYPHER_REACH_PATHS = """
 MATCH (a:Actor {{id: $start}})
       ((:Actor)-[:INTERACTED_WITH]->(:Repo)<-[:INTERACTED_WITH]-(:Actor)){{1,{depth}}}
       (b:Actor)
@@ -299,18 +334,133 @@ WHERE b <> a
 RETURN count(DISTINCT b)
 """
 
+# ---------------------------------------------------------------------
+# "levels": THREE PIECES, GLUED TOGETHER BY cypher_reach()
+#
+# The idea is the SQL's: keep two LISTS of actors and go one level at a
+# time.
+#   seen       every actor found so far (the start included)
+#   frontier   the actors found at the LAST level only: the next hop
+#              starts from them, not from everyone again
+# For depth 3 the query is START + STEP + STEP + STEP + END.
+#
+# CYPHER_LEVELS_START
+#   MATCH (start:Actor {id: $start})     find the starting actor.
+#   WITH [start] AS seen, [start] AS frontier
+#       [x] is a Cypher LIST with one element. WITH passes the two lists
+#       on to the rest of the query (WITH: see CYPHER_ONE_HOP above).
+#   There's no .format() on this piece, so the braces stay single.
+# ---------------------------------------------------------------------
+CYPHER_LEVELS_START = """
+MATCH (start:Actor {id: $start})
+WITH [start] AS seen, [start] AS frontier
+"""
 
 # ---------------------------------------------------------------------
-# def cypher_reach(depth) -> str:
+# CYPHER_LEVELS_STEP — ONE hop, repeated once per level
 #
-# Fills the template. Because the depth goes into the query TEXT (not a
-# safe parameter), it's checked first: {1,0} would be meaningless, so a
-# depth below 1 raises a ValueError instead of sending a broken query.
+# CALL (seen, frontier) { ... }
+#   A SUBQUERY: a small query run inside the big one. The brackets after
+#   CALL say which variables it may use from outside (here the two
+#   lists). Its RETURN gives its result back to the outer query. (This
+#   is a different use of CALL from `CALL dbms.components()` in
+#   check_connections.py, which calls a built-in procedure.)
+#
+# Inside:
+#   UNWIND frontier AS a      one row per actor of the frontier (UNWIND:
+#                             docs_english/load_neo4j.py).
+#   MATCH (a)-...->(:Repo)<-...-(b:Actor)
+#                             the one hop, from each of those actors.
+#   WITH DISTINCT b           keep each actor found ONCE, however many
+#                             paths led to it — like the SQL's UNION. This
+#                             is THE difference with "paths": repeats are
+#                             removed at every level, not only at the end.
+#   WHERE NOT b IN seen       `x IN list` is True if x is in the list:
+#                             drop the actors already found at an earlier
+#                             level.
+#   RETURN collect(b) AS next collect() is an aggregate (like count) that
+#                             gathers all the rows' values into ONE list:
+#                             the new actors of this level.
+#
+# After the subquery:
+#   WITH seen + next AS seen, next AS frontier
+#       `+` between two lists JOINS them: seen grows by the new actors,
+#       and the new actors become the next frontier.
+#
+# Python then repeats this text `depth` times (see cypher_reach()). If a
+# level finds nobody new, next is an empty list and the following steps
+# simply add nothing.
 # ---------------------------------------------------------------------
-def cypher_reach(depth: int) -> str:
+CYPHER_LEVELS_STEP = """
+CALL (seen, frontier) {
+    UNWIND frontier AS a
+    MATCH (a)-[:INTERACTED_WITH]->(:Repo)<-[:INTERACTED_WITH]-(b:Actor)
+    WITH DISTINCT b
+    WHERE NOT b IN seen
+    RETURN collect(b) AS next
+}
+WITH seen + next AS seen, next AS frontier
+"""
+
+# CYPHER_LEVELS_END — size(list) is its number of elements. `seen` holds
+# every actor reached, PLUS the start itself, hence - 1: the same number
+# as the SQL's count (which leaves the start out with <> %(start)s).
+CYPHER_LEVELS_END = """
+RETURN size(seen) - 1
+"""
+
+
+# ---------------------------------------------------------------------
+# def cypher_reach(depth, version="paths") -> str:
+#
+# Builds the Cypher text for one depth and one version.
+#   version: str = "paths"   a DEFAULT value: cypher_reach(3) still means
+#                            the "paths" version.
+#
+# Because the depth goes into the query TEXT (not a safe parameter), it's
+# checked first: {1,0} would be meaningless, so a depth below 1 raises a
+# ValueError instead of sending a broken query.
+#
+#   "paths"    fills the template with str.format() (see above).
+#   "levels"   glues the pieces: START, then STEP `depth` times, then END.
+#              `text * 3` REPEATS a string: "ab" * 3 == "ababab".
+#   anything else: a ValueError. {version!r} in an f-string shows the
+#              value with repr(), i.e. WITH its quotes ('shortcut'), so
+#              the message makes clear what was received.
+# tests/test_research.py checks all three cases.
+# ---------------------------------------------------------------------
+def cypher_reach(depth: int, version: str = "paths") -> str:
     if depth < 1:
         raise ValueError("depth must be at least 1")
-    return CYPHER_REACH.format(depth=depth)
+    if version == "paths":
+        return CYPHER_REACH_PATHS.format(depth=depth)
+    if version == "levels":
+        return CYPHER_LEVELS_START + CYPHER_LEVELS_STEP * depth + CYPHER_LEVELS_END
+    raise ValueError(f"unknown Cypher version {version!r}: use one of {CYPHER_VERSIONS}")
+
+
+# ---------------------------------------------------------------------
+# sql_joins(depth) / cypher_hops(depth) — "HOW MUCH WALKING" ONE DEPTH IS
+#
+# Two small numbers written on every line of the results CSV, so a reader
+# can see what a depth means on each side:
+#   sql_joins     one hop = actor_repo joined twice (actor -> its repos,
+#                 repo -> its actors); the recursive part runs once per
+#                 hop. Depth 3 -> 6 joins.
+#   cypher_hops   one hop = two INTERACTED_WITH relationships followed
+#                 (actor -> repo, repo <- actor). Depth 3 -> 6.
+# Both are 2 x depth: the same walk, counted in each database's own
+# units. (Tested in tests/test_research.py.)
+# ---------------------------------------------------------------------
+def sql_joins(depth: int) -> int:
+    # Each hop of the recursive part joins actor_repo twice (actor -> repo, repo -> actor),
+    # and the recursive part runs once per hop.
+    return 2 * depth
+
+
+def cypher_hops(depth: int) -> int:
+    # Each hop follows two relationships: (actor)-[:INTERACTED_WITH]->(repo)<-[:INTERACTED_WITH]-(actor).
+    return 2 * depth
 
 
 # ---------- running a query, with a time limit, on either side ----------
@@ -383,8 +533,9 @@ def connect_neo4j():
 #
 # THE TIMING: begin = time.perf_counter() just before the query; the
 # difference afterwards is the WALL-CLOCK time seen from Python: sending
-# the query, the server's work, and the answer coming back. (The time
-# the SERVER says it spent is collected separately, in postgres_work().)
+# the query, the server's work, and the answer coming back — the time a
+# USER of the database would wait. measure.py takes the MEDIAN of several
+# such times (the time_s columns of the results CSV).
 #
 # THE QUERY: conn.execute(SQL_REACH, {"start": ..., "depth": ...}) fills
 # the %(start)s and %(depth)s gaps from the dict. fetchone()[0]: the one
@@ -414,9 +565,10 @@ def run_postgres_reach(conn: psycopg.Connection, start: int, depth: int, timeout
 
 
 # ---------------------------------------------------------------------
-# def run_neo4j_reach(driver, database, start, depth, timeout_s) -> Outcome:
+# def run_neo4j_reach(driver, database, start, depth, timeout_s, version="paths") -> Outcome:
 #
-# The same job on the Neo4j side.
+# The same job on the Neo4j side. `version` says which Cypher version to
+# run ("paths" or "levels", see cypher_reach()); measure.py passes it.
 #
 # driver.session(database=database)
 #   Until now we used driver.execute_query(), a one-call shortcut. A
@@ -424,7 +576,7 @@ def run_postgres_reach(conn: psycopg.Connection, start: int, depth: int, timeout
 #   with `with` (so it's closed afterwards), in which session.run() sends
 #   a query. We need it because of the next point.
 #
-# Query(cypher_reach(depth), timeout=timeout_s)
+# Query(cypher_reach(depth, version), timeout=timeout_s)
 #   Wraps the query text together with a TIME LIMIT in seconds. The Neo4j
 #   SERVER stops the query's transaction once the limit is passed — the
 #   equivalent of statement_timeout.
@@ -442,11 +594,11 @@ def run_postgres_reach(conn: psycopg.Connection, start: int, depth: int, timeout
 #                                     if/else that gives a value.
 # [:300] keeps only the first 300 characters of a possibly huge message.
 # ---------------------------------------------------------------------
-def run_neo4j_reach(driver, database: str, start: int, depth: int, timeout_s: int) -> Outcome:
+def run_neo4j_reach(driver, database: str, start: int, depth: int, timeout_s: int, version: str = "paths") -> Outcome:
     begin = time.perf_counter()
     try:
         with driver.session(database=database) as session:
-            count = session.run(Query(cypher_reach(depth), timeout=timeout_s), start=start).single()[0]
+            count = session.run(Query(cypher_reach(depth, version), timeout=timeout_s), start=start).single()[0]
         return Outcome("ok", time.perf_counter() - begin, count)
     except Exception as error:   # the driver raises different classes for a timeout
         status = "timeout" if "timeout" in str(error).lower() or "timed out" in str(error).lower() else "error"
@@ -456,45 +608,98 @@ def run_neo4j_reach(driver, database: str, start: int, depth: int, timeout_s: in
 # ---------- the work done inside each database ----------
 
 # ---------------------------------------------------------------------
+# PAGE_MB — ONE PAGE, IN MEGABYTES
+#
+# Both databases store their data in fixed-size PAGES of 8 KB (8192
+# bytes) and keep recently used pages in memory: PostgreSQL calls them
+# "blocks" in its "shared buffers", Neo4j "pages" in its "page cache".
+# Because the page size is the SAME, the number of pages each side
+# touched can be compared directly — and turned into megabytes, which
+# are easier to picture: pages x 8192 / 1024**2 (1 MB = 1024 x 1024
+# bytes; `**` is "to the power of"). 8192 / 1048576 = 0.0078125 MB.
+# ---------------------------------------------------------------------
+PAGE_MB = 8192 / 1024 ** 2   # both databases read and cache data in pages of 8 KB
+
+
+# ---------------------------------------------------------------------
+# def _postgres_memory_kb(node) -> float:  — THE QUERY'S MEMORY, PostgreSQL side
+#
+# A PostgreSQL plan is a TREE of steps; each node may report how much
+# memory its step kept for itself (PostgreSQL 18 reports these in kB):
+#   "Maximum Storage"     the recursive UNION and the CTE scan (the rows of
+#                         `reach` kept while it's being built);
+#   "Sort Space Used"     a sort;
+#   "Peak Memory Usage"   a hash table (used for joins and DISTINCT).
+# A step that ran out of its allowed memory (work_mem) continues on DISK
+# instead: then "Storage" / "Sort Space Type" says "Disk", and that
+# amount is NOT memory — it's counted separately, as temp_disk_mb (see
+# postgres_work()). `node.get("Storage", "Memory") == "Memory"`: if the
+# key is missing, assume memory.
+#
+# `node.get(...) or 0` turns a missing value (None) into 0, and the
+# function walks the tree RECURSIVELY like _sum_profile() below:
+# this node's memory + the sum over its "Plans" (PostgreSQL's word for
+# the children). The result is the total memory the steps used, in kB.
+# ---------------------------------------------------------------------
+def _postgres_memory_kb(node: dict) -> float:
+    # The memory each step of the plan kept for itself (PostgreSQL 18 reports it in kB):
+    # "Maximum Storage" (recursive union, CTE scan), "Sort Space Used", "Peak Memory Usage"
+    # (hash tables). Only what stayed in memory; what went to disk is counted as temp.
+    own = 0.0
+    if node.get("Storage", "Memory") == "Memory":
+        own += node.get("Maximum Storage") or 0
+    if node.get("Sort Space Type", "Memory") == "Memory":
+        own += node.get("Sort Space Used") or 0
+    own += node.get("Peak Memory Usage") or 0
+    return own + sum(_postgres_memory_kb(child) for child in node.get("Plans", []))
+
+
+# ---------------------------------------------------------------------
 # def postgres_work(conn, start, depth, timeout_s) -> dict:
 #
 # TIME isn't the only thing worth measuring: it depends on the computer
-# and on what else is running. HOW MUCH WORK the database did (how many
-# pieces of data it touched, from memory or from disk) explains WHY one
-# side is faster. measure.py calls this once per depth, as an extra run
-# AFTER the timed ones, because measuring the work slows a query down a
-# little and mustn't spoil the timings.
+# and on what else is running. HOW MUCH WORK the database did (how much
+# data it went through, how much memory it needed) explains WHY one side
+# is faster. measure.py calls this once per depth, as an extra run AFTER
+# the timed ones, because measuring the work slows a query down a little
+# and mustn't spoil the timings.
 #
 # EXPLAIN shows the PLAN PostgreSQL chose for a query (which index, which
 # join method...). The options in brackets:
 #   ANALYZE      actually RUN the query, and report real numbers instead
 #                of estimates. (Not the same as the ANALYZE command of
 #                load_postgres.py, which refreshes statistics.)
-#   BUFFERS      also report the BLOCKS used. PostgreSQL stores tables
-#                and indexes in blocks of 8 kB, and keeps recently used
-#                blocks in memory ("shared buffers").
+#   BUFFERS      also report the BLOCKS (8 KB pages) used.
 #   FORMAT JSON  give the report as JSON, so Python can read figures by
 #                name instead of parsing text.
 #
 # .fetchone()[0][0]: the report is one row with one column holding a JSON
 # LIST (psycopg turns it into a Python list); [0] is its only element, a
 # dict. plan["Plan"] is the TOP node of the plan tree, i.e. the last step,
-# whose numbers already include all the steps below it (no need to add
-# them up — unlike Neo4j below).
+# whose BUFFER numbers already include all the steps below it (no need to
+# add them up — unlike Neo4j below, and unlike the memory, which each
+# step reports for itself).
 #
-# The figures kept (dict.get() returns None if a key is missing):
-#   server_ms            "Execution Time": milliseconds spent inside the
-#                        server running the query (without planning, and
-#                        without sending the answer to Python).
-#   blocks_from_memory   "Shared Hit Blocks": blocks already in memory.
-#   blocks_from_disk     "Shared Read Blocks": blocks PostgreSQL had to
-#                        read from a file (from disk — or from Windows'
-#                        own file cache, which PostgreSQL can't tell apart).
-#   temp_blocks_written  "Temp Written Blocks": blocks written to TEMPORARY
-#                        files because the work didn't fit in the memory
-#                        allowed for one step (the work_mem setting) — e.g.
-#                        a huge intermediate result of the recursive CTE.
-#                        A sign the query is outgrowing memory.
+# from_memory, from_disk = A, B — two variables assigned in one line.
+#   "Shared Hit Blocks"    blocks already in memory.
+#   "Shared Read Blocks"   blocks PostgreSQL had to read from a file (from
+#                          disk — or from Windows' own file cache, which
+#                          PostgreSQL can't tell apart).
+#
+# The figures returned, all in MB (they become the pg_... columns of
+# results CSV, see docs_english/measure.py):
+#   data_processed_mb   (hits + reads) x PAGE_MB: all the data the query
+#                       went through. A page used twice counts twice: it's
+#                       a measure of WORK, not of how big the data is.
+#   data_from_disk_mb   the part that had to be read from a file.
+#   memory_mb           _postgres_memory_kb(top) / 1024 (kB -> MB).
+#   temp_disk_mb        "Temp Written Blocks": blocks written to TEMPORARY
+#                       files because the work didn't fit in the memory
+#                       allowed for one step (the work_mem setting) — e.g.
+#                       a huge intermediate result of the recursive CTE.
+#                       A sign the query is outgrowing memory. (Neo4j has
+#                       no such figure, so the results CSV has no
+#                       neo4j_temp_disk_mb column.)
 # The same time limit is set first, as this is a full run of the query.
 # ---------------------------------------------------------------------
 def postgres_work(conn: psycopg.Connection, start: int, depth: int, timeout_s: int) -> dict:
@@ -504,11 +709,12 @@ def postgres_work(conn: psycopg.Connection, start: int, depth: int, timeout_s: i
     query = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + SQL_REACH
     plan = conn.execute(query, {"start": start, "depth": depth}).fetchone()[0][0]
     top = plan["Plan"]
+    from_memory, from_disk = top.get("Shared Hit Blocks") or 0, top.get("Shared Read Blocks") or 0
     return {
-        "server_ms": plan.get("Execution Time"),
-        "blocks_from_memory": top.get("Shared Hit Blocks"),
-        "blocks_from_disk": top.get("Shared Read Blocks"),
-        "temp_blocks_written": top.get("Temp Written Blocks"),
+        "data_processed_mb": (from_memory + from_disk) * PAGE_MB,
+        "data_from_disk_mb": from_disk * PAGE_MB,
+        "memory_mb": _postgres_memory_kb(top) / 1024,
+        "temp_disk_mb": (top.get("Temp Written Blocks") or 0) * PAGE_MB,
     }
 
 
@@ -532,52 +738,50 @@ def _sum_profile(node: dict, key: str) -> int:
 
 
 # ---------------------------------------------------------------------
-# def neo4j_work(driver, database, start, depth, timeout_s) -> dict:
+# def neo4j_work(driver, database, start, depth, timeout_s, version="paths") -> dict:
 #
 # PROFILE in front of a Cypher query = Neo4j's EXPLAIN ANALYZE: it RUNS
 # the query and records, for every step of its plan, what it did.
+# `version` picks the Cypher version profiled (see cypher_reach()).
 #
 # result.consume() reads the result to the end and returns its SUMMARY
 # (the metadata, not the rows). summary.profile is the plan tree as a
 # dict (or None if there's none, hence `or {}`).
 #
-# The figures kept:
-#   server_ms          result_available_after (ms until the first record
-#                      was ready) + result_consumed_after (ms to deliver
-#                      the rest): the time spent inside the server.
-#   db_hits            "database hits": Neo4j's unit of storage work —
-#                      roughly one per node, relationship or property
-#                      looked up. The closest thing to "rows touched".
-#   page_cache_hits    Neo4j's PAGE CACHE is its equivalent of
-#   page_cache_misses  PostgreSQL's shared buffers: a hit = the data page
-#                      was in memory, a miss = it had to be read from disk.
-#   memory_bytes       "GlobalMemory": the peak memory the query needed,
-#                      found in the top step's arguments. The key holding
-#                      the arguments is "args" in some driver versions and
-#                      "arguments" in others, so both are tried
-#                      (`A or B or {}` = the first one that isn't empty).
+#   hits, misses       Neo4j's PAGE CACHE is its equivalent of
+#                      PostgreSQL's shared buffers, with the same 8 KB
+#                      pages: a hit = the page was in memory, a miss = it
+#                      had to be read from disk. Summed over the tree.
+#   memory             "GlobalMemory": the memory the WHOLE query used, in
+#                      BYTES, found in the top step's arguments. The key
+#                      holding the arguments is "args" in some driver
+#                      versions and "arguments" in others, so both are
+#                      tried (`A or B or {}` = the first one that isn't
+#                      empty).
 #
-# SERVER TIME vs PYTHON TIME — both are recorded on purpose:
-#   - the Outcome's `seconds` (measured in Python) is what a USER of the
-#     database would wait: it includes the network, the driver, and
-#     turning the answer into Python objects;
-#   - server_ms is only the database's own work.
-#   The gap between them is overhead that has nothing to do with the
-#   data model; comparing the server times keeps that overhead out of the
-#   PostgreSQL-vs-Neo4j comparison.
+# The figures returned — the SAME names as postgres_work()'s, so
+# measure.py can treat both sides alike (the neo4j_... columns):
+#   data_processed_mb   (hits + misses) x PAGE_MB — directly comparable
+#                       with PostgreSQL's, since the pages are the same
+#                       size. A page used twice counts twice.
+#   data_from_disk_mb   misses x PAGE_MB.
+#   memory_mb           bytes / 1024**2 -> MB; None if Neo4j didn't
+#                       report it (`X if condition else None`, a
+#                       conditional expression).
 # ---------------------------------------------------------------------
-def neo4j_work(driver, database: str, start: int, depth: int, timeout_s: int) -> dict:
-    # PROFILE runs the query and reports, for every step of its plan, the database hits
-    # and the page cache hits/misses; they're added up over the whole plan.
+def neo4j_work(driver, database: str, start: int, depth: int, timeout_s: int, version: str = "paths") -> dict:
+    # PROFILE runs the query and reports, for every step of its plan, the page cache
+    # hits/misses; they're added up over the whole plan. GlobalMemory is the memory the
+    # whole query used.
     with driver.session(database=database) as session:
-        result = session.run(Query("PROFILE " + cypher_reach(depth), timeout=timeout_s), start=start)
+        result = session.run(Query("PROFILE " + cypher_reach(depth, version), timeout=timeout_s), start=start)
         summary = result.consume()
     profile = summary.profile or {}
     arguments = profile.get("args") or profile.get("arguments") or {}
+    hits, misses = _sum_profile(profile, "pageCacheHits"), _sum_profile(profile, "pageCacheMisses")
+    memory = arguments.get("GlobalMemory")
     return {
-        "server_ms": summary.result_available_after + summary.result_consumed_after,
-        "db_hits": _sum_profile(profile, "dbHits"),
-        "page_cache_hits": _sum_profile(profile, "pageCacheHits"),
-        "page_cache_misses": _sum_profile(profile, "pageCacheMisses"),
-        "memory_bytes": arguments.get("GlobalMemory"),
+        "data_processed_mb": (hits + misses) * PAGE_MB,
+        "data_from_disk_mb": misses * PAGE_MB,
+        "memory_mb": memory / 1024 ** 2 if memory is not None else None,
     }

@@ -1,17 +1,16 @@
 """Unit tests for the research scripts' own logic (no network, no databases).
 
-choose_starts.py (which actors), measure.py (the alternating order),
-traversal.py (the Cypher text) and analyze.py (the summaries).
+choose_starts.py (which actors), traversal.py (the query texts) and
+measure.py (the order of the sides, the data window, the comparison).
 
 Run with:  python -m pytest
 """
 
 import pytest
 
-from analyze import summarise_actor, summary
 from choose_starts import choose, pick_median, pick_top
-from measure import run_order
-from traversal import cypher_reach
+from measure import compare, data_window, run_order, side_summary, sides
+from traversal import Outcome, cypher_hops, cypher_reach, sql_joins
 
 
 def actor(actor_id, reached, repos, login=None):
@@ -71,56 +70,108 @@ def test_choose_is_the_same_whatever_the_input_order():
     assert choose(actors) == choose(list(reversed(actors)))
 
 
-# ---------- measure: alternating order ----------
+# ---------- traversal: the query texts ----------
 
-def test_run_order_alternates_which_side_goes_first():
-    assert run_order(1) == ("postgresql", "neo4j")
-    assert run_order(2) == ("neo4j", "postgresql")
-    assert run_order(3) == ("postgresql", "neo4j")
-
-
-# ---------- traversal: the Cypher text ----------
-
-def test_cypher_reach_writes_the_depth_into_the_pattern():
-    assert "{1,3}" in cypher_reach(3)
-    assert "$start" in cypher_reach(3)
+def test_cypher_paths_writes_the_depth_into_the_pattern():
+    assert "{1,3}" in cypher_reach(3, "paths")
+    assert "$start" in cypher_reach(3, "paths")
 
 
-def test_cypher_reach_refuses_depth_zero():
+def test_cypher_levels_has_one_step_per_hop():
+    query = cypher_reach(4, "levels")
+    assert query.count("CALL (seen, frontier)") == 4
+    assert "NOT b IN seen" in query and "$start" in query
+
+
+def test_cypher_refuses_depth_zero_and_unknown_versions():
     with pytest.raises(ValueError):
         cypher_reach(0)
+    with pytest.raises(ValueError):
+        cypher_reach(2, "shortcut")
 
 
-# ---------- analyze ----------
-
-def run(run_number, seconds, status="ok", count="7", cpu="10"):
-    return {"run": str(run_number), "seconds": str(seconds), "status": status, "count": count,
-            "machine_cpu_percent": cpu}
+def test_joins_and_hops_are_two_per_depth():
+    assert sql_joins(3) == 6 and cypher_hops(3) == 6
 
 
-def test_summary_of_an_actor_ignores_the_first_run():
-    result = summarise_actor([run(0, 9.0), run(1, 0.2), run(2, 0.4), run(3, 0.3)])
-    assert result["median_s"] == 0.3 and result["min_s"] == 0.2 and result["max_s"] == 0.4
-    assert result["finished"] == 3 and result["count"] == 7
+# ---------- measure ----------
+
+def test_sides_are_postgresql_then_the_cypher_versions():
+    assert sides("both") == ["postgresql", "neo4j-paths", "neo4j-levels"]
+    assert sides("levels") == ["postgresql", "neo4j-levels"]
 
 
-def test_summary_of_an_actor_counts_timeouts():
-    result = summarise_actor([run(0, 60, "timeout", "")])
-    assert result["timeouts"] == 1 and result["median_s"] is None
+def test_run_order_changes_which_side_goes_first():
+    three = ["postgresql", "neo4j-paths", "neo4j-levels"]
+    assert run_order(three, 1) == three
+    assert run_order(three, 2) == ["neo4j-paths", "neo4j-levels", "postgresql"]
+    assert run_order(three, 4) == three
+    assert run_order(["postgresql", "neo4j-paths"], 2) == ["neo4j-paths", "postgresql"]
 
 
-def test_noisy_when_spread_is_large_or_computer_busy():
-    assert summarise_actor([run(0, 1), run(1, 0.1), run(2, 0.5)])["noisy"]          # 5x spread
-    assert summarise_actor([run(0, 1), run(1, 0.1), run(2, 0.1, cpu="95")])["noisy"]  # busy
-    assert not summarise_actor([run(0, 1), run(1, 0.1), run(2, 0.12)])["noisy"]
+def test_data_window_is_read_from_the_database_name():
+    assert data_window("gharchive-2026-10-08-9-24h") == ("2026-10-08 09:00", "2026-10-09 09:00", 24)
+    assert data_window("gharchive-2026-10-08-23") == ("2026-10-08 23:00", "2026-10-09 00:00", 1)
+    assert data_window("gharchive24h") == ("", "", None)
 
 
-def test_group_summary_gives_postgresql_vs_neo4j():
-    rows = [
-        {"group": "top", "actor_id": 1, "depth": 2, "system": "postgresql", "median_s": 0.4, "timeouts": 0,
-         "errors": 0, "noisy": False},
-        {"group": "top", "actor_id": 1, "depth": 2, "system": "neo4j", "median_s": 0.1, "timeouts": 0,
-         "errors": 0, "noisy": False},
-    ]
-    by_system = {r["system"]: r for r in summary(rows)}
-    assert by_system["postgresql"]["postgresql_vs_neo4j"] == 4.0
+def finished(time_s):
+    return {"status": "finished", "time_s": time_s}
+
+
+def test_compare_says_who_was_faster_and_how_many_times():
+    assert compare(finished(0.4), finished(0.1), 60) == ("neo4j", 4.0)
+    assert compare(finished(0.1), finished(0.5), 60) == ("postgresql", 5.0)
+
+
+def test_compare_with_a_timeout_gives_a_minimum():
+    # Neo4j didn't finish in 60 s: PostgreSQL was at least 60 / 2 = 30 times faster.
+    assert compare(finished(2.0), {"status": "timeout"}, 60) == ("postgresql", 30.0)
+    assert compare({"status": "timeout"}, {"status": "skipped (timed out at a smaller depth)"}, 60) == ("neither", None)
+
+
+def run(seconds, cpu_s=0.1, machine_cpu=10.0):
+    return {"outcome": Outcome("ok", seconds, 7), "cpu_s": cpu_s, "machine_cpu": machine_cpu}
+
+
+def test_side_summary_uses_the_median_and_ignores_the_first_run():
+    summary = side_summary(Outcome("ok", 9.0, 7), [run(0.2), run(0.4, 0.4), run(0.3, 0.3)], {"memory_mb": 1.5}, "finished")
+    assert summary["time_s"] == 0.3 and summary["first_run_s"] == 9.0
+    assert summary["cpu_s"] == 0.3 and summary["cores_used"] == 1.0
+    assert summary["memory_mb"] == 1.5
+
+
+def test_side_summary_flags_noisy_or_busy_runs():
+    assert side_summary(Outcome("ok", 1, 7), [run(0.1), run(0.5)], {}, "finished")["noisy"]          # 5x spread
+    assert side_summary(Outcome("ok", 1, 7), [run(0.1), run(0.1, machine_cpu=95)], {}, "finished")["busy"]
+    calm = side_summary(Outcome("ok", 1, 7), [run(0.1), run(0.12)], {}, "finished")
+    assert not calm["noisy"] and not calm["busy"]
+
+
+def test_results_columns_are_the_test_then_two_identical_blocks():
+    from measure import COLUMNS, SIDE_COLUMNS, TEST_COLUMNS
+    assert COLUMNS[:len(TEST_COLUMNS)] == TEST_COLUMNS
+    pg = [c[len("pg_"):] for c in COLUMNS if c.startswith("pg_")]
+    neo4j = [c[len("neo4j_"):] for c in COLUMNS if c.startswith("neo4j_")]
+    assert pg == neo4j == SIDE_COLUMNS
+    assert COLUMNS.index("neo4j_" + SIDE_COLUMNS[0]) == COLUMNS.index("pg_" + SIDE_COLUMNS[-1]) + 1
+
+
+def test_each_measurement_gets_its_own_file_and_reuses_the_latest_actors(tmp_path, monkeypatch):
+    import csv
+    from datetime import datetime
+
+    import measure
+    monkeypatch.setattr(measure, "RESULTS_DIR", tmp_path)
+    path = measure.results_file("gharchive-2026-10-08-9-24h", datetime(2026, 11, 19, 10, 30, 0))
+    assert path.name == "gharchive-2026-10-08-9-24h_2026-11-19_10-30-00.csv"
+    assert measure.previous_starts("gharchive-2026-10-08-9-24h") == []
+
+    for name, actor_id in (("2026-11-18_09-00-00", 1), ("2026-11-19_10-30-00", 2)):
+        with open(tmp_path / f"gharchive-2026-10-08-9-24h_{name}.csv", "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=measure.COLUMNS)
+            writer.writeheader()
+            writer.writerow({"database": "gharchive-2026-10-08-9-24h", "start_group": "top", "start_rank": 1,
+                             "start_actor_id": actor_id, "start_login": "x", "start_reach_1_hop": 3})
+    # The latest measurement wins.
+    assert [a["actor_id"] for a in measure.previous_starts("gharchive-2026-10-08-9-24h")] == [2]

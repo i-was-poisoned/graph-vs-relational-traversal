@@ -6097,3 +6097,141 @@ première exécution courte est une bonne idée :
 > alterné ; la médiane ; et chaque temps enregistré avec son contexte. Les
 > scripts ne font qu'appliquer ces décisions d'une façon qui peut être
 > répétée.
+
+## Les premières mesures, et une façon plus simple de les enregistrer
+
+> 📖 **Avant de lire cette section**, lisez les copies annotées de [traversal.py](traversal.py), [choose_starts.py](choose_starts.py), [measure.py](measure.py), [research.sh](research.sh) et [test_research.py](test_research.py), dans cet ordre.
+
+Les scripts de recherche de la section précédente ont été lancés pour de
+vrai pour la première fois, sur deux volumes du même jour (2026-10-08, à
+partir de 09:00 UTC) : **6 heures** et **24 heures**. Les scripts ont
+fonctionné du début à la fin, et les réponses des deux bases ont été
+identiques sur toutes les lignes. Mais les résultats ont appris trois
+choses, qui ont changé à la fois la requête et la façon d'enregistrer les
+résultats. (Depuis, `analyze.py` n'existe plus : le renvoi de la section
+précédente pointe vers un script remplacé par ce qui est décrit ici.)
+
+### Ce qu'ont montré les deux premiers volumes
+
+**6 heures** (121 501 acteurs, 132 050 repos, 135 944 connexions) : tout a
+répondu en millisecondes. Le plus grand groupe d'acteurs connectés n'avait
+que 329 acteurs, donc n'importe quel parcours n'avait plus d'acteurs nouveaux
+après 2 ou 3 sauts. Neo4j avait un coût fixe d'environ 7 ms par requête (le
+driver et la session), PostgreSQL de moins de 1 ms. Neo4j ne gagnait qu'à
+partir de la profondeur 4, de quelques millisecondes. Et le groupe « median »
+ne servait à rien : l'acteur typique partage un repo avec **une** seule autre
+personne, donc 8 des 10 acteurs médians n'ont jamais dépassé 1 acteur
+atteint.
+
+**24 heures** : les groupes se rejoignent et un parcours atteint environ
+2 680 acteurs. Pour les 10 acteurs du top :
+
+| Profondeur | PostgreSQL | Neo4j | Plus rapide |
+|---|---|---|---|
+| 1 | 1,7 ms | 9 ms | PostgreSQL |
+| 2 | 62 ms | 12 ms | **Neo4j, 5 fois** |
+| 3 | 248 ms | 30 ms | **Neo4j, 8 fois** |
+| 4 | 469 ms | 637 ms | PostgreSQL |
+| 5 | 0,7 s | 3,8 s | PostgreSQL |
+| 6 | 0,9 s | 9 sur 10 n'ont pas fini en 60 s | PostgreSQL |
+
+Aux profondeurs 2 et 3, Neo4j est nettement plus rapide : c'est l'avantage
+attendu d'une base de graphes. Mais à partir de la profondeur 4 elle
+s'effondre, et ce **n'est pas** le volume de données. La preuve est venue
+d'un acteur « median » qui partage 27 repos avec une seule autre personne :
+la réponse est toujours 2 acteurs, à toutes les profondeurs, et pourtant le
+temps de Neo4j est passé de 0,007 s à 5,9 s, 800 fois plus, alors que
+PostgreSQL est resté à 0,003 s.
+
+### Pourquoi : chemins contre niveaux
+
+La requête Cypher était écrite comme un motif répété de 1 à N fois. Neo4j y
+répond en suivant **tous les chemins**, et ne retire les acteurs répétés qu'à
+la fin. Deux personnes qui partagent 27 repos sont reliées par 27 chemins ;
+aller-retour, 27 × 27 ; et ainsi de suite : les chemins se multiplient avec
+la profondeur même quand les personnes, elles, ne changent pas. Le SQL, au
+contraire, retire les acteurs répétés **à chaque niveau** (`UNION`), donc il
+ne fait jamais plus de travail qu'il n'y a d'acteurs.
+
+On comparait donc deux **méthodes** différentes, pas seulement deux bases.
+Pour être équitable, une deuxième version Cypher a été écrite, `levels`, qui
+fonctionne comme le SQL : chaque étape part des acteurs trouvés à l'étape
+précédente (la « frontière ») et ne garde que les acteurs jamais vus. Les
+deux versions donnent exactement la même réponse que le SQL ; les deux sont
+mesurées :
+
+- `paths` est la façon évidente de l'écrire en Cypher, celle qu'écrirait un
+  débutant. Son résultat est une découverte en soi : écrit naturellement, un
+  parcours profond en Cypher peut exploser.
+- `levels` compare la même méthode dans les deux bases.
+
+La différence entre les deux montre ce qui dépend de la **base de données**
+et ce qui dépend de **la façon d'écrire la requête**.
+
+### Quatre fichiers CSV, c'était trop
+
+Chaque mesure laissait `runs.csv`, `work.csv`, `per_actor.csv`,
+`summary.csv`, `conditions.json` et `starts.csv`, avec des noms de colonnes
+techniques (`blocks_from_memory`, `db_hits`, ...). Ils étaient difficiles à
+lire, même pour la personne qui mène la recherche. La décision : **un seul
+fichier CSV par mesure** (`results/<base>_<date>_<heure>.csv`), et la signification de chaque colonne
+écrite dans le README.
+
+- **Une ligne = une question à laquelle les deux bases ont répondu** : depuis
+  cet acteur, à cette profondeur, avec ce volume. Les chiffres de PostgreSQL
+  et de Neo4j sont sur la même ligne, côte à côte, donc on les compare en
+  lisant de gauche à droite.
+- **Chaque ligne a trois parties** : d'abord le test (les données, leur
+  date et leurs heures, le nombre d'acteurs, de repos et de connexions, et
+  la question), puis **un bloc PostgreSQL et un bloc Neo4j avec exactement
+  les mêmes colonnes** (`pg_time_s` / `neo4j_time_s`, `pg_cpu_s` / `neo4j_cpu_s`, ...),
+  et à la fin qui a été le plus rapide. Chaque base peut se lire seule,
+  comme deux tableaux côte à côte.
+- **Chaque mesure écrit son propre fichier** : un pour 6 heures, un pour 24
+  heures, un pour 3 jours... Tous ont les mêmes colonnes, donc on peut les
+  rassembler pour comparer les volumes.
+- À côté des résultats, chaque ligne contient ce qui est **essentiel pour la
+  comprendre** : les heures de données chargées et depuis quand, le nombre
+  d'acteurs, de repos et de connexions, combien de `JOIN` fait le SQL et
+  combien de relations suit le Cypher (2 par saut dans les deux cas).
+
+### Les quatre choses comparées
+
+Quatre choses ont été choisies, qui rendent une base meilleure que l'autre.
+Chacune est devenue des colonnes, pour les deux bases :
+
+| Quoi | Colonnes | Comment c'est mesuré |
+|---|---|---|
+| **Données traitées** | `..._data_processed_mb`, `..._data_from_disk_mb` | Les deux bases lisent les données par pages de 8 Ko. L'`EXPLAIN (BUFFERS)` de PostgreSQL et le `PROFILE` de Neo4j disent par combien de pages chaque requête est passée ; pages × 8 Ko = Mo. Comme les deux utilisent la même taille de page, les chiffres sont directement comparables |
+| **Temps** | `..._time_s`, `..._first_run_s` | La médiane de 5 exécutions, et la première exécution à part |
+| **Espace** | `..._memory_mb`, `pg_temp_disk_mb`, `..._database_mb` | La mémoire utilisée par la requête (PostgreSQL 18 la donne pour chaque étape de son plan ; Neo4j pour la requête entière), ce que PostgreSQL a dû écrire sur disque, et la taille de chaque base sur disque |
+| **Puissance de calcul** | `..._cpu_s`, `..._cores_used` | Les secondes de CPU utilisées par les processus du **serveur** de chaque base pendant chaque exécution, lues dans le système d'exploitation avec `psutil` avant et après. Divisées par le temps, elles disent combien de cœurs ont travaillé en même temps |
+
+Deux idées d'avant ont été gardées : `answers_match` (comparer des temps n'a
+de sens que si les deux ont répondu la même chose) et `reliable` (un
+portable en cours d'utilisation peut perturber une mesure).
+
+**Vérifié sur la vraie base** (PostgreSQL, 24 heures, un acteur du top,
+profondeur 3) : 1 437 Mo de pages traitées, dont 19 Mo depuis le disque,
+0,4 Mo de mémoire, et 0,20 seconde de CPU pour une requête de 0,30 s. La
+partie Neo4j n'a pas encore pu être vérifiée (Neo4j Desktop était fermé) :
+la prochaine mesure sera son premier vrai test.
+
+### Encore ouvert
+
+- **Des bots que le filtre ne voit pas.** L'acteur du top des 24 heures est
+  `Copilot`, et le groupe median contenait `regro-cf-autotick-bot`,
+  `svc-cli-bot` et `osuny-bot`. Le filtre ne reconnaît que les logins qui
+  se terminent par `[bot]`. Les bots relient des personnes qui n'ont rien à
+  voir entre elles, donc ils changent la forme du graphe. Le corriger oblige
+  à recharger les bases.
+- **Le coût fixe de Neo4j** (environ 7 ms par requête, en partie parce
+  qu'une session est ouverte à chaque fois) doit encore être examiné.
+- **Le rapport** aura un chapitre pour ces premiers résultats.
+
+> 🎯 **Idée centrale :** les premiers vrais résultats ont donné une réponse
+> partielle (Neo4j est 5 à 8 fois plus rapide aux profondeurs 2 et 3 avec 24
+> heures de données) et un avertissement : la façon d'écrire une requête
+> peut compter autant que la base de données. C'est pourquoi les deux
+> versions Cypher sont maintenant mesurées, et pourquoi chaque mesure va dans un
+> seul fichier dont chaque colonne est expliquée.

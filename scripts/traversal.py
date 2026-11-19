@@ -67,9 +67,18 @@ WITH RECURSIVE reach(actor_id, depth) AS (
 SELECT count(DISTINCT actor_id) FROM reach WHERE actor_id <> %(start)s
 """
 
-# A quantified path pattern: the group in brackets (one hop, actor -> repo -> actor) is
-# repeated from 1 to N times. N can't be a query parameter, so it's written into the text.
-CYPHER_REACH = """
+# Two ways of asking the same question in Cypher (both must give the SQL's count):
+#
+# "paths"   A quantified path pattern: the group in brackets (one hop, actor -> repo ->
+#           actor) is repeated from 1 to N times. Neo4j follows every PATH and removes
+#           repeated actors only at the end, so the work grows with the number of paths.
+# "levels"  Level by level, like the SQL: each step starts from the actors found in the
+#           step before (the "frontier") and keeps only actors never seen before.
+#
+# N can't be a query parameter, so it's written into the text.
+CYPHER_VERSIONS = ("paths", "levels")
+
+CYPHER_REACH_PATHS = """
 MATCH (a:Actor {{id: $start}})
       ((:Actor)-[:INTERACTED_WITH]->(:Repo)<-[:INTERACTED_WITH]-(:Actor)){{1,{depth}}}
       (b:Actor)
@@ -77,11 +86,46 @@ WHERE b <> a
 RETURN count(DISTINCT b)
 """
 
+CYPHER_LEVELS_START = """
+MATCH (start:Actor {id: $start})
+WITH [start] AS seen, [start] AS frontier
+"""
 
-def cypher_reach(depth: int) -> str:
+CYPHER_LEVELS_STEP = """
+CALL (seen, frontier) {
+    UNWIND frontier AS a
+    MATCH (a)-[:INTERACTED_WITH]->(:Repo)<-[:INTERACTED_WITH]-(b:Actor)
+    WITH DISTINCT b
+    WHERE NOT b IN seen
+    RETURN collect(b) AS next
+}
+WITH seen + next AS seen, next AS frontier
+"""
+
+CYPHER_LEVELS_END = """
+RETURN size(seen) - 1
+"""
+
+
+def cypher_reach(depth: int, version: str = "paths") -> str:
     if depth < 1:
         raise ValueError("depth must be at least 1")
-    return CYPHER_REACH.format(depth=depth)
+    if version == "paths":
+        return CYPHER_REACH_PATHS.format(depth=depth)
+    if version == "levels":
+        return CYPHER_LEVELS_START + CYPHER_LEVELS_STEP * depth + CYPHER_LEVELS_END
+    raise ValueError(f"unknown Cypher version {version!r}: use one of {CYPHER_VERSIONS}")
+
+
+def sql_joins(depth: int) -> int:
+    # Each hop of the recursive part joins actor_repo twice (actor -> repo, repo -> actor),
+    # and the recursive part runs once per hop.
+    return 2 * depth
+
+
+def cypher_hops(depth: int) -> int:
+    # Each hop follows two relationships: (actor)-[:INTERACTED_WITH]->(repo)<-[:INTERACTED_WITH]-(actor).
+    return 2 * depth
 
 
 # ---------- running a query, with a time limit, on either side ----------
@@ -114,11 +158,11 @@ def run_postgres_reach(conn: psycopg.Connection, start: int, depth: int, timeout
         return Outcome("error", time.perf_counter() - begin, None, str(error).strip())
 
 
-def run_neo4j_reach(driver, database: str, start: int, depth: int, timeout_s: int) -> Outcome:
+def run_neo4j_reach(driver, database: str, start: int, depth: int, timeout_s: int, version: str = "paths") -> Outcome:
     begin = time.perf_counter()
     try:
         with driver.session(database=database) as session:
-            count = session.run(Query(cypher_reach(depth), timeout=timeout_s), start=start).single()[0]
+            count = session.run(Query(cypher_reach(depth, version), timeout=timeout_s), start=start).single()[0]
         return Outcome("ok", time.perf_counter() - begin, count)
     except Exception as error:   # the driver raises different classes for a timeout
         status = "timeout" if "timeout" in str(error).lower() or "timed out" in str(error).lower() else "error"
@@ -127,6 +171,22 @@ def run_neo4j_reach(driver, database: str, start: int, depth: int, timeout_s: in
 
 # ---------- the work done inside each database ----------
 
+PAGE_MB = 8192 / 1024 ** 2   # both databases read and cache data in pages of 8 KB
+
+
+def _postgres_memory_kb(node: dict) -> float:
+    # The memory each step of the plan kept for itself (PostgreSQL 18 reports it in kB):
+    # "Maximum Storage" (recursive union, CTE scan), "Sort Space Used", "Peak Memory Usage"
+    # (hash tables). Only what stayed in memory; what went to disk is counted as temp.
+    own = 0.0
+    if node.get("Storage", "Memory") == "Memory":
+        own += node.get("Maximum Storage") or 0
+    if node.get("Sort Space Type", "Memory") == "Memory":
+        own += node.get("Sort Space Used") or 0
+    own += node.get("Peak Memory Usage") or 0
+    return own + sum(_postgres_memory_kb(child) for child in node.get("Plans", []))
+
+
 def postgres_work(conn: psycopg.Connection, start: int, depth: int, timeout_s: int) -> dict:
     # EXPLAIN (ANALYZE, BUFFERS) runs the query and reports what it did. The top node's
     # buffer numbers include everything below it.
@@ -134,11 +194,12 @@ def postgres_work(conn: psycopg.Connection, start: int, depth: int, timeout_s: i
     query = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + SQL_REACH
     plan = conn.execute(query, {"start": start, "depth": depth}).fetchone()[0][0]
     top = plan["Plan"]
+    from_memory, from_disk = top.get("Shared Hit Blocks") or 0, top.get("Shared Read Blocks") or 0
     return {
-        "server_ms": plan.get("Execution Time"),
-        "blocks_from_memory": top.get("Shared Hit Blocks"),
-        "blocks_from_disk": top.get("Shared Read Blocks"),
-        "temp_blocks_written": top.get("Temp Written Blocks"),
+        "data_processed_mb": (from_memory + from_disk) * PAGE_MB,
+        "data_from_disk_mb": from_disk * PAGE_MB,
+        "memory_mb": _postgres_memory_kb(top) / 1024,
+        "temp_disk_mb": (top.get("Temp Written Blocks") or 0) * PAGE_MB,
     }
 
 
@@ -146,18 +207,19 @@ def _sum_profile(node: dict, key: str) -> int:
     return (node.get(key) or 0) + sum(_sum_profile(child, key) for child in node.get("children", []))
 
 
-def neo4j_work(driver, database: str, start: int, depth: int, timeout_s: int) -> dict:
-    # PROFILE runs the query and reports, for every step of its plan, the database hits
-    # and the page cache hits/misses; they're added up over the whole plan.
+def neo4j_work(driver, database: str, start: int, depth: int, timeout_s: int, version: str = "paths") -> dict:
+    # PROFILE runs the query and reports, for every step of its plan, the page cache
+    # hits/misses; they're added up over the whole plan. GlobalMemory is the memory the
+    # whole query used.
     with driver.session(database=database) as session:
-        result = session.run(Query("PROFILE " + cypher_reach(depth), timeout=timeout_s), start=start)
+        result = session.run(Query("PROFILE " + cypher_reach(depth, version), timeout=timeout_s), start=start)
         summary = result.consume()
     profile = summary.profile or {}
     arguments = profile.get("args") or profile.get("arguments") or {}
+    hits, misses = _sum_profile(profile, "pageCacheHits"), _sum_profile(profile, "pageCacheMisses")
+    memory = arguments.get("GlobalMemory")
     return {
-        "server_ms": summary.result_available_after + summary.result_consumed_after,
-        "db_hits": _sum_profile(profile, "dbHits"),
-        "page_cache_hits": _sum_profile(profile, "pageCacheHits"),
-        "page_cache_misses": _sum_profile(profile, "pageCacheMisses"),
-        "memory_bytes": arguments.get("GlobalMemory"),
+        "data_processed_mb": (hits + misses) * PAGE_MB,
+        "data_from_disk_mb": misses * PAGE_MB,
+        "memory_mb": memory / 1024 ** 2 if memory is not None else None,
     }

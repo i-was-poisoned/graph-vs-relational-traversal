@@ -53,9 +53,9 @@ Steps 6-11 are the research.
 | 6 | Make sure the servers are **running**: PostgreSQL (starts with Windows) and Neo4j Desktop (open it, start the instance) | **Every time** | [Step 0](#step-0-what-must-be-running) |
 | 7 | Run **`drop_databases.py`**: it deletes the databases left by earlier research, so you start from empty servers | **At the start of every new research**, before loading anything | [Step 1](#step-1-delete-the-databases-of-earlier-research) |
 | 8 | Run **`build_hours.py`**: it asks which hours you want and puts them in both databases | Once **per volume** (6 hours, 12 hours, ...) | [Step 2](#step-2-load-the-hours-you-choose) |
-| 9 | Run **`research.sh`**: it measures one database and writes the results to `results/` | Once **per volume** | [Step 4](#step-4-measure-researchsh) |
-| 10 | Read the results | After each measurement | [Step 5](#step-5-read-the-results) |
-| 11 | **Save the iteration**: commit `results/` to Git | After each volume, **before** loading the next one | [Step 6](#step-6-save-the-iteration) |
+| 9 | Run **`research.sh`**: it measures one database and writes the results to **one CSV file** in `results/` | Once **per volume** | [Step 4](#step-4-measure-researchsh) |
+| 10 | Read the results (every column is explained) | After each measurement | [Step 5](#step-5-read-the-results) |
+| 11 | **Save the iteration**: commit the new CSV in `results/` to Git | After each volume, **before** loading the next one | [Step 6](#step-6-save-the-iteration) |
 
 So, once the setup is done, a research is just:
 
@@ -335,70 +335,169 @@ database, even by mistake.
 ```
 
 It checks that both servers answer, shows the databases that exist on both
-sides, asks which one to measure (type its number), and then runs three
-scripts in order, stopping at the first one that fails:
+sides, asks which one to measure (type its number), and runs
+[measure.py](scripts/measure.py):
 
 ```
 Databases you can measure:
-  1) gharchive-2026-08-27-12-6h
+  1) gharchive-2026-10-08-9-24h
 Which one? (number) 1
 ```
 
-| Script | What it does | What it writes |
-|---|---|---|
-| [choose_starts.py](scripts/choose_starts.py) | Chooses the 20 starting actors by fixed rules, never by hand: the **10 that reach the most actors in one hop** (ties: more repos, then smaller id) and the **10 closest to the median** (leaving out actors that reach nobody). Both databases must choose exactly the same 20, or nothing is saved | `results/<database>/starts.csv` (kept and reused the next time that database is measured; `--force` chooses again) |
-| [measure.py](scripts/measure.py) | For each actor and depth 1 to 6: a first run that doesn't count (it includes preparing the query plan) where **both databases must give the same count**; then 5 timed runs alternating which database goes first; then one run with `EXPLAIN (ANALYZE, BUFFERS)` / `PROFILE` for the work done inside each database. Each run has a time limit; a database that runs out of time skips the deeper depths for that actor | `results/<database>/<date-time>/`: `runs.csv` (every run), `work.csv` (internal figures), `conditions.json` (versions, memory settings, sizes, computer) |
-| [analyze.py](scripts/analyze.py) | Summarises the runs: median, minimum and maximum time, timeouts, "noisy" runs (slowest > 3× fastest, or CPU above 80 %), and **how many times slower PostgreSQL was than Neo4j** | `per_actor.csv` and `summary.csv` in the same folder; `results/all_databases.csv` (every volume measured, side by side) |
+What `measure.py` does, in order:
 
-While it measures, it shows one line per actor and depth (how many actors
-were reached), so you can follow its progress.
+1. **Checks the data.** Both databases must hold the same number of actors,
+   repos and connections; otherwise it stops before measuring anything.
+2. **Chooses the 20 starting actors**, by fixed rules, never by hand
+   ([choose_starts.py](scripts/choose_starts.py)): the **10 that reach the
+   most actors in one hop** (ties: more repos, then the smaller id) and the
+   **10 closest to the median** (leaving out actors that reach nobody). Both
+   databases must choose exactly the same 20. If this database was
+   already measured, it **reuses** the actors of its latest CSV instead, so
+   a repeated measurement starts from the same place (`--new-starts`
+   chooses again).
+3. **For every actor and every depth from 1 to 6:**
+   - a **first run** on each side, which doesn't count as a result (it
+     includes preparing the query). Here **all sides must give the same
+     answer**;
+   - **5 timed runs**, changing which side goes first each time;
+   - **one more run** with `EXPLAIN (ANALYZE, BUFFERS)` (PostgreSQL) and
+     `PROFILE` (Neo4j), which report the data processed and the memory used
+     inside each database.
+4. **Writes the lines to its CSV file** after each actor, and prints a
+   summary at the end.
+
+Each run has a **time limit** (60 seconds). A side that runs out of time at a
+depth isn't tried at the deeper depths for that actor (it could only be
+slower); its lines say so.
+
+**Two versions of the Cypher query are measured** (both give exactly the SQL's
+answer):
+
+| Version | How it walks the graph |
+|---|---|
+| `paths` | One pattern repeated 1 to N times. Neo4j follows **every path** and removes repeated actors only at the end, so the work grows with the number of paths: two actors who share 27 repos are connected by 27 paths, then 27 × 27, ... |
+| `levels` | Level by level, **like the SQL**: each step starts from the actors found in the step before and keeps only actors never seen before |
+
+`paths` is the obvious way to write it in Cypher; `levels` follows the same
+method as the SQL. Measuring both shows how much of the difference comes from
+the **database** and how much from **how the query is written**.
 
 Options, all optional:
 
 ```bash
-./research.sh --database gharchive-2026-08-27-12-6h   # don't ask, measure this one
+./research.sh --database gharchive-2026-10-08-9-24h   # don't ask, measure this one
 ./research.sh --max-depth 3 --repeats 2                # a quick first try
 ./research.sh --timeout 120                            # seconds per run (default 60)
+./research.sh --cypher levels                          # only one Cypher version (default: both)
+./research.sh --new-starts                             # choose the starting actors again
 ```
-
-Defaults: depths 1 to 6, 5 timed runs, 60 seconds per run. Each script can
-also be run alone, e.g. `./run.sh scripts/analyze.py --all`.
 
 ### Step 5. Read the results
 
-`analyze.py` prints a table like this one per database (one line per group
-and depth; the numbers here are only an illustration of the format):
-
-```
-  group   depth    PostgreSQL         Neo4j  PG / Neo4j  notes
-  top         1        2.1 ms        3.4 ms       0.62x
-  top         4      840.0 ms      120.0 ms       7.00x  PG: 1 noisy
-```
-
-- **PG / Neo4j** above 1: Neo4j was faster (7.00x = PostgreSQL took 7 times
-  longer); below 1: PostgreSQL was faster.
-- **top** = the 10 best-connected actors (the hardest case); **median** = 10
-  typical actors.
-- Times are the median over the actors of each actor's median run.
-- The **notes** column shows timeouts and noisy results.
-
-Everything is also saved as files:
+**Every measurement (every analysis) writes one CSV file**, and only one, in
+`results/`. Its name says which database was measured and when:
 
 ```
 results/
-├── all_databases.csv                  <- every volume measured, side by side
-└── gharchive-2026-08-27-12-6h/
-    ├── starts.csv                     <- the 20 starting actors
-    └── 2026-11-19_12-30-00/           <- one folder per measurement
-        ├── conditions.json
-        ├── runs.csv
-        ├── work.csv
-        ├── per_actor.csv
-        └── summary.csv
+├── gharchive-2026-10-08-9-6h_2026-11-19_10-30-00.csv    <- 6 hours, measured on 2026-11-19 at 10:30
+└── gharchive-2026-10-08-9-24h_2026-11-19_14-05-12.csv   <- 24 hours, measured on 2026-11-19 at 14:05
 ```
 
-`results/all_databases.csv` is the file that answers the research question:
-the volume and depth where the ratio goes above 1 and stays there.
+The file opens in Excel. All the files have the same columns, so they can
+be put together later to compare the volumes (6 hours, 24 hours, 3 days,
+...).
+
+**One line = one question answered by both databases**: "from this starting
+actor, at this depth, with this volume of data, how many actors are
+reached?", with PostgreSQL's and Neo4j's figures side by side. With 20
+actors, 6 depths and 2 Cypher versions, each file has 240 lines.
+
+At the end, `measure.py` also prints a short summary (the median over the
+actors of each group). For example (the numbers are only an illustration):
+
+```
+  group   depth  cypher   PostgreSQL       Neo4j  faster (count of actors)
+  top         3  levels      248.0 ms     30.0 ms  PG 0, Neo4j 10
+  top         6  paths       904.8 ms  21,729.5 ms +8t/o  PG 10, Neo4j 0
+```
+
+(`+8t/o` = 8 actors didn't finish in time.)
+
+#### What is measured, and why
+
+The research question has two axes, **depth** and **data volume**, and four
+things are compared for each point: **data processed, time, space and
+computing power**.
+
+Each line of a results CSV has three parts, from left to right:
+
+```
+| the test (19 columns)                | PostgreSQL (pg_..., 12 columns)  | Neo4j (neo4j_..., 12 columns)    | comparison |
+| data, date, hours, sizes, question  | joins_or_hops, status, time_s ...| joins_or_hops, status, time_s ...| faster ... |
+```
+
+The **PostgreSQL and Neo4j blocks have exactly the same columns, in the same
+order**: each database can be read on its own, or compared with the other one
+column by column (`pg_time_s` with `neo4j_time_s`, `pg_cpu_s` with
+`neo4j_cpu_s`, ...).
+
+**1. The test (the first columns)**
+
+| Column | What it is | Why it's there |
+|---|---|---|
+| `measured_at` | Date and time of the measurement (your computer's clock) | Tells measurements apart; a volume can be measured more than once |
+| `database` | The database measured, e.g. `gharchive-2026-10-08-9-24h` | Its name says which hours it holds |
+| `data_from_utc`, `data_to_utc` | The first and last moment of the GitHub data loaded (UTC) | Anyone can load exactly the same data and repeat the measurement |
+| `volume_hours` | How many hours of GitHub activity were loaded (6, 24, 72, ...) | The **data volume** axis of the research question |
+| `graph_actors`, `graph_repos`, `graph_connections` | How many actors, repos and actor–repo connections the database holds: the nodes and relationships in Neo4j, the rows of the tables `actor`, `repo` and `actor_repo` in PostgreSQL (the same in both; checked before measuring) | The real size of the data: hours alone don't say how big the graph is |
+| `start_group` | `top` (one of the 10 best-connected actors) or `median` (one of 10 typical actors) | The hardest case and the usual case behave very differently |
+| `start_rank` | The actor's position in its group (1 to 10) | To keep the order of the groups |
+| `start_actor_id`, `start_login` | The starting actor | Anyone can repeat the traversal from the same actor |
+| `start_reach_1_hop` | How many actors it reaches in one hop | How "connected" the start is; it's why the actor was chosen |
+| `depth` | Hops actor → repo → actor | The **depth** axis of the research question |
+| `cypher_version` | `paths` or `levels` (see [Step 4](#step-4-measure-researchsh)) | Separates the effect of the database from the effect of how the query is written |
+| `actors_reached` | The answer: distinct actors reached (the starting actor not counted) | The size of the work done; it grows with depth until the connected group runs out |
+| `answers_match` | `yes` if PostgreSQL and both Cypher versions gave the same answer | **A time comparison only means something if both answered the same question correctly** |
+| `runs` | How many timed runs each database made (5) | The time is the median of these runs |
+| `timeout_s` | The time limit of one run, in seconds (60) | Above it, a run is stopped and counted as `timeout` |
+
+**2. PostgreSQL (`pg_...`) and 3. Neo4j (`neo4j_...`): the same columns for each**
+
+| Column | What it is | Why it's there |
+|---|---|---|
+| `..._joins_or_hops` | PostgreSQL: how many `JOIN`s the SQL query makes to reach that depth. Neo4j: how many relationships the Cypher query follows. Both are 2 per hop (actor → repo, repo → actor) | The cost of a deep traversal in each model: every hop is two more `JOIN`s in SQL, two more relationships followed in Cypher |
+| `..._status` | `finished`, `timeout` (didn't finish within the time limit), or `skipped (...)` (not tried, because it ran out of time at a smaller depth) | A timeout is a result, not a missing value |
+| `..._time_s` | **Time**, in seconds: the **median** of the 5 timed runs, measured from Python | The main result. The median isn't moved by one slow run (an antivirus scan, an email arriving), the average is |
+| `..._first_run_s` | Time of the first run, which includes preparing the query (in Neo4j, up to several seconds) | It's what someone running the query only once would wait |
+| `..._data_processed_mb` | **Data processed**: MB of data pages the database went through to answer (both use pages of 8 KB; a page used twice counts twice) | Shows **how much work** each model needs for the same answer, independently of how fast the computer is |
+| `..._data_from_disk_mb` | The part of the above that had to be read from disk, not from memory | Disk is much slower than memory: explains slow runs |
+| `..._memory_mb` | **Space in memory**: what the query kept in memory while it ran (PostgreSQL: its hash tables, sorts and intermediate results; Neo4j: the memory of the whole query) | A database can be fast by using a lot of memory |
+| `..._temp_disk_mb` | Data the query had to write to disk because it didn't fit in memory. **Only PostgreSQL** reports it (its `work_mem`); for Neo4j it's always empty | A sign that the database is short of memory |
+| `..._database_mb` | **Space on disk**: the size of the whole database, in MB | What it costs to store the same data in each model |
+| `..._cpu_s` | **Computing power**: CPU seconds used by the database **server** during the query (median of the 5 runs) | Measures the processor's work, not the waiting |
+| `..._cores_used` | CPU seconds ÷ time: how many processor cores it used at once, on average | A database can be faster by using several cores in parallel; this makes it visible |
+| `..._reliable` | `no` if the computer was busy (CPU above 80 %) or that database's runs were very uneven (slowest more than 3 × the fastest) | Results measured on a laptop in use must be read with care |
+
+**4. The comparison (the last columns)**
+
+| Column | What it is | Why it's there |
+|---|---|---|
+| `faster` | `postgresql`, `neo4j` or `neither` (neither finished) | The direct answer for that line |
+| `times_faster` | How many times faster (slower time ÷ faster time). If the slower side didn't finish, it's computed with the time limit, so it's a **minimum** | How big the difference is |
+
+The computer's characteristics (31.6 GB of RAM, Intel i7-1260P with 16
+threads, Windows 11) and the databases' memory settings (both run with their
+defaults: PostgreSQL `shared_buffers` 128 MB, `work_mem` 4 MB; Neo4j page
+cache 512 MB, heap up to 1 GB) are the same for every line, so they're written
+here instead of being repeated in the file. Results measured on another
+computer will have other times, but the comparison between the two databases
+should keep its shape.
+
+**A note on Excel:** the file uses commas between columns and a point for
+decimals. If Excel shows each line in a single column (it happens when
+Windows is set up for a language that writes decimals with a comma), open it
+with *Data → From Text/CSV* and choose *comma* as the delimiter.
 
 ### Step 6. Save the iteration
 
@@ -408,25 +507,20 @@ is kept in the repository's history with its date, and anyone can compare
 their own results with it.
 
 ```bash
-git status                     # check: only files under results/ should be new or changed
+git status                     # check: only the new CSV in results/ should be new
 git add results/
-git commit -m "Results: 6 hours (gharchive-2026-08-27-12-6h)"
+git commit -m "Results: 24 hours (gharchive-2026-10-08-9-24h)"
 git push
 ```
 
-Change the message for each iteration, e.g. `"Results: 12 hours
-(gharchive-2026-08-27-12-12h)"`, `"Results: 1 day (gharchive-2026-08-27-0-24h)"`.
+Change the message for each iteration, e.g. `"Results: 6 hours
+(gharchive-2026-10-08-9-6h)"`, `"Results: 3 days (gharchive-2026-10-08-9-72h)"`.
 
-What each iteration leaves behind, and why nothing is lost:
+Why nothing is lost between iterations:
 
-- **Each volume has its own folder** (`results/<database>/`), named after
-  the database, so a new volume never writes into an earlier one.
-- **Each measurement has its own sub-folder** (`<date-time>/`): measuring the
-  same volume again doesn't overwrite the earlier measurement.
-- **`results/all_databases.csv` grows**: after every measurement it's
-  rebuilt with all the volumes measured so far (6 hours; then 6 + 12 hours;
-  ...). If a volume was measured more than once, it uses the **latest**
-  measurement; the earlier ones stay in their folders.
+- **Every measurement writes a new file**; nothing is overwritten.
+  Measuring the same volume again creates another file, with another date
+  and time in its name.
 - **Deleting databases doesn't touch `results/`**: `drop_databases.py` only
   deletes databases, never files.
 
@@ -437,19 +531,18 @@ project notes, in the three languages.
 ### Step 7. The next volume
 
 Go back to [Step 2](#step-2-load-the-hours-you-choose) with more hours from
-the same day (e.g. `2026-08-27`, `12`, `12`), measure it with
+the same day (e.g. `2026-10-08`, `9`, `72` for 3 days), measure it with
 `./research.sh` (Step 4) and save it (Step 6). **Don't run
 `drop_databases.py` between volumes**: it's only for the start of a new
 research.
 
 ### Measuring on a computer that is in use
 
-The scripts are designed for an ordinary laptop: the order alternates, the
-CPU and memory load is recorded before every run, the median is used instead
-of the average, and noisy results are flagged. Even so, close heavy programs
-while measuring, and run large volumes when the computer is quiet (at lunch
-or at night). The results always depend on the machine: `conditions.json`
-records which one.
+The scripts are designed for an ordinary laptop: the order of the sides
+changes on every run, the computer's CPU load is recorded before every run,
+the median is used instead of the average, and doubtful results get
+`pg_reliable` or `neo4j_reliable` = `no`. Even so, close heavy programs while measuring, and run large
+volumes when the computer is quiet (at lunch or at night).
 
 ### When something goes wrong
 
@@ -464,8 +557,8 @@ records which one.
 | `... does not exist (not published yet?)` | That hour isn't on GH Archive (yet) | Choose an older hour |
 | `MISMATCH` / `DON'T match` | A database doesn't hold what the CSVs say | Run the same choice again (it starts from empty) |
 | `There's no database to measure yet` | Nothing loaded | Load one first ([Step 2](#step-2-load-the-hours-you-choose)) |
-| `The two databases DON'T choose the same actors` / `COUNTS DIFFER` | The two sides don't hold the same data | Load the same hours again with `build_hours.py`; if it happens again, open an issue with the output |
-| Many `timeouts` in the notes | Normal for deep traversals from the top actors | Raise `--timeout` if you want them to finish |
+| `The two databases DON'T choose the same actors` / `don't hold the same data` / `ANSWERS DIFFER` | The two sides don't hold the same data | Load the same hours again with `build_hours.py`; if it happens again, open an issue with the output |
+| Many `timeout` / `skipped` statuses | Normal for deep traversals from the top actors | Raise `--timeout` if you want them to finish |
 | `Permission denied` for `./run.sh` or `./research.sh` | The file lost its "executable" flag | Use `bash run.sh ...` / `bash research.sh` instead |
 
 <details>
@@ -705,8 +798,8 @@ Unit tests for the parts of the pipelines with their own logic (bot
 filtering, empty-repo events, latest names, unique connections, the rolling
 window, "already ran today", GH Archive file names, CSV reading, and
 `build_hours.py`'s questions, database names and safety check, and the
-research scripts' rules: which actors are chosen, the alternating order, the
-summaries) live in
+research scripts' rules: which actors are chosen, the order of the sides, the two Cypher
+versions, the data window and the comparison) live in
 [tests/](tests/). They use tiny made-up events in a temporary folder, so they
 need neither the internet nor the databases (and no passwords):
 

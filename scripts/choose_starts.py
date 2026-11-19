@@ -12,30 +12,24 @@ and then picks two groups of 10:
 
 Ties are broken by more repos, then by the smaller id, so the choice never
 changes. Both databases must give exactly the same 20 actors (with the same
-numbers); otherwise nothing is saved.
+numbers); otherwise the measurement doesn't start.
 
-The list is saved to results/<database>/starts.csv. If that file already
-exists it's kept, so a measurement repeated another day uses the same actors;
---force chooses them again.
+measure.py uses choose_in_both(). The chosen actors are saved as part of every
+line of the measurement's CSV in results/, so a measurement repeated another
+day reuses them.
 
-Usage:
-    ./run.sh scripts/choose_starts.py --database gharchive-2026-08-27-12-6h
+Usage (only to list the databases that can be measured; research.sh uses it):
     ./run.sh scripts/choose_starts.py --list-databases
 """
 
 import argparse
-import csv
 import statistics
-import sys
 import time
-from pathlib import Path
 
 import drop_databases
 import traversal
 
-RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 GROUP_SIZE = 10
-FIELDS = ["group", "rank", "actor_id", "login", "reached", "repos"]
 
 
 def ranking_key(actor: dict) -> tuple:
@@ -80,6 +74,23 @@ def neo4j_actors(database: str) -> list[dict]:
     return [dict(r) for r in records]
 
 
+def choose_in_both(database: str) -> list[dict]:
+    # The same choice made in each database; they must agree, or nothing is measured.
+    print(f'Choosing the starting actors: counting, for every actor of "{database}", '
+          "how many actors it reaches in one hop ...")
+    begin = time.perf_counter()
+    in_postgres = choose(postgres_actors(database))
+    print(f"  PostgreSQL done in {time.perf_counter() - begin:.1f} s.")
+    begin = time.perf_counter()
+    in_neo4j = choose(neo4j_actors(database))
+    print(f"  Neo4j done in {time.perf_counter() - begin:.1f} s.")
+    if in_postgres != in_neo4j:
+        differences = [f"  PostgreSQL {p}\n  Neo4j      {n}" for p, n in zip(in_postgres, in_neo4j) if p != n]
+        raise RuntimeError("The two databases DON'T choose the same actors; nothing was measured.\n"
+                           + "\n".join(differences))
+    return in_postgres
+
+
 def existing_databases() -> list[str]:
     # Project databases that exist on BOTH servers (the only ones that can be measured).
     with traversal.connect_neo4j() as driver:
@@ -87,55 +98,14 @@ def existing_databases() -> list[str]:
     return [name for name in drop_databases.postgres_databases() if name in in_neo4j]
 
 
-def save(rows: list[dict], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--database", help="The database to choose the actors in (same name on both sides)")
-    parser.add_argument("--force", action="store_true", help="Choose again even if starts.csv already exists")
     parser.add_argument("--list-databases", action="store_true",
-                        help="Only print the project databases that exist on both servers, one per line")
+                        help="Print the project databases that exist on both servers, one per line")
     args = parser.parse_args()
-
-    if args.list_databases:
-        print("\n".join(existing_databases()))
-        return
-    if not args.database:
-        parser.error("--database is required")
-
-    path = RESULTS_DIR / args.database / "starts.csv"
-    if path.exists() and not args.force:
-        print(f"The starting actors for \"{args.database}\" were already chosen: {path}")
-        print("They're kept, so this measurement uses the same actors (use --force to choose again).")
-        return
-
-    print(f'Counting, for every actor of "{args.database}", how many actors it reaches in one hop ...')
-    begin = time.perf_counter()
-    in_postgres = choose(postgres_actors(args.database))
-    print(f"PostgreSQL done in {time.perf_counter() - begin:.1f} s.")
-    begin = time.perf_counter()
-    in_neo4j = choose(neo4j_actors(args.database))
-    print(f"Neo4j done in {time.perf_counter() - begin:.1f} s.")
-
-    if in_postgres != in_neo4j:
-        print("\nThe two databases DON'T choose the same actors; nothing was saved.")
-        for p, n in zip(in_postgres, in_neo4j):
-            if p != n:
-                print(f"  PostgreSQL {p}\n  Neo4j      {n}")
-        sys.exit(1)
-
-    print(f"\nBoth databases choose the same {len(in_postgres)} actors:")
-    print(f"  {'group':<7} {'rank':>4} {'actor_id':>12} {'reached':>8} {'repos':>6}  login")
-    for row in in_postgres:
-        print(f"  {row['group']:<7} {row['rank']:>4} {row['actor_id']:>12} {row['reached']:>8} {row['repos']:>6}  {row['login']}")
-    save(in_postgres, path)
-    print(f"\nSaved to {path}")
+    if not args.list_databases:
+        parser.error("the only option is --list-databases (measure.py chooses the actors)")
+    print("\n".join(existing_databases()))
 
 
 if __name__ == "__main__":

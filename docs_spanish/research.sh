@@ -16,18 +16,23 @@
 #
 # Qué leer antes: research.sh llama a run.sh, que no tiene copia anotada
 # pero es corto y está comentado — lee el propio run.sh. Es útil comparar
-# los dos (ver "research.sh frente a run.sh" más abajo). Para lo que hace
-# cada paso de Python, ver docs_spanish/choose_starts.py,
-# docs_spanish/measure.py y docs_spanish/analyze.py.
+# los dos (ver "research.sh frente a run.sh" más abajo). Para lo que
+# hacen los pasos de Python, ver docs_spanish/check_connections.py,
+# docs_spanish/measure.py (la medición en sí) y
+# docs_spanish/choose_starts.py (la lista de bases de datos, y cómo se
+# eligen los actores de partida).
 #
 # Lo que es NUEVO aquí: este es el primer script de BASH del proyecto
 # explicado línea por línea. Es el único punto de entrada de la
-# investigación: un solo comando ejecuta los tres pasos para una base de
-# datos, en orden, y se detiene en el primero que falle. Conceptos de
-# bash que se explican: el shebang, set -eo pipefail,
-# cd "$(dirname "$0")", un bucle sobre los argumentos con case / shift,
-# los arrays, mapfile con sustitución de procesos, tr -d '\r', read -p, y
-# una comprobación con una expresión regular con [[ =~ ]].
+# investigación: un solo comando comprueba los servidores, pregunta qué
+# base de datos medir y ejecuta measure.py sobre ella, deteniéndose en el
+# primer paso que falle. Cada medición escribe UN archivo CSV propio en
+# results/, cuyo nombre lleva la base de datos y el momento en que
+# empezó. Conceptos de bash que se explican: el shebang,
+# set -eo pipefail, cd "$(dirname "$0")", un bucle sobre los argumentos
+# con case / shift, los arrays, mapfile con sustitución de procesos,
+# tr -d '\r', read -p, y una comprobación con una expresión regular con
+# [[ =~ ]].
 #
 # Toda la investigación, en tres comandos:
 #     ./run.sh scripts/drop_databases.py   (opcional: empezar desde cero)
@@ -37,7 +42,8 @@
 # Cómo ejecutar el archivo real (desde Git Bash, en la carpeta del
 # proyecto, con PostgreSQL en marcha y Neo4j Desktop abierto):
 #     ./research.sh
-#     ./research.sh --database gharchive-2026-08-27-12-6h
+#     ./research.sh --database gharchive-2026-10-08-9-24h
+#     ./research.sh --new-starts
 ########################################################################
 
 # ---------------------------------------------------------------------
@@ -60,26 +66,28 @@
 # Los dos empiezan con las mismas tres líneas: shebang, set -eo pipefail,
 # cd.
 # ---------------------------------------------------------------------
-# Run the whole research for one database, in order:
-#     1. choose_starts.py  - the 10 top and 10 median starting actors (same on both sides)
-#     2. measure.py        - the traversal in PostgreSQL and Neo4j, timed and checked
-#     3. analyze.py        - the summary tables, and the comparison of every volume measured
+# Run the research for one database:
+#     0. check that both servers answer
+#     1. ask which database to measure (unless --database is given)
+#     2. measure.py: choose (or reuse) the starting actors, measure the traversal in
+#        PostgreSQL and Neo4j, and write the results to one CSV file in results/
 #
 # Usage (from Git Bash, with PostgreSQL running and Neo4j Desktop open):
 #     ./research.sh                                     # asks which database to measure
-#     ./research.sh --database gharchive-2026-08-27-12-6h
-#     ./research.sh --database ... --max-depth 4 --repeats 5 --timeout 60
+#     ./research.sh --database gharchive-2026-10-08-9-24h
+#     ./research.sh --database ... --max-depth 4 --repeats 5 --timeout 60 --cypher both
+#     ./research.sh --new-starts                        # choose the starting actors again
 #
 # The work is done by the Python scripts; this file only runs them in order,
-# asks the one question, and stops at the first step that fails. Each script
-# can also be run alone with ./run.sh (see README).
+# asks the one question, and stops at the first step that fails.
 
 # ---------------------------------------------------------------------
 # set -eo pipefail — PARAR EN EL PRIMER FALLO
 #
 # Por defecto, bash sigue con la línea siguiente aunque un comando falle.
-# Aquí eso sería malo: si fallara la elección de los actores, la medición
-# se ejecutaría después con un starts.csv que falta o está desfasado.
+# Aquí eso sería malo: si los servidores no respondieran, el script
+# seguiría adelante igualmente, haría una pregunta y después intentaría
+# medir.
 #   -e         salir en cuanto un comando falle (termine con un código de
 #              salida distinto de cero — p. ej. un script de Python que
 #              llama a sys.exit(1), ver docs_spanish/check_connections.py).
@@ -134,11 +142,21 @@ MEASURE_OPTIONS=()
 # de if/elif. Cada rama es `patrón) comandos ;;`
 #   --database)        guarda el argumento siguiente como nombre de la
 #                      base de datos.
-#   --max-depth|--repeats|--timeout)
-#                      `|` significa O. Estas tres no las usa el propio
+#   --max-depth|--repeats|--timeout|--cypher)
+#                      `|` significa O. Estas cuatro no las usa el propio
 #                      research.sh: se añaden al array, la opción Y su
 #                      valor, para pasárselas más tarde a measure.py.
 #                      += ( ... ) añade elementos a un array.
+#                      (--cypher elige qué versión o versiones de Cypher
+#                      medir: paths, levels o both; ver
+#                      docs_spanish/traversal.py.)
+#   --new-starts)      un INTERRUPTOR: una opción SIN valor. Solo la
+#                      propia opción entra en el array, y `shift`
+#                      (= shift 1) descarta solo ese argumento. Le dice a
+#                      measure.py que vuelva a elegir los actores de
+#                      partida en lugar de reutilizar los de la última
+#                      medición de esa base de datos
+#                      (ver docs_spanish/measure.py, previous_starts).
 #   *)                 `*` coincide con cualquier otra cosa: una opción
 #                      desconocida. El mensaje va a la salida de ERRORES
 #                      (>&2: "envía esto al flujo 2", stderr) y exit 1 se
@@ -146,12 +164,14 @@ MEASURE_OPTIONS=()
 #
 # shift 2 — descarta los dos primeros argumentos ($1 y $2): lo que era $3
 # pasa a ser $1, y $# baja en 2. Así es como avanza el bucle, de dos en
-# dos (una opción y su valor).
+# dos (una opción y su valor) — o de uno en uno en el caso de un
+# interruptor.
 # ---------------------------------------------------------------------
 while [ $# -gt 0 ]; do
     case "$1" in
         --database) DATABASE="$2"; shift 2 ;;
-        --max-depth|--repeats|--timeout) MEASURE_OPTIONS+=("$1" "$2"); shift 2 ;;
+        --max-depth|--repeats|--timeout|--cypher) MEASURE_OPTIONS+=("$1" "$2"); shift 2 ;;
+        --new-starts) MEASURE_OPTIONS+=("$1"); shift ;;
         *) echo "Unknown option: $1 (see the top of research.sh)" >&2; exit 1 ;;
     esac
 done
@@ -250,7 +270,14 @@ if [ -z "$DATABASE" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# LOS TRES PASOS, cada uno a través de run.sh.
+# LA MEDICIÓN, a través de run.sh.
+#
+# measure.py se encarga de todo lo demás: elige (o reutiliza) los actores
+# de partida, mide el recorrido en los dos lados y escribe UN archivo CSV
+# para esta medición, results/<base de datos>_<fecha>_<hora>.csv (una
+# línea = una pregunta respondida por las dos bases de datos; las
+# columnas se explican en el README y en docs_spanish/measure.py). Un
+# análisis = un archivo, fácil de abrir y de entender por sí solo.
 #
 # "$DATABASE" va siempre entre comillas dobles: el valor se pasa como UN
 # solo argumento, tal cual. \" dentro de "..." imprime un carácter "
@@ -261,19 +288,11 @@ fi
 # array está vacío no se expande a nada, y measure.py usa sus propios
 # valores por defecto.
 #
-# Gracias a set -e, si el paso 1 falla, los pasos 2 y 3 no se ejecutan
+# Gracias a set -e, si measure.py falla, la línea "Done" no se muestra
 # nunca.
 # ---------------------------------------------------------------------
 echo ""
-echo "== 1. Choose the starting actors in \"$DATABASE\""
-./run.sh scripts/choose_starts.py --database "$DATABASE"
-
-echo ""
-echo "== 2. Measure the traversal in \"$DATABASE\""
+echo "== 1. Measure \"$DATABASE\""
 ./run.sh scripts/measure.py --database "$DATABASE" "${MEASURE_OPTIONS[@]}"
 
-echo ""
-echo "== 3. Analyse"
-./run.sh scripts/analyze.py --database "$DATABASE"
-
-echo "Done. Everything is in results/$DATABASE/"
+echo "Done. The results are in results/ (one CSV per measurement; its columns are explained in the README)."

@@ -5724,3 +5724,133 @@ first run is a good idea:
 > don't count; alternating order; the median; and every time saved with its
 > context. The scripts only apply those decisions in a way that can be
 > repeated.
+
+## First measurements, and a simpler way to record them
+
+> 📖 **Before reading this section**, read the annotated copies of [traversal.py](traversal.py), [choose_starts.py](choose_starts.py), [measure.py](measure.py), [research.sh](research.sh) and [test_research.py](test_research.py), in this order.
+
+The research scripts of the previous section were run for real for the first
+time, on two volumes of the same day (2026-10-08, from 09:00 UTC): **6 hours**
+and **24 hours**. The scripts worked from start to finish, and the answers of
+both databases matched on every line. But the results taught three things,
+and they changed both the query and the way results are recorded. (Since
+then `analyze.py` no longer exists: its pointer in the previous section
+refers to a script that was replaced by what's described here.)
+
+### What the first two volumes showed
+
+**6 hours** (121,501 actors, 132,050 repos, 135,944 connections): everything
+answered in milliseconds. The largest group of connected actors had only
+329 actors, so any traversal ran out of new actors after 2 or 3 hops. Neo4j
+had a fixed cost of about 7 ms per query (the driver and the session),
+PostgreSQL less than 1 ms. Neo4j only won from depth 4, by a few
+milliseconds. And the "median" group was useless: the typical actor shares
+a repo with **one** other person, so 8 of the 10 median actors never got
+past 1 actor reached.
+
+**24 hours**: the groups join and a traversal reaches about 2,680 actors.
+For the 10 top actors:
+
+| Depth | PostgreSQL | Neo4j | Faster |
+|---|---|---|---|
+| 1 | 1.7 ms | 9 ms | PostgreSQL |
+| 2 | 62 ms | 12 ms | **Neo4j, 5 times** |
+| 3 | 248 ms | 30 ms | **Neo4j, 8 times** |
+| 4 | 469 ms | 637 ms | PostgreSQL |
+| 5 | 0.7 s | 3.8 s | PostgreSQL |
+| 6 | 0.9 s | 9 of 10 didn't finish in 60 s | PostgreSQL |
+
+At depths 2 and 3 Neo4j is clearly faster: that's the advantage expected
+from a graph database. But from depth 4 it collapses, and that's **not** the
+volume of data. The proof came from a "median" actor who shares 27 repos with
+one single other person: the answer is always 2 actors, at every depth, yet
+Neo4j's time went from 0.007 s to 5.9 s, 800 times more, while PostgreSQL
+stayed at 0.003 s.
+
+### Why: paths versus levels
+
+The Cypher query was written as one pattern repeated 1 to N times. Neo4j
+answers it by following **every path**, and removes repeated actors only at
+the end. Two people who share 27 repos are joined by 27 paths; going there
+and back, 27 × 27; and so on: the paths multiply with depth even when the
+people don't. The SQL, in contrast, removes repeated actors **at every
+level** (`UNION`), so it never does more work than there are actors.
+
+So we were comparing two different **methods**, not only two databases. To
+be fair, a second Cypher version was written, `levels`, which works like the
+SQL: each step starts from the actors found in the step before (the
+"frontier") and keeps only actors never seen before. Both versions give
+exactly the same answer as the SQL; both are measured:
+
+- `paths` is the obvious way to write it in Cypher, and the one a new user
+  would write. Its result is a finding in itself: written naturally, a deep
+  traversal in Cypher can explode.
+- `levels` compares the same method in both databases.
+
+The difference between the two shows how much depends on the **database**
+and how much on **how the query is written**.
+
+### Four CSV files were too many
+
+Each measurement left `runs.csv`, `work.csv`, `per_actor.csv`,
+`summary.csv`, `conditions.json` and `starts.csv`, with technical column
+names (`blocks_from_memory`, `db_hits`, ...). Even for the person running the
+research they were hard to read. The decision: **one single CSV file per
+measurement** (`results/<database>_<date>_<time>.csv`), and the meaning of
+every column written in the README.
+
+- **One line = one question answered by both databases**: from this actor, at
+  this depth, with this volume. PostgreSQL's and Neo4j's figures are on the
+  same line, side by side, so they're compared by reading across.
+- **Each line has three parts**: first the test (the data, its date and
+  hours, the number of actors, repos and connections, and the question),
+  then **a PostgreSQL block and a Neo4j block with exactly the same
+  columns** (`pg_time_s` / `neo4j_time_s`, `pg_cpu_s` / `neo4j_cpu_s`, ...),
+  and at the end who was faster. Each database can be read on its own, like
+  two tables side by side.
+- **Every measurement writes its own file**: one for 6 hours, one for 24
+  hours, one for 3 days... All of them have the same columns, so they can
+  be put together to compare the volumes.
+- Next to the results, each line carries what's **essential to understand
+  it**: the hours of data loaded and from when, the number of actors, repos
+  and connections, how many `JOIN`s the SQL makes and how many relationships
+  the Cypher follows (2 per hop in both).
+
+### The four things compared
+
+The user chose four things that make one database better than the other.
+Each became columns, for both databases:
+
+| What | Columns | How it's measured |
+|---|---|---|
+| **Data processed** | `..._data_processed_mb`, `..._data_from_disk_mb` | Both databases read data in pages of 8 KB. PostgreSQL's `EXPLAIN (BUFFERS)` and Neo4j's `PROFILE` say how many pages each query went through; pages × 8 KB = MB. As both use the same page size, the numbers are directly comparable |
+| **Time** | `..._time_s`, `..._first_run_s` | The median of 5 runs, and the first run apart |
+| **Space** | `..._memory_mb`, `pg_temp_disk_mb`, `..._database_mb` | The memory the query used (PostgreSQL 18 reports it for each step of its plan; Neo4j for the whole query), what PostgreSQL had to write to disk, and the size of each database on disk |
+| **Computing power** | `..._cpu_s`, `..._cores_used` | The CPU seconds used by the database **server** processes during each run, read from the operating system with `psutil` before and after. Divided by the time, it says how many cores worked at once |
+
+Two more ideas were kept from before: `answers_match` (a time comparison
+only means something if both answered the same) and `reliable` (a laptop in
+use can disturb a measurement).
+
+**Checked against the real database** (PostgreSQL, 24 hours, a top actor,
+depth 3): 1,437 MB of pages processed, 19 MB of them from disk, 0.4 MB of
+memory, and 0.20 CPU seconds for a query of 0.30 s. The Neo4j side couldn't
+be checked yet (Neo4j Desktop was closed): the next measurement will be its
+first real test.
+
+### Still open
+
+- **Bots that the filter doesn't see.** The top actor of the 24 hours is
+  `Copilot`, and the median group had `regro-cf-autotick-bot`, `svc-cli-bot`
+  and `osuny-bot`. The filter only recognises logins ending in `[bot]`.
+  Bots connect people who have nothing to do with each other, so they change
+  the shape of the graph. Fixing it means loading the databases again.
+- **The fixed cost of Neo4j** (about 7 ms per query, partly from opening a
+  session every time) still has to be looked at.
+- **The report** will get a chapter for these first results.
+
+> 🎯 **Key idea:** the first real results gave a partial answer (Neo4j is 5
+> to 8 times faster at depths 2 and 3 with 24 hours of data) and a warning:
+> the way a query is written can matter as much as the database. That's why
+> both Cypher versions are now measured, and why every measurement goes into
+> one file whose every column is explained.
