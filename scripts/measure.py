@@ -1,16 +1,16 @@
-"""Measure the traversal in PostgreSQL and Neo4j, and write the results to ONE CSV file.
+"""Measure the traversal in PostgreSQL and Neo4j, and write the results to ONE Excel file.
 
 Every measurement (every analysis) writes its own file,
-results/<database>_<date>_<time>.csv. One line of it = one question answered
-by both databases: "from this starting actor, at this depth, in this volume of
-data, how many actors are reached?". First the test, then PostgreSQL's figures
-and Neo4j's figures side by side, with the same columns. Every column is
-explained in the README ("What is measured, and why").
+results/<database>_<date>_<time>.xlsx (see results_workbook.py): the information
+about the analysis once, then two tables side by side, one for PostgreSQL and
+one for Neo4j, with the same columns. One line of the tables = one question:
+"from this starting actor, at this depth, how many actors are reached?". Every
+column is explained in the README ("What is measured, and why").
 
 For the database given, it:
 
     1. chooses the 20 starting actors (choose_starts.py), or reuses the ones
-       in the latest CSV of that database, so a repeated measurement
+       of the latest measurement of that database, so a repeated measurement
        starts from the same actors;
     2. for every actor and every depth from 1 to --max-depth:
        a. runs the traversal once on each side ("first run": it includes
@@ -18,8 +18,8 @@ For the database given, it:
        b. runs it --repeats more times, changing which side goes first each
           time, recording the time and the CPU used by each database server;
        c. runs it once more with EXPLAIN (ANALYZE, BUFFERS) / PROFILE, for the
-          data read and the memory used inside each database;
-    3. writes one line per actor, depth and Cypher version, and prints a summary.
+          data processed and the memory used inside each database;
+    3. saves the file after every actor, and prints a summary at the end.
 
 If a side runs out of time at some depth, the deeper depths are skipped for that
 side and actor (they can only be slower); their lines say so.
@@ -30,7 +30,7 @@ Usage:
 """
 
 import argparse
-import csv
+import platform
 import re
 import statistics
 import sys
@@ -40,26 +40,10 @@ from pathlib import Path
 import psutil
 
 import choose_starts
+import results_workbook
 import traversal
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
-
-# The columns of every results CSV, in order: first the test (which data, when, which question),
-# then two blocks with THE SAME columns, one for PostgreSQL ("pg_...") and one for Neo4j
-# ("neo4j_..."), and at the end the comparison. Their meaning is explained in the README.
-TEST_COLUMNS = [
-    "measured_at", "database", "data_from_utc", "data_to_utc", "volume_hours",
-    "graph_actors", "graph_repos", "graph_connections",
-    "start_group", "start_rank", "start_actor_id", "start_login", "start_reach_1_hop",
-    "depth", "cypher_version", "actors_reached", "answers_match", "runs", "timeout_s",
-]
-SIDE_COLUMNS = [
-    "joins_or_hops", "status", "time_s", "first_run_s", "data_processed_mb", "data_from_disk_mb",
-    "memory_mb", "temp_disk_mb", "database_mb", "cpu_s", "cores_used", "reliable",
-]
-COMPARISON_COLUMNS = ["faster", "times_faster"]
-COLUMNS = (TEST_COLUMNS + [f"pg_{c}" for c in SIDE_COLUMNS] + [f"neo4j_{c}" for c in SIDE_COLUMNS]
-           + COMPARISON_COLUMNS)
 
 BUSY_CPU = 80.0       # computer CPU above this (percent) during a run: not reliable
 NOISY_SPREAD = 3.0    # slowest run more than 3 times the fastest: not reliable
@@ -211,10 +195,12 @@ def compare(pg: dict, neo: dict, timeout: int) -> tuple[str, float | None]:
         return "neo4j", round(timeout / neo["time_s"], 2) if neo["time_s"] else None
     return "neither", None
 
-
-def measure_actor(actor: dict, context: dict, args, writer: csv.DictWriter) -> None:
+def measure_actor(actor: dict, context: dict, args) -> dict[str, list[dict]]:
+    # Returns, for every Cypher version, one line per depth: the actor, the depth, the
+    # answer, and the "postgresql" and "neo4j" figures.
     conn, driver, database = context["conn"], context["driver"], args.database
     all_sides = sides(args.cypher)
+    lines = {side.split("-", 1)[1]: [] for side in all_sides[1:]}
     stopped = {}   # side -> the status it gets at deeper depths
     for depth in range(1, args.max_depth + 1):
         active = [s for s in all_sides if s not in stopped]
@@ -248,79 +234,103 @@ def measure_actor(actor: dict, context: dict, args, writer: csv.DictWriter) -> N
             else:
                 summaries[side] = side_summary(None, [], {}, stopped[side])
 
-        # d. One line per Cypher version: the test, then PostgreSQL's block, then Neo4j's.
-        pg = {**summaries["postgresql"], "joins_or_hops": traversal.sql_joins(depth)}
+        # d. One line per Cypher version, with PostgreSQL's figures and that version's.
         for side in all_sides[1:]:
-            neo = {**summaries[side], "joins_or_hops": traversal.cypher_hops(depth)}
-            faster, times = compare(pg, neo, args.timeout)
-            line = {
-                **context["facts"],
-                "start_group": actor["group"], "start_rank": actor["rank"], "start_actor_id": actor["actor_id"],
-                "start_login": actor["login"], "start_reach_1_hop": actor["reached"],
-                "depth": depth, "cypher_version": side.split("-", 1)[1],
-                "actors_reached": next(iter(counts)) if len(counts) == 1 else "",
-                "answers_match": "yes" if len(counts) == 1 else ("no" if counts else "unknown"),
-                "runs": args.repeats, "timeout_s": args.timeout,
-                "faster": faster, "times_faster": times,
-            }
-            for prefix, figures in (("pg", pg), ("neo4j", neo)):
-                for key in SIDE_COLUMNS:
-                    if key != "database_mb":   # the database sizes are already in the facts
-                        line[f"{prefix}_{key}"] = figures.get(key, "")
-            writer.writerow(line)
+            lines[side.split("-", 1)[1]].append({
+                "group": actor["group"], "rank": actor["rank"], "login": actor["login"],
+                "actor_id": actor["actor_id"], "depth": depth,
+                "actors_reached": next(iter(counts)) if len(counts) == 1 else None,
+                "answers_match": len(counts) == 1,
+                "postgresql": {**summaries["postgresql"], "joins_or_hops": traversal.sql_joins(depth)},
+                "neo4j": {**summaries[side], "joins_or_hops": traversal.cypher_hops(depth)},
+            })
 
         if len(counts) > 1:
             print(f"ANSWERS DIFFER {sorted(counts)}; stopping this actor")
-            return
+            break
         shown = next(iter(counts)) if counts else "?"
         notes = ", ".join(f"{s} {first[s].status}" for s in active if first[s].status != "ok")
         print(f"{shown} actors reached" + (f" ({notes})" if notes else ""))
         if all(s in stopped for s in all_sides):
             break
+    return lines
 
 
-# ---------- starting actors, and the summary ----------
+# ---------- which depth Neo4j starts winning from ----------
+
+def neo4j_faster_from(lines: list[dict], group: str, timeout: int) -> str:
+    # The smallest depth from which Neo4j was faster for most actors of the group AND stays
+    # faster at every greater depth measured.
+    depths = sorted({line["depth"] for line in lines if line["group"] == group})
+    wins = {}
+    for depth in depths:
+        at_depth = [l for l in lines if l["group"] == group and l["depth"] == depth]
+        neo4j_wins = sum(compare(l["postgresql"], l["neo4j"], timeout)[0] == "neo4j" for l in at_depth)
+        wins[depth] = neo4j_wins > len(at_depth) / 2
+    for depth in depths:
+        if all(wins[d] for d in depths if d >= depth):
+            return f"depth {depth}"
+    return f"never (up to depth {depths[-1]})" if depths else "-"
+
+
+# ---------- the file, and the summary ----------
 
 def results_file(database: str, measured_at: datetime) -> Path:
     # One file per measurement, named after the database and the moment it started.
-    return RESULTS_DIR / f"{database}_{measured_at.strftime('%Y-%m-%d_%H-%M-%S')}.csv"
+    return RESULTS_DIR / f"{database}_{measured_at.strftime('%Y-%m-%d_%H-%M-%S')}.xlsx"
 
 
 def previous_starts(database: str) -> list[dict]:
-    # The actors used in the latest measurement of this database, in their order.
-    # (The date-time in the file names sorts in time order.)
-    earlier = sorted(RESULTS_DIR.glob(f"{database}_*.csv"))
-    if not earlier:
-        return []
-    seen, actors = set(), []
-    with open(earlier[-1], encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            if row.get("database") == database and row["start_actor_id"] not in seen:
-                seen.add(row["start_actor_id"])
-                actors.append({"group": row["start_group"], "rank": int(row["start_rank"]),
-                               "actor_id": int(row["start_actor_id"]), "login": row["start_login"],
-                               "reached": int(row["start_reach_1_hop"])})
-    return sorted(actors, key=lambda a: (a["group"] != "top", a["rank"]))
+    # The actors used in the latest measurement of this database (its "Starting actors"
+    # sheet). The date-time in the file names sorts in time order.
+    earlier = sorted(RESULTS_DIR.glob(f"{database}_*.xlsx"))
+    return results_workbook.read_starts(earlier[-1]) if earlier else []
 
 
-def print_summary(database: str, path: Path) -> None:
-    with open(path, encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+def information(facts: dict, version: str, args, starts: list[dict], lines: list[dict]) -> list[tuple]:
+    # What appears once, in the "Analysis information" part of each sheet.
+    match = all(line["answers_match"] for line in lines) if lines else None
+    return [
+        ("Database", facts["database"]),
+        ("Data from (UTC)", facts["data_from_utc"]),
+        ("Data to (UTC)", facts["data_to_utc"]),
+        ("Hours of data", facts["volume_hours"]),
+        ("Actors (Actor nodes / rows of actor)", facts["graph_actors"]),
+        ("Repos (Repo nodes / rows of repo)", facts["graph_repos"]),
+        ("Connections (relationships / rows of actor_repo)", facts["graph_connections"]),
+        ("PostgreSQL database size (MB)", facts["pg_database_mb"]),
+        ("Neo4j database size (MB)", facts["neo4j_database_mb"]),
+        ("Measured at", facts["measured_at"]),
+        ("Cypher version", version),
+        ("Starting actors", len(starts)),
+        ("Depths", f"1 to {args.max_depth}"),
+        ("Timed runs per query", args.repeats),
+        ("Time limit per run (s)", args.timeout),
+        ("All answers match", "-" if match is None else ("yes" if match else "NO")),
+        ("Neo4j faster from (top actors)", neo4j_faster_from(lines, "top", args.timeout)),
+        ("Neo4j faster from (median actors)", neo4j_faster_from(lines, "median", args.timeout)),
+        ("Computer", facts["computer"]),
+    ]
+
+
+def print_summary(database: str, sheets: dict[str, list[dict]], timeout: int) -> None:
     print(f'\nSummary of "{database}" (median over the actors that finished; t/o = timed out or skipped):')
     print(f"  {'group':<7} {'depth':>5}  {'cypher':<7} {'PostgreSQL':>11} {'Neo4j':>11}  faster (count of actors)")
-    keys = sorted({(r["start_group"], int(r["depth"]), r["cypher_version"]) for r in rows},
-                  key=lambda k: (k[0] != "top", k[1], k[2]))
-    for group, depth, version in keys:
-        lines = [r for r in rows if (r["start_group"], int(r["depth"]), r["cypher_version"]) == (group, depth, version)]
-        cells = []
-        for prefix in ("pg", "neo4j"):
-            times = [float(r[f"{prefix}_time_s"]) for r in lines if r[f"{prefix}_status"] == "finished"]
-            missing = len(lines) - len(times)
-            cell = f"{statistics.median(times) * 1000:,.1f} ms" if times else "-"
-            cells.append(cell + (f" +{missing}t/o" if missing else ""))
-        wins = {name: sum(r["faster"] == name for r in lines) for name in ("postgresql", "neo4j")}
-        print(f"  {group:<7} {depth:>5}  {version:<7} {cells[0]:>11} {cells[1]:>11}  "
-              f"PG {wins['postgresql']}, Neo4j {wins['neo4j']}")
+    for version, lines in sheets.items():
+        keys = sorted({(l["group"], l["depth"]) for l in lines}, key=lambda k: (k[0] != "top", k[1]))
+        for group, depth in keys:
+            at = [l for l in lines if (l["group"], l["depth"]) == (group, depth)]
+            cells = []
+            for system in ("postgresql", "neo4j"):
+                times = [l[system]["time_s"] for l in at if l[system]["status"] == "finished"]
+                missing = len(at) - len(times)
+                cell = f"{statistics.median(times) * 1000:,.1f} ms" if times else "-"
+                cells.append(cell + (f" +{missing}t/o" if missing else ""))
+            winners = [compare(l["postgresql"], l["neo4j"], timeout)[0] for l in at]
+            print(f"  {group:<7} {depth:>5}  {version:<7} {cells[0]:>11} {cells[1]:>11}  "
+                  f"PG {winners.count('postgresql')}, Neo4j {winners.count('neo4j')}")
+        for group in ("top", "median"):
+            print(f"  {version}: Neo4j faster from ({group} actors): {neo4j_faster_from(lines, group, timeout)}")
 
 
 def main() -> None:
@@ -339,14 +349,14 @@ def main() -> None:
 
     starts = [] if args.new_starts else previous_starts(args.database)
     if starts:
-        print(f"Reusing the {len(starts)} starting actors already measured for \"{args.database}\" (from their latest measurement).")
+        print(f"Reusing the {len(starts)} starting actors already measured for \"{args.database}\" "
+              "(from their latest measurement).")
     else:
         starts = choose_starts.choose_in_both(args.database)
         print(f"Both databases choose the same {len(starts)} actors.")
 
     data_from, data_to, hours = data_window(args.database)
     started = datetime.now()
-    measured_at = started.strftime("%Y-%m-%d %H:%M:%S")
     path = results_file(args.database, started)
     with traversal.connect_postgres(args.database) as conn, traversal.connect_neo4j() as driver:
         facts = graph_facts(conn, driver, args.database)
@@ -354,26 +364,30 @@ def main() -> None:
         for system, found in processes.items():
             if not found:
                 print(f"Note: no {system} server process found on this computer; its CPU columns stay empty.")
-        context = {"conn": conn, "driver": driver, "processes": processes,
-                   "facts": {"measured_at": measured_at, "database": args.database, "data_from_utc": data_from,
-                             "data_to_utc": data_to, "volume_hours": hours,
-                             **{k: round(v, 1) if isinstance(v, float) else v for k, v in facts.items()}}}
+        facts = {**{k: round(v, 1) if isinstance(v, float) else v for k, v in facts.items()},
+                 "database": args.database, "data_from_utc": data_from, "data_to_utc": data_to,
+                 "volume_hours": hours, "measured_at": started.strftime("%Y-%m-%d %H:%M:%S"),
+                 "computer": f"{platform.processor() or platform.machine()}, {psutil.cpu_count()} threads, "
+                             f"{psutil.virtual_memory().total / 1024 ** 3:.1f} GB RAM"}
+        context = {"conn": conn, "driver": driver, "processes": processes}
         print(f'\nMeasuring "{args.database}" ({facts["graph_actors"]:,} actors, {facts["graph_repos"]:,} repos, '
               f'{facts["graph_connections"]:,} connections): {len(starts)} starting actors, depths 1-{args.max_depth}, '
               f"{args.repeats} timed runs each, time limit {args.timeout} s, Cypher: {args.cypher}")
-
         print(f"Results: {path}")
-        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=COLUMNS)
-            writer.writeheader()
-            for number, actor in enumerate(starts, start=1):
-                print(f"[{number}/{len(starts)}] {actor['group']} #{actor['rank']}: {actor['login']} "
-                      f"(reaches {actor['reached']} in one hop)")
-                measure_actor(actor, context, args, writer)
-                f.flush()
 
-    print_summary(args.database, path)
+        # One sheet per Cypher version; "levels" (the same method as the SQL) comes first.
+        versions = sorted((side.split("-", 1)[1] for side in sides(args.cypher)[1:]), key=lambda v: v != "levels")
+        sheets = {version: [] for version in versions}
+        for number, actor in enumerate(starts, start=1):
+            print(f"[{number}/{len(starts)}] {actor['group']} #{actor['rank']}: {actor['login']} "
+                  f"(reaches {actor['reached']} in one hop)")
+            for version, lines in measure_actor(actor, context, args).items():
+                sheets[version] += lines
+            # Saved after every actor: a measurement that stops half-way keeps what it measured.
+            results_workbook.write_workbook(
+                path, {v: (information(facts, v, args, starts, lines), lines) for v, lines in sheets.items()}, starts)
+
+    print_summary(args.database, sheets, args.timeout)
     print(f"\nDone. The results of this measurement are in {path}")
 
 

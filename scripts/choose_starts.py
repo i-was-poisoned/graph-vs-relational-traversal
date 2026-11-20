@@ -14,9 +14,9 @@ Ties are broken by more repos, then by the smaller id, so the choice never
 changes. Both databases must give exactly the same 20 actors (with the same
 numbers); otherwise the measurement doesn't start.
 
-measure.py uses choose_in_both(). The chosen actors are saved as part of every
-line of the measurement's CSV in results/, so a measurement repeated another
-day reuses them.
+measure.py uses choose_in_both(). The chosen actors are saved in the
+"Starting actors" sheet of the measurement's Excel file in results/, so a
+measurement repeated another day reuses them.
 
 Usage (only to list the databases that can be measured; research.sh uses it):
     ./run.sh scripts/choose_starts.py --list-databases

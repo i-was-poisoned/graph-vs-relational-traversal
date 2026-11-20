@@ -148,30 +148,64 @@ def test_side_summary_flags_noisy_or_busy_runs():
     assert not calm["noisy"] and not calm["busy"]
 
 
-def test_results_columns_are_the_test_then_two_identical_blocks():
-    from measure import COLUMNS, SIDE_COLUMNS, TEST_COLUMNS
-    assert COLUMNS[:len(TEST_COLUMNS)] == TEST_COLUMNS
-    pg = [c[len("pg_"):] for c in COLUMNS if c.startswith("pg_")]
-    neo4j = [c[len("neo4j_"):] for c in COLUMNS if c.startswith("neo4j_")]
-    assert pg == neo4j == SIDE_COLUMNS
-    assert COLUMNS.index("neo4j_" + SIDE_COLUMNS[0]) == COLUMNS.index("pg_" + SIDE_COLUMNS[-1]) + 1
+def line(group, depth, pg_time, neo_time, actor_id=1):
+    def side(time_s):
+        return {"status": "finished", "time_s": time_s} if time_s else {"status": "timeout"}
+    return {"group": group, "rank": 1, "login": "x", "actor_id": actor_id, "depth": depth, "actors_reached": 5,
+            "answers_match": True, "postgresql": {**side(pg_time), "joins_or_hops": 2 * depth},
+            "neo4j": {**side(neo_time), "joins_or_hops": 2 * depth}}
+
+
+def test_neo4j_faster_from_needs_to_stay_faster():
+    from measure import neo4j_faster_from
+    # Neo4j wins at depth 2, loses at 3, wins from 4 on: the answer is depth 4.
+    lines = [line("top", 1, 0.1, 0.5), line("top", 2, 0.5, 0.1), line("top", 3, 0.1, 0.5),
+             line("top", 4, 0.9, 0.1), line("top", 5, None, 0.2)]
+    assert neo4j_faster_from(lines, "top", 60) == "depth 4"
+    assert neo4j_faster_from([line("top", 1, 0.1, 0.5)], "top", 60) == "never (up to depth 1)"
+
+
+def test_workbook_has_the_information_once_and_two_tables_side_by_side(tmp_path):
+    from openpyxl import load_workbook
+
+    import results_workbook as rw
+    path = tmp_path / "x.xlsx"
+    starts = [{"group": "top", "rank": 1, "actor_id": 7, "login": "ana", "reached": 3}]
+    information = [("Database", "gharchive-test"), ("Hours of data", 6)]
+    rw.write_workbook(path, {"levels": (information, [line("top", 1, 0.1, 0.2), line("top", 2, 0.3, 0.1)])}, starts)
+
+    sheet = load_workbook(path)["levels"]
+    where = rw.table_positions()
+    assert sheet.cell(1, 1).value == "Analysis information" and sheet.cell(2, 2).value == "gharchive-test"
+    assert sheet.cell(1, where["postgresql"]).value == "PostgreSQL" and sheet.cell(1, where["neo4j"]).value == "Neo4j"
+    # One empty column between the two tables, and the same headers in both (JOINs / Hops apart).
+    assert where["neo4j"] == where["postgresql"] + len(rw.TABLE_COLUMNS) + 1
+    assert sheet.cell(2, where["neo4j"] - 1).value is None
+    pg = [sheet.cell(2, where["postgresql"] + i).value for i in range(len(rw.TABLE_COLUMNS))]
+    neo = [sheet.cell(2, where["neo4j"] + i).value for i in range(len(rw.TABLE_COLUMNS))]
+    assert [h for h in pg if h != "JOINs"] == [h for h in neo if h != "Hops"]
+    # Headers strong blue; lines in light blues.
+    assert sheet.cell(2, where["postgresql"]).fill.fgColor.rgb.endswith(rw.STRONG_BLUE)
+    assert sheet.cell(3, where["postgresql"]).fill.fgColor.rgb.endswith(rw.LIGHT_BLUES[0])
+    # The same line of both tables is the same question; the figures are each database's own.
+    time_col = [name for name, _ in rw.TABLE_COLUMNS].index("Time (s)")
+    assert sheet.cell(4, where["postgresql"] + time_col).value == 0.3
+    assert sheet.cell(4, where["neo4j"] + time_col).value == 0.1
+    assert rw.read_starts(path) == starts
 
 
 def test_each_measurement_gets_its_own_file_and_reuses_the_latest_actors(tmp_path, monkeypatch):
-    import csv
     from datetime import datetime
 
     import measure
+    import results_workbook as rw
     monkeypatch.setattr(measure, "RESULTS_DIR", tmp_path)
     path = measure.results_file("gharchive-2026-10-08-9-24h", datetime(2026, 11, 19, 10, 30, 0))
-    assert path.name == "gharchive-2026-10-08-9-24h_2026-11-19_10-30-00.csv"
+    assert path.name == "gharchive-2026-10-08-9-24h_2026-11-19_10-30-00.xlsx"
     assert measure.previous_starts("gharchive-2026-10-08-9-24h") == []
 
     for name, actor_id in (("2026-11-18_09-00-00", 1), ("2026-11-19_10-30-00", 2)):
-        with open(tmp_path / f"gharchive-2026-10-08-9-24h_{name}.csv", "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=measure.COLUMNS)
-            writer.writeheader()
-            writer.writerow({"database": "gharchive-2026-10-08-9-24h", "start_group": "top", "start_rank": 1,
-                             "start_actor_id": actor_id, "start_login": "x", "start_reach_1_hop": 3})
+        starts = [{"group": "top", "rank": 1, "actor_id": actor_id, "login": "x", "reached": 3}]
+        rw.write_workbook(tmp_path / f"gharchive-2026-10-08-9-24h_{name}.xlsx", {}, starts)
     # The latest measurement wins.
     assert [a["actor_id"] for a in measure.previous_starts("gharchive-2026-10-08-9-24h")] == [2]

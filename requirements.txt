@@ -16,3 +16,6 @@ neo4j==6.4.1
 
 # Machine load (CPU and memory) while the measurements run, to spot noisy runs
 psutil==7.2.2
+
+# The results of every measurement, written as an Excel file with colours
+openpyxl==3.1.5

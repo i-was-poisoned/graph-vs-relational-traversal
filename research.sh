@@ -3,7 +3,7 @@
 #     0. check that both servers answer
 #     1. ask which database to measure (unless --database is given)
 #     2. measure.py: choose (or reuse) the starting actors, measure the traversal in
-#        PostgreSQL and Neo4j, and write the results to one CSV file in results/
+#        PostgreSQL and Neo4j, and write the results to one Excel file in results/
 #
 # Usage (from Git Bash, with PostgreSQL running and Neo4j Desktop open):
 #     ./research.sh                                     # asks which database to measure
@@ -54,4 +54,4 @@ echo ""
 echo "== 1. Measure \"$DATABASE\""
 ./run.sh scripts/measure.py --database "$DATABASE" "${MEASURE_OPTIONS[@]}"
 
-echo "Done. The results are in results/ (one CSV per measurement; its columns are explained in the README)."
+echo "Done. The results are in results/ (one Excel file per measurement; its columns are explained in the README)."
